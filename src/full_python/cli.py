@@ -4,8 +4,10 @@ import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
+import sys
 
 from full_python.data.databento import load_databento_ohlcv_bars
+from full_python.data.inventory import inspect_databento_ohlcv_folder
 from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
 from full_python.replay import ReplayEngine
@@ -98,7 +100,94 @@ def run_baseline(
     return report_path
 
 
+def run_databento_inventory(
+    *,
+    folder: str | Path,
+    output_dir: str | Path,
+    symbol_root: str = "NQ",
+    markdown: bool = False,
+) -> Path:
+    inventories = inspect_databento_ohlcv_folder(folder, symbol_root=symbol_root)
+    run_dir = Path(output_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "source_format": "databento-ohlcv",
+        "symbol_root": symbol_root,
+        "folder": str(Path(folder)),
+        "files": [inventory.to_dict() for inventory in inventories],
+    }
+    json_path = run_dir / "contract_inventory.json"
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if markdown:
+        markdown_path = run_dir / "contract_inventory.md"
+        markdown_path.write_text(_render_inventory_markdown(payload), encoding="utf-8")
+    return json_path
+
+
+def _render_inventory_markdown(payload: dict[str, object]) -> str:
+    lines = [
+        "# Databento Contract Inventory",
+        "",
+        f"Folder: `{payload['folder']}`",
+        "",
+        "| File | Symbol | Rows | Start UTC | End UTC |",
+        "| --- | --- | ---: | --- | --- |",
+    ]
+    for file_inventory in payload["files"]:
+        file_payload = file_inventory
+        assert isinstance(file_payload, dict)
+        file_name = Path(str(file_payload["path"])).name
+        symbols = file_payload["symbols"]
+        assert isinstance(symbols, dict)
+        if not symbols:
+            lines.append(f"| {file_name} |  | 0 |  |  |")
+        for symbol, symbol_payload in symbols.items():
+            assert isinstance(symbol_payload, dict)
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        file_name,
+                        str(symbol),
+                        str(symbol_payload["row_count"]),
+                        str(symbol_payload["start_timestamp_utc"]),
+                        str(symbol_payload["end_timestamp_utc"]),
+                    ]
+                )
+                + " |"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def run_inventory_databento_command(argv: list[str]) -> Path:
+    parser = argparse.ArgumentParser(description="Inventory Databento OHLCV files.")
+    parser.add_argument("--folder", required=True, help="Folder containing .ohlcv-1m.csv.zst files")
+    parser.add_argument("--output-dir", required=True, help="Directory for contract_inventory outputs")
+    parser.add_argument(
+        "--symbol-root",
+        default="NQ",
+        help="Symbol root to include in the inventory",
+    )
+    parser.add_argument(
+        "--markdown",
+        action="store_true",
+        help="Also write contract_inventory.md",
+    )
+    args = parser.parse_args(argv)
+    return run_databento_inventory(
+        folder=args.folder,
+        output_dir=args.output_dir,
+        symbol_root=args.symbol_root,
+        markdown=args.markdown,
+    )
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "inventory-databento":
+        inventory_path = run_inventory_databento_command(sys.argv[2:])
+        print(inventory_path)
+        return
+
     parser = argparse.ArgumentParser(description="Run the Full Python baseline replay.")
     parser.add_argument("--data", required=True, help="Input market-bar data file")
     parser.add_argument("--output-dir", required=True, help="Directory for report.json and events.jsonl")

@@ -57,3 +57,18 @@ The command writes:
 
 - `events.jsonl`
 - `report.json`
+
+## Databento Contract Inventory
+
+Before replaying or optimizing multi-month Databento data, inventory the raw folder:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli inventory-databento --folder path/to/NQ-data --output-dir runs/contract-inventory --markdown
+```
+
+This writes:
+
+- `contract_inventory.json`
+- `contract_inventory.md`, when `--markdown` is passed
+
+The inventory lists every matching symbol per file, including outright contracts and spread symbols whose `symbol` starts with the selected root. Use it before building replay inputs so contract selection, roll behavior, and spread exclusions are explicit instead of assumed.
