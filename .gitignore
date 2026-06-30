@@ -1,0 +1,10 @@
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+
+# Research outputs are reproducible artifacts unless explicitly promoted.
+runs/*
+!runs/.gitkeep
