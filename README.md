@@ -15,9 +15,13 @@ Build the canonical replay and event-ledger foundation:
 
 ## Current Components
 
+- `full_python.data`: CSV market-bar loading plus data manifests with content checksums, row counts, file sizes, column maps, and stable provenance hashes.
 - `full_python.events`: append-only event records, stable event IDs, JSONL persistence.
 - `full_python.models`: immutable domain records for market bars, signal decisions, order intents, risk vetoes, stop updates, and exits.
+- `full_python.strategy`: baseline momentum configuration and placeholder strategy surface for deterministic replay wiring.
 - `full_python.replay`: deterministic replay loop that feeds bars to a strategy and records resulting events in a fixed order.
+- `full_python.reporting`: survivability metrics scaffolding for baseline reports.
+- `full_python.cli`: baseline replay command that writes `events.jsonl` and `report.json`.
 
 ## Migration Rule
 
@@ -26,3 +30,22 @@ Port concepts, not clutter:
 - Port now: ATF, squeeze, S/R breakout, prove-it, wings, MFE/MAE tracking, deterministic replay.
 - Research later: regime classifier, mean reversion, dynamic windows, MNQ sizing.
 - Do not port by default: dead AER, old anti-martingale assumptions, breakeven stop clutter, unvalidated scratch exits.
+
+## Baseline Replay Command
+
+The first baseline command expects a CSV with:
+
+```text
+timestamp,symbol,open,high,low,close,volume
+```
+
+Run:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli --data path/to/bars.csv --output-dir runs/baseline-smoke
+```
+
+The command writes:
+
+- `events.jsonl`
+- `report.json`
