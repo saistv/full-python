@@ -38,7 +38,7 @@ timestamp,symbol,open,high,low,close,volume
 Run:
 
 ```bash
-python3 -m full_python.cli --data path/to/bars.csv --output-dir runs/baseline-smoke
+PYTHONPATH=src python3 -m full_python.cli --data path/to/bars.csv --output-dir runs/baseline-smoke
 ```
 
 The command writes:
