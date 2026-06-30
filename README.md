@@ -26,3 +26,22 @@ Port concepts, not clutter:
 - Port now: ATF, squeeze, S/R breakout, prove-it, wings, MFE/MAE tracking, deterministic replay.
 - Research later: regime classifier, mean reversion, dynamic windows, MNQ sizing.
 - Do not port by default: dead AER, old anti-martingale assumptions, breakeven stop clutter, unvalidated scratch exits.
+
+## Baseline Replay Command
+
+The first baseline command expects a CSV with:
+
+```text
+timestamp,symbol,open,high,low,close,volume
+```
+
+Run:
+
+```bash
+python3 -m full_python.cli --data path/to/bars.csv --output-dir runs/baseline-smoke
+```
+
+The command writes:
+
+- `events.jsonl`
+- `report.json`
