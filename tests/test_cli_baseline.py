@@ -106,6 +106,31 @@ def test_run_baseline_accepts_databento_ohlcv_zst(tmp_path: Path) -> None:
     }
 
 
+def test_run_baseline_can_select_databento_contract_symbol(tmp_path: Path) -> None:
+    data_path = tmp_path / "tiny.ohlcv-1m.csv.zst"
+    compressor = zstandard.ZstdCompressor()
+    data_path.write_bytes(
+        compressor.compress(
+            (
+                "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume,symbol\n"
+                "2026-06-30T13:30:00.000000000Z,33,1,1,100,101,99,100.5,10,NQU2026\n"
+                "2026-06-30T13:30:00.000000000Z,33,1,2,200,201,199,200.5,10,NQZ2026\n"
+            ).encode("utf-8")
+        )
+    )
+
+    report_path = run_baseline(
+        data_path=data_path,
+        output_dir=tmp_path / "contract-run",
+        source_format="databento-ohlcv",
+        contract_symbol="NQZ2026",
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["data"]["contract"] == "NQZ2026"
+    assert report["data"]["row_count"] == 1
+
+
 def test_cli_module_entrypoint_writes_outputs(tmp_path: Path) -> None:
     data_path = tmp_path / "bars.csv"
     data_path.write_text(

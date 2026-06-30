@@ -23,6 +23,7 @@ REQUIRED_OHLCV_COLUMNS = {
 def load_databento_ohlcv_bars(
     path: str | Path,
     symbol_root: str = "NQ",
+    contract_symbol: str | None = None,
     include_spreads: bool = False,
 ) -> list[MarketBar]:
     input_path = Path(path)
@@ -35,6 +36,8 @@ def load_databento_ohlcv_bars(
             _validate_columns(reader.fieldnames)
             for row in reader:
                 symbol = row["symbol"]
+                if contract_symbol is not None and symbol != contract_symbol:
+                    continue
                 if not symbol.startswith(symbol_root):
                     continue
                 if not include_spreads and "-" in symbol:
@@ -50,6 +53,12 @@ def load_databento_ohlcv_bars(
                         volume=float(row["volume"]),
                     )
                 )
+    symbols = sorted({bar.symbol for bar in bars})
+    if contract_symbol is None and not include_spreads and len(symbols) > 1:
+        raise ValueError(
+            "Loaded multiple Databento symbols; pass contract_symbol to choose one: "
+            + ", ".join(symbols)
+        )
     return sorted(bars, key=lambda bar: (bar.timestamp_utc, bar.symbol))
 
 

@@ -50,6 +50,36 @@ def test_load_databento_ohlcv_bars_can_include_matching_spreads(tmp_path: Path) 
     assert [bar.symbol for bar in bars] == ["NQU2026", "NQU2026-NQZ2026"]
 
 
+def test_load_databento_ohlcv_bars_requires_contract_when_multiple_outrights_match(
+    tmp_path: Path,
+) -> None:
+    data_path = tmp_path / "multi-contract.ohlcv-1m.csv.zst"
+    write_zst_csv(
+        data_path,
+        "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume,symbol\n"
+        "2026-06-30T13:30:00.000000000Z,33,1,1,100,101,99,100.5,10,NQU2026\n"
+        "2026-06-30T13:30:00.000000000Z,33,1,2,200,201,199,200.5,10,NQZ2026\n",
+    )
+
+    with pytest.raises(ValueError, match="multiple Databento symbols"):
+        load_databento_ohlcv_bars(data_path)
+
+
+def test_load_databento_ohlcv_bars_can_filter_exact_contract(tmp_path: Path) -> None:
+    data_path = tmp_path / "multi-contract.ohlcv-1m.csv.zst"
+    write_zst_csv(
+        data_path,
+        "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume,symbol\n"
+        "2026-06-30T13:30:00.000000000Z,33,1,1,100,101,99,100.5,10,NQU2026\n"
+        "2026-06-30T13:30:00.000000000Z,33,1,2,200,201,199,200.5,10,NQZ2026\n",
+    )
+
+    bars = load_databento_ohlcv_bars(data_path, contract_symbol="NQZ2026")
+
+    assert [bar.symbol for bar in bars] == ["NQZ2026"]
+    assert bars[0].close == 200.5
+
+
 def test_load_databento_ohlcv_bars_names_missing_required_columns(tmp_path: Path) -> None:
     data_path = tmp_path / "missing.ohlcv-1m.csv.zst"
     write_zst_csv(

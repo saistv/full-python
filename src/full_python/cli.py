@@ -20,6 +20,7 @@ def run_baseline(
     output_dir: str | Path,
     source_format: str = "csv",
     symbol_root: str = "NQ",
+    contract_symbol: str | None = None,
     include_spreads: bool = False,
 ) -> Path:
     input_path = Path(data_path)
@@ -41,6 +42,7 @@ def run_baseline(
         bars = load_databento_ohlcv_bars(
             input_path,
             symbol_root=symbol_root,
+            contract_symbol=contract_symbol,
             include_spreads=include_spreads,
         )
         manifest_column_map = {
@@ -112,6 +114,11 @@ def main() -> None:
         help="Symbol root to include for Databento OHLCV input",
     )
     parser.add_argument(
+        "--contract-symbol",
+        default=None,
+        help="Exact Databento contract symbol to load, such as NQH5 or NQU2026",
+    )
+    parser.add_argument(
         "--include-spreads",
         action="store_true",
         help="Include Databento spread symbols containing '-'",
@@ -122,6 +129,7 @@ def main() -> None:
         output_dir=args.output_dir,
         source_format=args.source_format,
         symbol_root=args.symbol_root,
+        contract_symbol=args.contract_symbol,
         include_spreads=args.include_spreads,
     )
     print(report_path)

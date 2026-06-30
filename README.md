@@ -48,10 +48,10 @@ PYTHONPATH=src python3 -m full_python.cli --data path/to/bars.csv --output-dir r
 Run one Databento OHLCV 1-minute `.csv.zst` file:
 
 ```bash
-PYTHONPATH=src python3 -m full_python.cli --source-format databento-ohlcv --data path/to/NQ.ohlcv-1m.csv.zst --output-dir runs/databento-baseline
+PYTHONPATH=src python3 -m full_python.cli --source-format databento-ohlcv --contract-symbol NQH5 --data path/to/NQ.ohlcv-1m.csv.zst --output-dir runs/databento-baseline
 ```
 
-Databento loading keeps rows whose `symbol` starts with `NQ` by default and excludes spread symbols containing `-`. Use `--symbol-root` to choose another root and `--include-spreads` to keep spreads.
+Databento files can contain multiple outright contracts for the same product. If more than one matching contract is present, pass `--contract-symbol` so a replay cannot silently mix contract months. Databento loading keeps rows whose `symbol` starts with `NQ` by default and excludes spread symbols containing `-`. Use `--symbol-root` to choose another root and `--include-spreads` to inspect spreads.
 
 The command writes:
 
