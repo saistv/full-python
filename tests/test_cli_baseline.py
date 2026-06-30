@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import zstandard
+
 from full_python.cli import run_baseline
 
 
@@ -62,6 +64,46 @@ def test_run_baseline_manifest_hash_changes_when_csv_contents_change(tmp_path: P
 
     assert first_report["data"]["content_sha256"] != second_report["data"]["content_sha256"]
     assert first_report["data"]["manifest_hash"] != second_report["data"]["manifest_hash"]
+
+
+def test_run_baseline_accepts_databento_ohlcv_zst(tmp_path: Path) -> None:
+    data_path = tmp_path / "tiny.ohlcv-1m.csv.zst"
+    compressor = zstandard.ZstdCompressor()
+    data_path.write_bytes(
+        compressor.compress(
+            (
+                "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume,symbol\n"
+                "2026-06-30T13:30:00.000000000Z,33,1,1,100,101,99,100,10,NQU2026\n"
+                "2026-06-30T13:31:00.000000000Z,33,1,2,100,102,99,101,10,NQU2026\n"
+                "2026-06-30T13:32:00.000000000Z,33,1,3,101,103,100,102.5,10,NQU2026\n"
+                "2026-06-30T13:33:00.000000000Z,33,1,4,200,201,199,200.5,10,ESU2026\n"
+                "2026-06-30T13:34:00.000000000Z,33,1,5,10,11,9,10.5,10,NQU2026-NQZ2026\n"
+            ).encode("utf-8")
+        )
+    )
+    output_dir = tmp_path / "databento-run"
+
+    report_path = run_baseline(
+        data_path=data_path,
+        output_dir=output_dir,
+        source_format="databento-ohlcv",
+    )
+
+    events_path = output_dir / "events.jsonl"
+    assert events_path.exists()
+    assert events_path.read_text(encoding="utf-8").splitlines()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["data"]["source"] == "databento-ohlcv"
+    assert report["data"]["row_count"] == 3
+    assert report["data"]["column_map"] == {
+        "timestamp": "ts_event",
+        "symbol": "symbol",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "volume": "volume",
+    }
 
 
 def test_cli_module_entrypoint_writes_outputs(tmp_path: Path) -> None:

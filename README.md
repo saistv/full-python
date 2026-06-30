@@ -33,17 +33,25 @@ Port concepts, not clutter:
 
 ## Baseline Replay Command
 
-The first baseline command expects a CSV with:
+The baseline command supports a simple CSV with:
 
 ```text
 timestamp,symbol,open,high,low,close,volume
 ```
 
-Run:
+Run the simple CSV path:
 
 ```bash
 PYTHONPATH=src python3 -m full_python.cli --data path/to/bars.csv --output-dir runs/baseline-smoke
 ```
+
+Run one Databento OHLCV 1-minute `.csv.zst` file:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli --source-format databento-ohlcv --data path/to/NQ.ohlcv-1m.csv.zst --output-dir runs/databento-baseline
+```
+
+Databento loading keeps rows whose `symbol` starts with `NQ` by default and excludes spread symbols containing `-`. Use `--symbol-root` to choose another root and `--include-spreads` to keep spreads.
 
 The command writes:
 
