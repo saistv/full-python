@@ -15,9 +15,13 @@ Build the canonical replay and event-ledger foundation:
 
 ## Current Components
 
+- `full_python.data`: CSV market-bar loading plus data manifests with content checksums, row counts, file sizes, column maps, and stable provenance hashes.
 - `full_python.events`: append-only event records, stable event IDs, JSONL persistence.
 - `full_python.models`: immutable domain records for market bars, signal decisions, order intents, risk vetoes, stop updates, and exits.
+- `full_python.strategy`: baseline momentum configuration and placeholder strategy surface for deterministic replay wiring.
 - `full_python.replay`: deterministic replay loop that feeds bars to a strategy and records resulting events in a fixed order.
+- `full_python.reporting`: survivability metrics scaffolding for baseline reports.
+- `full_python.cli`: baseline replay command that writes `events.jsonl` and `report.json`.
 
 ## Migration Rule
 

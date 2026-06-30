@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 from pathlib import Path
 
 from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
-from full_python.data.manifest import DataManifest
+from full_python.data.manifest import DataManifest, file_sha256
 from full_python.replay import ReplayEngine
 from full_python.reporting.survivability import build_survivability_report
 from full_python.strategy.baseline import BaselineMomentumStrategy
@@ -39,6 +40,10 @@ def run_baseline(*, data_path: str | Path, output_dir: str | Path) -> Path:
         start_timestamp_utc=bars[0].timestamp_utc,
         end_timestamp_utc=bars[-1].timestamp_utc,
         path=str(input_path),
+        content_sha256=file_sha256(input_path),
+        row_count=len(bars),
+        file_size_bytes=input_path.stat().st_size,
+        column_map=asdict(column_map),
     )
     config = BaselineMomentumConfig()
     strategy = BaselineMomentumStrategy(config)

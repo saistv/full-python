@@ -28,8 +28,40 @@ def test_run_baseline_writes_event_log_and_report(tmp_path: Path) -> None:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["strategy"]["name"] == "baseline_momentum_breakout"
     assert report["data"]["path"] == str(data_path)
+    assert len(report["data"]["content_sha256"]) == 64
+    assert report["data"]["row_count"] == 3
+    assert report["data"]["file_size_bytes"] == data_path.stat().st_size
+    assert report["data"]["column_map"]["timestamp"] == "timestamp"
     assert report["survivability"]["trade_count"] == 0
     assert len(report["strategy"]["parameter_hash"]) == 64
+
+
+def test_run_baseline_manifest_hash_changes_when_csv_contents_change(tmp_path: Path) -> None:
+    data_path = tmp_path / "bars.csv"
+    data_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100,102,99,101,10\n"
+        "2026-06-30T13:32:00Z,NQU2026,101,103,100,102.5,10\n",
+        encoding="utf-8",
+    )
+
+    first_report_path = run_baseline(data_path=data_path, output_dir=tmp_path / "first-run")
+    first_report = json.loads(first_report_path.read_text(encoding="utf-8"))
+
+    data_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100,105,99,104,10\n"
+        "2026-06-30T13:32:00Z,NQU2026,101,103,100,102.5,10\n",
+        encoding="utf-8",
+    )
+
+    second_report_path = run_baseline(data_path=data_path, output_dir=tmp_path / "second-run")
+    second_report = json.loads(second_report_path.read_text(encoding="utf-8"))
+
+    assert first_report["data"]["content_sha256"] != second_report["data"]["content_sha256"]
+    assert first_report["data"]["manifest_hash"] != second_report["data"]["manifest_hash"]
 
 
 def test_cli_module_entrypoint_writes_outputs(tmp_path: Path) -> None:
