@@ -9,13 +9,14 @@ import sys
 from full_python.data.databento import load_databento_ohlcv_bars
 from full_python.data.contract_calendar import build_dominant_contract_calendar
 from full_python.data.inventory import inspect_databento_ohlcv_folder
-from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
+from full_python.data.loaders import CsvBarColumnMap, iter_csv_bars, load_csv_bars, profile_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
 from full_python.data.selected_stream import (
     build_selected_contract_stream,
     write_selected_contract_stream_csv,
     write_selected_contract_stream_manifest,
 )
+from full_python.events import StreamingEventLedger
 from full_python.replay import ReplayEngine
 from full_python.reporting.survivability import build_survivability_report
 from full_python.strategy.baseline import BaselineMomentumStrategy
@@ -30,6 +31,7 @@ def run_baseline(
     symbol_root: str = "NQ",
     contract_symbol: str | None = None,
     include_spreads: bool = False,
+    stream_events: bool = False,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -44,15 +46,25 @@ def run_baseline(
             close="close",
             volume="volume",
         )
-        bars = load_csv_bars(input_path, column_map)
+        if stream_events:
+            profile = profile_csv_bars(input_path, column_map)
+            bars = iter_csv_bars(input_path, column_map)
+        else:
+            loaded_bars = load_csv_bars(input_path, column_map)
+            profile = None
+            bars = loaded_bars
         manifest_column_map = asdict(column_map)
     elif source_format == "databento-ohlcv":
-        bars = load_databento_ohlcv_bars(
+        if stream_events:
+            raise ValueError("stream_events is currently supported only for csv input")
+        loaded_bars = load_databento_ohlcv_bars(
             input_path,
             symbol_root=symbol_root,
             contract_symbol=contract_symbol,
             include_spreads=include_spreads,
         )
+        profile = None
+        bars = loaded_bars
         manifest_column_map = {
             "timestamp": "ts_event",
             "symbol": "symbol",
@@ -64,29 +76,56 @@ def run_baseline(
         }
     else:
         raise ValueError(f"Unsupported source format: {source_format}")
-    if not bars:
+
+    if profile is not None:
+        if profile.row_count == 0:
+            raise ValueError(f"No bars loaded from {input_path}")
+        row_count = profile.row_count
+        start_timestamp_utc = profile.start_timestamp_utc
+        end_timestamp_utc = profile.end_timestamp_utc
+        contract = profile.symbols[0] if len(profile.symbols) == 1 else "MULTI"
+        replay_bars = bars
+    else:
+        bar_list = list(bars)
+        if not bar_list:
+            raise ValueError(f"No bars loaded from {input_path}")
+        row_count = len(bar_list)
+        start_timestamp_utc = bar_list[0].timestamp_utc
+        end_timestamp_utc = bar_list[-1].timestamp_utc
+        symbols = {bar.symbol for bar in bar_list}
+        contract = bar_list[0].symbol if len(symbols) == 1 else "MULTI"
+        replay_bars = bar_list
+
+    if row_count == 0:
         raise ValueError(f"No bars loaded from {input_path}")
 
     manifest = DataManifest(
         dataset_name=input_path.stem,
         source=source_format,
         symbol=symbol_root,
-        contract=bars[0].symbol,
+        contract=contract,
         timezone="UTC",
         session="UNKNOWN",
-        start_timestamp_utc=bars[0].timestamp_utc,
-        end_timestamp_utc=bars[-1].timestamp_utc,
+        start_timestamp_utc=start_timestamp_utc,
+        end_timestamp_utc=end_timestamp_utc,
         path=str(input_path),
         content_sha256=file_sha256(input_path),
-        row_count=len(bars),
+        row_count=row_count,
         file_size_bytes=input_path.stat().st_size,
         column_map=manifest_column_map,
     )
     config = BaselineMomentumConfig()
     strategy = BaselineMomentumStrategy(config)
-    ledger = ReplayEngine().run(bars, strategy)
     events_path = run_dir / "events.jsonl"
-    ledger.write_jsonl(events_path)
+    if stream_events:
+        ledger = StreamingEventLedger(events_path)
+        try:
+            ReplayEngine().run(replay_bars, strategy, ledger=ledger)
+        finally:
+            ledger.close()
+    else:
+        ledger = ReplayEngine().run(replay_bars, strategy)
+        ledger.write_jsonl(events_path)
 
     survivability = build_survivability_report([])
     report = {
@@ -99,6 +138,7 @@ def run_baseline(
             "parameter_hash": config.parameter_hash(),
         },
         "events_path": str(events_path),
+        "event_count": ledger.event_count,
         "survivability": survivability.to_dict(),
     }
     report_path = run_dir / "report.json"
@@ -339,6 +379,11 @@ def main() -> None:
         action="store_true",
         help="Include Databento spread symbols containing '-'",
     )
+    parser.add_argument(
+        "--stream-events",
+        action="store_true",
+        help="Write events incrementally instead of storing the full event ledger in memory",
+    )
     args = parser.parse_args()
     report_path = run_baseline(
         data_path=args.data,
@@ -347,6 +392,7 @@ def main() -> None:
         symbol_root=args.symbol_root,
         contract_symbol=args.contract_symbol,
         include_spreads=args.include_spreads,
+        stream_events=args.stream_events,
     )
     print(report_path)
 

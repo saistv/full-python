@@ -131,6 +131,29 @@ def test_run_baseline_can_select_databento_contract_symbol(tmp_path: Path) -> No
     assert report["data"]["row_count"] == 1
 
 
+def test_run_baseline_can_stream_events_without_in_memory_ledger(tmp_path: Path) -> None:
+    data_path = tmp_path / "bars.csv"
+    data_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100,102,99,101,10\n"
+        "2026-06-30T13:32:00Z,NQU2026,101,103,100,102.5,10\n",
+        encoding="utf-8",
+    )
+
+    report_path = run_baseline(
+        data_path=data_path,
+        output_dir=tmp_path / "stream-run",
+        stream_events=True,
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    events_path = tmp_path / "stream-run" / "events.jsonl"
+    assert events_path.exists()
+    assert report["event_count"] == len(events_path.read_text(encoding="utf-8").splitlines())
+    assert report["data"]["row_count"] == 3
+
+
 def test_cli_module_entrypoint_writes_outputs(tmp_path: Path) -> None:
     data_path = tmp_path / "bars.csv"
     data_path.write_text(

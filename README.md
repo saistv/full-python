@@ -45,6 +45,12 @@ Run the simple CSV path:
 PYTHONPATH=src python3 -m full_python.cli --data path/to/bars.csv --output-dir runs/baseline-smoke
 ```
 
+For large CSV inputs, stream events directly to JSONL instead of storing the full event ledger in memory:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli --data path/to/selected_bars.csv --output-dir runs/baseline-selected --stream-events
+```
+
 Run one Databento OHLCV 1-minute `.csv.zst` file:
 
 ```bash
