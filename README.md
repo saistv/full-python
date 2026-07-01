@@ -87,3 +87,30 @@ This writes:
 - `contract_calendar.md`, when `--markdown` is passed
 
 The first calendar rule is `dominant_outright_row_count`: ignore spread symbols, then choose the outright contract with the most rows in each daily file. This is an auditable starting point for replay input selection, not the final roll methodology or a back-adjusted continuous contract.
+
+## Selected Contract Stream
+
+Build a replay-ready CSV from the dominant contract calendar:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli build-selected-stream --folder path/to/NQ-data --output-dir runs/selected-stream
+```
+
+This writes:
+
+- `selected_bars.csv`
+- `selected_bars_manifest.json`
+
+The CSV keeps the canonical replay columns first:
+
+```text
+timestamp,symbol,open,high,low,close,volume
+```
+
+It also preserves provenance columns:
+
+```text
+source_file,trading_date,selected_contract,selection_rule
+```
+
+Current replay can load this CSV through the simple CSV path while ignoring the provenance columns. Research code should keep the manifest beside the CSV so the roll/selection assumptions stay attached to every run.

@@ -11,6 +11,11 @@ from full_python.data.contract_calendar import build_dominant_contract_calendar
 from full_python.data.inventory import inspect_databento_ohlcv_folder
 from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
+from full_python.data.selected_stream import (
+    build_selected_contract_stream,
+    write_selected_contract_stream_csv,
+    write_selected_contract_stream_manifest,
+)
 from full_python.replay import ReplayEngine
 from full_python.reporting.survivability import build_survivability_report
 from full_python.strategy.baseline import BaselineMomentumStrategy
@@ -149,6 +154,24 @@ def run_contract_calendar(
     return json_path
 
 
+def run_selected_stream(
+    *,
+    folder: str | Path,
+    output_dir: str | Path,
+    symbol_root: str = "NQ",
+) -> Path:
+    inventories = inspect_databento_ohlcv_folder(folder, symbol_root=symbol_root)
+    calendar = build_dominant_contract_calendar(inventories, symbol_root=symbol_root)
+    stream = build_selected_contract_stream(calendar)
+    run_dir = Path(output_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = run_dir / "selected_bars.csv"
+    manifest_path = run_dir / "selected_bars_manifest.json"
+    write_selected_contract_stream_csv(stream, csv_path)
+    write_selected_contract_stream_manifest(stream, manifest_path, calendar)
+    return csv_path
+
+
 def _render_inventory_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Databento Contract Inventory",
@@ -261,6 +284,23 @@ def run_build_contract_calendar_command(argv: list[str]) -> Path:
     )
 
 
+def run_build_selected_stream_command(argv: list[str]) -> Path:
+    parser = argparse.ArgumentParser(description="Build a selected-contract Databento bar stream.")
+    parser.add_argument("--folder", required=True, help="Folder containing .ohlcv-1m.csv.zst files")
+    parser.add_argument("--output-dir", required=True, help="Directory for selected stream outputs")
+    parser.add_argument(
+        "--symbol-root",
+        default="NQ",
+        help="Symbol root to include in the selected stream",
+    )
+    args = parser.parse_args(argv)
+    return run_selected_stream(
+        folder=args.folder,
+        output_dir=args.output_dir,
+        symbol_root=args.symbol_root,
+    )
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "inventory-databento":
         inventory_path = run_inventory_databento_command(sys.argv[2:])
@@ -269,6 +309,10 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "build-contract-calendar":
         calendar_path = run_build_contract_calendar_command(sys.argv[2:])
         print(calendar_path)
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "build-selected-stream":
+        csv_path = run_build_selected_stream_command(sys.argv[2:])
+        print(csv_path)
         return
 
     parser = argparse.ArgumentParser(description="Run the Full Python baseline replay.")
