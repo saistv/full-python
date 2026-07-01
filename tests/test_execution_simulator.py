@@ -1,4 +1,9 @@
-from full_python.execution.simulator import ExitConversionConfig, SimulationCosts, simulate_strategy_trades
+from full_python.execution.simulator import (
+    ExitConversionConfig,
+    ReentryControlConfig,
+    SimulationCosts,
+    simulate_strategy_trades,
+)
 from full_python.models import MarketBar, OrderIntent, SignalDecision, StrategyResult
 
 ZERO_COSTS = SimulationCosts(
@@ -87,6 +92,7 @@ def test_simulate_strategy_trades_force_exits_on_symbol_change() -> None:
     bars = [
         MarketBar("2026-06-30T13:30:00Z", "NQM2026", 99.0, 101.0, 98.0, 100.0, 10),
         MarketBar("2026-06-30T13:31:00Z", "NQU2026", 110.0, 112.0, 109.0, 111.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 111.0, 113.0, 110.0, 112.0, 12),
     ]
 
     ledger = simulate_strategy_trades(bars, EntryEveryBarStrategy(), costs=ZERO_COSTS)
@@ -97,6 +103,7 @@ def test_simulate_strategy_trades_force_exits_on_symbol_change() -> None:
     assert ledger.trades[0].exit_price == 110.0
     assert ledger.trades[0].exit_reason == "symbol_change"
     assert ledger.trades[1].symbol == "NQU2026"
+    assert ledger.trades[1].entry_timestamp_utc == "2026-06-30T13:32:00Z"
 
 
 def test_simulate_strategy_trades_tracks_long_mfe_and_mae() -> None:
@@ -181,6 +188,43 @@ def test_simulate_strategy_trades_does_not_apply_mfe_trail_on_activation_bar() -
     trade = ledger.trades[0]
     assert trade.exit_reason == "end_of_data"
     assert trade.trailing_stop_price == 126.0
+
+
+def test_simulate_strategy_trades_blocks_same_bar_reentry_after_exit() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 101.0, 89.0, 95.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 95.0, 99.0, 94.0, 98.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(bars, EntryEveryBarStrategy(), costs=ZERO_COSTS)
+
+    assert len(ledger.trades) == 2
+    assert ledger.trades[0].exit_timestamp_utc == "2026-06-30T13:31:00Z"
+    assert ledger.trades[0].exit_reason == "stop"
+    assert ledger.trades[1].entry_timestamp_utc == "2026-06-30T13:32:00Z"
+
+
+def test_simulate_strategy_trades_applies_cooldown_after_exit() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 101.0, 89.0, 95.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 95.0, 99.0, 94.0, 98.0, 12),
+        MarketBar("2026-06-30T13:33:00Z", "NQU2026", 98.0, 101.0, 97.0, 100.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        EntryEveryBarStrategy(),
+        costs=ZERO_COSTS,
+        reentry_control=ReentryControlConfig(cooldown_bars_after_exit=1),
+    )
+
+    assert len(ledger.trades) == 2
+    assert ledger.trades[0].exit_timestamp_utc == "2026-06-30T13:31:00Z"
+    assert ledger.trades[1].entry_timestamp_utc == "2026-06-30T13:33:00Z"
+    assert ledger.summary()["assumptions"]["reentry_control"] == "cooldown"
+    assert ledger.summary()["assumptions"]["cooldown_bars_after_exit"] == 1
 
 
 def test_trade_ledger_summary_counts_wins_losses_and_points() -> None:

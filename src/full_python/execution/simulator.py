@@ -63,6 +63,26 @@ class ExitConversionConfig:
 
 
 @dataclass(frozen=True)
+class ReentryControlConfig:
+    cooldown_bars_after_exit: int = 0
+
+    def __post_init__(self) -> None:
+        if self.cooldown_bars_after_exit < 0:
+            raise ValueError("cooldown_bars_after_exit must be non-negative")
+
+    def to_assumptions(self) -> dict[str, str | int]:
+        if self.cooldown_bars_after_exit == 0:
+            return {
+                "reentry_control": "same_bar_exit_block",
+                "cooldown_bars_after_exit": 0,
+            }
+        return {
+            "reentry_control": "cooldown",
+            "cooldown_bars_after_exit": self.cooldown_bars_after_exit,
+        }
+
+
+@dataclass(frozen=True)
 class TradeFill:
     trade_id: str
     symbol: str
@@ -153,17 +173,21 @@ def simulate_strategy_trades(
     costs: SimulationCosts | None = None,
     symbol_change_exit_mode: str = "next_open",
     exit_conversion: ExitConversionConfig | None = None,
+    reentry_control: ReentryControlConfig | None = None,
 ) -> TradeLedger:
     if symbol_change_exit_mode not in {"next_open", "previous_close"}:
         raise ValueError(f"Unsupported symbol_change_exit_mode: {symbol_change_exit_mode}")
     active_costs = SimulationCosts() if costs is None else costs
     active_exit_conversion = ExitConversionConfig() if exit_conversion is None else exit_conversion
+    active_reentry_control = ReentryControlConfig() if reentry_control is None else reentry_control
     trades: list[TradeFill] = []
     open_trade: _OpenTrade | None = None
     ignored_order_intents = 0
     last_bar: MarketBar | None = None
+    cooldown_bars_remaining = 0
 
     for bar in bars:
+        exited_this_bar = False
         if open_trade is not None and bar.symbol != open_trade.symbol:
             if symbol_change_exit_mode == "previous_close" and last_bar is not None:
                 trades.append(
@@ -172,6 +196,8 @@ def simulate_strategy_trades(
             else:
                 trades.append(_close_trade(open_trade, bar.timestamp_utc, bar.open, "symbol_change", active_costs))
             open_trade = None
+            exited_this_bar = True
+            cooldown_bars_remaining = active_reentry_control.cooldown_bars_after_exit
 
         if open_trade is not None and open_trade.trailing_stop_price is not None and bar.low <= open_trade.trailing_stop_price:
             trades.append(
@@ -184,10 +210,14 @@ def simulate_strategy_trades(
                 )
             )
             open_trade = None
+            exited_this_bar = True
+            cooldown_bars_remaining = active_reentry_control.cooldown_bars_after_exit
         elif open_trade is not None and open_trade.side == "long" and bar.low <= open_trade.stop_price:
             open_trade = _update_long_excursion(open_trade, bar)
             trades.append(_close_trade(open_trade, bar.timestamp_utc, open_trade.stop_price, "stop", active_costs))
             open_trade = None
+            exited_this_bar = True
+            cooldown_bars_remaining = active_reentry_control.cooldown_bars_after_exit
         elif open_trade is not None and open_trade.side == "long":
             open_trade = _update_long_excursion(open_trade, bar)
             open_trade = _update_mfe_trailing_stop(open_trade, active_exit_conversion)
@@ -197,10 +227,15 @@ def simulate_strategy_trades(
             if open_trade is not None:
                 ignored_order_intents += 1
                 continue
+            if exited_this_bar or cooldown_bars_remaining > 0:
+                ignored_order_intents += 1
+                continue
             if order_intent.side != "buy":
                 ignored_order_intents += 1
                 continue
             open_trade = _open_long_trade(order_intent, bar, len(trades) + 1, active_costs)
+        if open_trade is None and not exited_this_bar and cooldown_bars_remaining > 0:
+            cooldown_bars_remaining -= 1
         last_bar = bar
 
     if open_trade is not None and last_bar is not None:
@@ -215,6 +250,7 @@ def simulate_strategy_trades(
             "symbol_change_exit_mode": symbol_change_exit_mode,
             **active_costs.to_assumptions(),
             **active_exit_conversion.to_assumptions(),
+            **active_reentry_control.to_assumptions(),
         },
     )
 

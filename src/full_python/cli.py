@@ -20,6 +20,7 @@ from full_python.data.selected_stream import (
 from full_python.events import StreamingEventLedger
 from full_python.execution.simulator import (
     ExitConversionConfig,
+    ReentryControlConfig,
     SimulationCosts,
     simulate_strategy_trades,
     write_trade_summary_json,
@@ -237,6 +238,7 @@ def run_baseline_trade_simulation(
     symbol_change_exit_mode: str = "next_open",
     mfe_trailing_activation_points: float | None = None,
     mfe_trailing_giveback_points: float | None = None,
+    cooldown_bars_after_exit: int = 0,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -262,12 +264,16 @@ def run_baseline_trade_simulation(
         mfe_trailing_activation_points=mfe_trailing_activation_points,
         mfe_trailing_giveback_points=mfe_trailing_giveback_points,
     )
+    reentry_control = ReentryControlConfig(
+        cooldown_bars_after_exit=cooldown_bars_after_exit,
+    )
     ledger = simulate_strategy_trades(
         session_bars,
         strategy,
         costs=costs,
         symbol_change_exit_mode=symbol_change_exit_mode,
         exit_conversion=exit_conversion,
+        reentry_control=reentry_control,
     )
     ledger.assumptions["session"] = session
     trades_path = run_dir / "trades.csv"
@@ -471,6 +477,12 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         default=None,
         help="Trail by this many points after MFE trailing activation",
     )
+    parser.add_argument(
+        "--cooldown-bars-after-exit",
+        type=int,
+        default=0,
+        help="Block new entries for this many bars after any exit",
+    )
     args = parser.parse_args(argv)
     return run_baseline_trade_simulation(
         data_path=args.data,
@@ -483,6 +495,7 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         symbol_change_exit_mode=args.symbol_change_exit_mode,
         mfe_trailing_activation_points=args.mfe_trailing_activation_points,
         mfe_trailing_giveback_points=args.mfe_trailing_giveback_points,
+        cooldown_bars_after_exit=args.cooldown_bars_after_exit,
     )
 
 
