@@ -310,3 +310,52 @@ def test_cli_simulate_baseline_trades_accepts_fresh_breakout_reentry_gate(tmp_pa
         trades = list(csv.DictReader(handle))
     assert trades[0]["exit_reason"] == "stop"
     assert trades[1]["entry_timestamp_utc"] == "2026-06-30T13:36:00Z"
+
+
+def test_cli_simulate_baseline_trades_can_enable_short_side(tmp_path: Path) -> None:
+    data_path = tmp_path / "bars.csv"
+    data_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100,102,98,99,10\n"
+        "2026-06-30T13:32:00Z,NQU2026,99,100,96,97,10\n"
+        "2026-06-30T13:33:00Z,NQU2026,97,98,90,91,10\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "trade-run"
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "full_python.cli",
+            "simulate-baseline-trades",
+            "--data",
+            str(data_path),
+            "--output-dir",
+            str(output_dir),
+            "--stream-input",
+            "--point-value",
+            "1",
+            "--slippage-points-per-side",
+            "0",
+            "--commission-per-contract",
+            "0",
+            "--enable-short",
+        ],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    summary = json.loads((output_dir / "trade_summary.json").read_text(encoding="utf-8"))
+    assert summary["assumptions"]["enable_long"] is True
+    assert summary["assumptions"]["enable_short"] is True
+    with (output_dir / "trades.csv").open(encoding="utf-8", newline="") as handle:
+        trades = list(csv.DictReader(handle))
+    assert trades[0]["side"] == "short"

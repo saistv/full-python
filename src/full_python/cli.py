@@ -243,6 +243,8 @@ def run_baseline_trade_simulation(
     cooldown_bars_after_exit: int = 0,
     require_fresh_breakout_after_exit: bool = False,
     fresh_breakout_clearance_points: float = 0.0,
+    enable_long: bool = True,
+    enable_short: bool = False,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -258,7 +260,12 @@ def run_baseline_trade_simulation(
     )
     bars = iter_csv_bars(input_path, column_map) if stream_input else load_csv_bars(input_path, column_map)
     session_bars = filter_bars_by_session(bars, session)
-    strategy = BaselineMomentumStrategy(BaselineMomentumConfig())
+    strategy = BaselineMomentumStrategy(
+        BaselineMomentumConfig(
+            enable_long=enable_long,
+            enable_short=enable_short,
+        )
+    )
     costs = SimulationCosts(
         point_value=point_value,
         slippage_points_per_side=slippage_points_per_side,
@@ -282,6 +289,8 @@ def run_baseline_trade_simulation(
         reentry_control=reentry_control,
     )
     ledger.assumptions["session"] = session
+    ledger.assumptions["enable_long"] = enable_long
+    ledger.assumptions["enable_short"] = enable_short
     trades_path = run_dir / "trades.csv"
     summary_path = run_dir / "trade_summary.json"
     write_trades_csv(ledger, trades_path)
@@ -316,6 +325,8 @@ def run_exit_branch_sweep(
     mfe_givebacks: tuple[float, ...],
     fresh_breakout_clearances: tuple[float, ...],
     cooldowns: tuple[int, ...],
+    enable_long: bool = True,
+    enable_short: bool = False,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -341,6 +352,8 @@ def run_exit_branch_sweep(
             point_value=point_value,
             slippage_points_per_side=slippage_points_per_side,
             commission_per_contract=commission_per_contract,
+            enable_long=enable_long,
+            enable_short=enable_short,
         ),
     )
     sweep["assumptions"] = {
@@ -350,6 +363,8 @@ def run_exit_branch_sweep(
         "commission_per_contract": commission_per_contract,
         "symbol_change_exit_mode": "previous_close",
         "require_fresh_breakout_after_exit": True,
+        "enable_long": enable_long,
+        "enable_short": enable_short,
     }
     json_path = run_dir / "sweep_results.json"
     csv_path = run_dir / "sweep_results.csv"
@@ -578,6 +593,16 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         default=0.0,
         help="Extra points required above the post-exit high before re-entry",
     )
+    parser.add_argument(
+        "--disable-long",
+        action="store_true",
+        help="Disable long-side entries for this simulation",
+    )
+    parser.add_argument(
+        "--enable-short",
+        action="store_true",
+        help="Enable short-side entries for this simulation",
+    )
     args = parser.parse_args(argv)
     return run_baseline_trade_simulation(
         data_path=args.data,
@@ -593,6 +618,8 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         cooldown_bars_after_exit=args.cooldown_bars_after_exit,
         require_fresh_breakout_after_exit=args.require_fresh_breakout_after_exit,
         fresh_breakout_clearance_points=args.fresh_breakout_clearance_points,
+        enable_long=not args.disable_long,
+        enable_short=args.enable_short,
     )
 
 
@@ -633,6 +660,8 @@ def run_sweep_exit_branch_command(argv: list[str]) -> Path:
         help="Comma-separated fresh breakout clearance points, e.g. 0,0.5,1",
     )
     parser.add_argument("--cooldowns", required=True, help="Comma-separated cooldown bars, e.g. 0,3,5")
+    parser.add_argument("--disable-long", action="store_true", help="Disable long-side entries for this sweep")
+    parser.add_argument("--enable-short", action="store_true", help="Enable short-side entries for this sweep")
     args = parser.parse_args(argv)
     return run_exit_branch_sweep(
         data_path=args.data,
@@ -646,6 +675,8 @@ def run_sweep_exit_branch_command(argv: list[str]) -> Path:
         mfe_givebacks=_parse_float_list(args.mfe_givebacks),
         fresh_breakout_clearances=_parse_float_list(args.fresh_breakout_clearances),
         cooldowns=_parse_int_list(args.cooldowns),
+        enable_long=not args.disable_long,
+        enable_short=args.enable_short,
     )
 
 

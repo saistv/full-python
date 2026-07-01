@@ -134,7 +134,7 @@ This writes:
 - `trades.csv`
 - `trade_summary.json`
 
-Current assumptions are deliberately simple: one long position at a time, entry at current bar close, stop exit when a later bar low touches the stop, and end-of-data exit at final close. Use `--session rth` for full regular trading hours based on New York time. Cost assumptions are explicit through point value, slippage points per side, and commission per contract per side.
+Current assumptions are deliberately simple: one open position at a time, entry at current bar close, stop exit when a later bar touches the stop, and end-of-data exit at final close. Long entries are enabled by default. Short entries are opt-in with `--enable-short`, and long entries can be disabled with `--disable-long` for short-only diagnostics. Use `--session rth` for full regular trading hours based on New York time. Cost assumptions are explicit through point value, slippage points per side, and commission per contract per side.
 
 Use `--symbol-change-exit-mode previous_close` for research runs that should avoid importing new-contract roll gaps into open-trade P&L. The legacy-compatible mode is `next_open`, which exits at the new contract bar open. Trade ledgers include `max_favorable_excursion_points` and `max_adverse_excursion_points` for every trade.
 
@@ -146,7 +146,7 @@ PYTHONPATH=src python3 -m full_python.cli simulate-baseline-trades --data path/t
 
 The MFE trailing rule activates only after a completed bar has reached the configured favorable excursion. The resulting trailing stop can exit on later bars with `exit_reason=mfe_trailing_stop`; it does not assume same-bar high/low ordering.
 
-Re-entry control blocks same-bar re-entry after every exit. Use `--cooldown-bars-after-exit` to also block the next N bars after an exit. Use `--require-fresh-breakout-after-exit` to block new entries until price closes above the highest high formed after the previous exit; `--fresh-breakout-clearance-points` adds extra required clearance. This is research instrumentation for churn control, not a signal-edge claim by itself.
+Re-entry control blocks same-bar re-entry after every exit. Use `--cooldown-bars-after-exit` to also block the next N bars after an exit. Use `--require-fresh-breakout-after-exit` to block long entries until price closes above the highest high formed after the previous exit and short entries until price closes below the lowest low formed after the previous exit; `--fresh-breakout-clearance-points` adds extra required clearance. This is research instrumentation for churn control, not a signal-edge claim by itself.
 
 Sweep the current exit-conversion branch:
 

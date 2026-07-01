@@ -38,6 +38,31 @@ class EntryThenStopStrategy:
         return StrategyResult()
 
 
+class ShortEntryThenStopStrategy:
+    def on_bar(self, bar: MarketBar) -> StrategyResult:
+        if bar.timestamp_utc == "2026-06-30T13:30:00Z":
+            return StrategyResult(
+                signal=SignalDecision.accepted(
+                    timestamp_utc=bar.timestamp_utc,
+                    symbol=bar.symbol,
+                    side="short",
+                    reason="test_entry",
+                    metadata={"stop_price": 105.0},
+                ),
+                order_intents=(
+                    OrderIntent.market_entry(
+                        timestamp_utc=bar.timestamp_utc,
+                        symbol=bar.symbol,
+                        side="sell",
+                        quantity=1,
+                        reason="test_entry",
+                        metadata={"stop_price": 105.0},
+                    ),
+                ),
+            )
+        return StrategyResult()
+
+
 class EntryEveryBarStrategy:
     def on_bar(self, bar: MarketBar) -> StrategyResult:
         return StrategyResult(
@@ -49,6 +74,22 @@ class EntryEveryBarStrategy:
                     quantity=1,
                     reason="test_entry",
                     metadata={"stop_price": 90.0},
+                ),
+            )
+        )
+
+
+class ShortEntryEveryBarStrategy:
+    def on_bar(self, bar: MarketBar) -> StrategyResult:
+        return StrategyResult(
+            order_intents=(
+                OrderIntent.market_entry(
+                    timestamp_utc=bar.timestamp_utc,
+                    symbol=bar.symbol,
+                    side="sell",
+                    quantity=1,
+                    reason="test_entry",
+                    metadata={"stop_price": 110.0},
                 ),
             )
         )
@@ -68,6 +109,25 @@ def test_simulate_strategy_trades_exits_long_when_stop_touched() -> None:
     assert trade.exit_timestamp_utc == "2026-06-30T13:31:00Z"
     assert trade.entry_price == 100.0
     assert trade.exit_price == 95.0
+    assert trade.exit_reason == "stop"
+    assert trade.pnl_points == -5.0
+
+
+def test_simulate_strategy_trades_exits_short_when_stop_touched() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 101.0, 102.0, 99.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 105.25, 98.0, 104.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(bars, ShortEntryThenStopStrategy(), costs=ZERO_COSTS)
+
+    assert len(ledger.trades) == 1
+    trade = ledger.trades[0]
+    assert trade.side == "short"
+    assert trade.entry_timestamp_utc == "2026-06-30T13:30:00Z"
+    assert trade.exit_timestamp_utc == "2026-06-30T13:31:00Z"
+    assert trade.entry_price == 100.0
+    assert trade.exit_price == 105.0
     assert trade.exit_reason == "stop"
     assert trade.pnl_points == -5.0
 
@@ -114,6 +174,20 @@ def test_simulate_strategy_trades_tracks_long_mfe_and_mae() -> None:
     ]
 
     ledger = simulate_strategy_trades(bars, EntryThenStopStrategy(), costs=ZERO_COSTS)
+
+    trade = ledger.trades[0]
+    assert trade.max_favorable_excursion_points == 8.0
+    assert trade.max_adverse_excursion_points == -5.25
+
+
+def test_simulate_strategy_trades_tracks_short_mfe_and_mae() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 101.0, 102.0, 99.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 103.0, 92.0, 96.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 96.0, 105.25, 94.0, 105.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(bars, ShortEntryThenStopStrategy(), costs=ZERO_COSTS)
 
     trade = ledger.trades[0]
     assert trade.max_favorable_excursion_points == 8.0
@@ -188,6 +262,32 @@ def test_simulate_strategy_trades_does_not_apply_mfe_trail_on_activation_bar() -
     trade = ledger.trades[0]
     assert trade.exit_reason == "end_of_data"
     assert trade.trailing_stop_price == 126.0
+
+
+def test_simulate_strategy_trades_exits_short_on_mfe_trailing_stop_after_activation() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 101.0, 102.0, 99.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 101.0, 55.0, 60.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 60.0, 77.0, 58.0, 75.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        ShortEntryThenStopStrategy(),
+        costs=ZERO_COSTS,
+        exit_conversion=ExitConversionConfig(
+            mfe_trailing_activation_points=40.0,
+            mfe_trailing_giveback_points=20.0,
+        ),
+    )
+
+    trade = ledger.trades[0]
+    assert trade.exit_timestamp_utc == "2026-06-30T13:32:00Z"
+    assert trade.exit_reason == "mfe_trailing_stop"
+    assert trade.exit_price == 75.0
+    assert trade.trailing_stop_price == 75.0
+    assert trade.exit_conversion_name == "mfe_trailing"
+    assert trade.pnl_points == 25.0
 
 
 def test_simulate_strategy_trades_blocks_same_bar_reentry_after_exit() -> None:
@@ -274,6 +374,27 @@ def test_simulate_strategy_trades_applies_fresh_breakout_clearance_after_exit() 
     assert ledger.summary()["assumptions"]["fresh_breakout_clearance_points"] == 1.0
 
 
+def test_simulate_strategy_trades_requires_fresh_breakdown_after_short_exit() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 101.0, 102.0, 99.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 111.0, 99.0, 108.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 108.0, 109.0, 104.0, 105.0, 12),
+        MarketBar("2026-06-30T13:33:00Z", "NQU2026", 105.0, 106.0, 101.0, 102.0, 12),
+        MarketBar("2026-06-30T13:34:00Z", "NQU2026", 102.0, 103.0, 98.0, 98.5, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        ShortEntryEveryBarStrategy(),
+        costs=ZERO_COSTS,
+        reentry_control=ReentryControlConfig(require_fresh_breakout_after_exit=True),
+    )
+
+    assert len(ledger.trades) == 2
+    assert ledger.trades[0].exit_timestamp_utc == "2026-06-30T13:31:00Z"
+    assert ledger.trades[1].entry_timestamp_utc == "2026-06-30T13:34:00Z"
+
+
 def test_trade_ledger_summary_counts_wins_losses_and_points() -> None:
     bars = [
         MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
@@ -314,3 +435,29 @@ def test_simulate_strategy_trades_applies_slippage_commission_and_point_value() 
     assert trade.net_pnl_dollars == -4.0
     assert ledger.summary()["total_net_pnl_dollars"] == -4.0
     assert ledger.summary()["assumptions"]["point_value"] == 2.0
+
+
+def test_simulate_strategy_trades_applies_short_slippage_commission_and_point_value() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 101.0, 102.0, 99.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 101.0, 98.0, 99.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        ShortEntryThenStopStrategy(),
+        costs=SimulationCosts(
+            point_value=2.0,
+            slippage_points_per_side=1.0,
+            commission_per_contract=1.0,
+        ),
+    )
+
+    trade = ledger.trades[0]
+    assert trade.entry_price == 99.0
+    assert trade.exit_price == 100.0
+    assert trade.pnl_points == -1.0
+    assert trade.gross_pnl_dollars == -2.0
+    assert trade.commission_dollars == 2.0
+    assert trade.net_pnl_dollars == -4.0
+    assert ledger.summary()["total_net_pnl_dollars"] == -4.0

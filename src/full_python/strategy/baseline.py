@@ -22,20 +22,23 @@ class BaselineMomentumStrategy:
                 )
             )
 
-        prior_high = max(prior.high for prior in self._history[-self.config.breakout_lookback_bars :])
+        prior_bars = self._history[-self.config.breakout_lookback_bars :]
+        prior_high = max(prior.high for prior in prior_bars)
+        prior_low = min(prior.low for prior in prior_bars)
         body_points = abs(bar.close - bar.open)
-        is_breakout = bar.close > prior_high
+        is_breakout = self.config.enable_long and bar.close > prior_high
+        is_breakdown = self.config.enable_short and bar.close < prior_low
         body_pass = body_points >= self.config.min_body_points
         self._history.append(bar)
 
-        if not is_breakout:
+        if not is_breakout and not is_breakdown:
             return StrategyResult(
                 signal=SignalDecision.rejected(
                     timestamp_utc=bar.timestamp_utc,
                     symbol=bar.symbol,
                     side="long",
                     reason="no_breakout",
-                    metadata={"prior_high": prior_high, "close": bar.close},
+                    metadata={"prior_high": prior_high, "prior_low": prior_low, "close": bar.close},
                 )
             )
 
@@ -49,6 +52,25 @@ class BaselineMomentumStrategy:
                     metadata={"body_points": body_points, "min_body_points": self.config.min_body_points},
                 )
             )
+
+        if is_breakdown:
+            stop_price = bar.close + self.config.stop_points
+            signal = SignalDecision.accepted(
+                timestamp_utc=bar.timestamp_utc,
+                symbol=bar.symbol,
+                side="short",
+                reason="breakdown",
+                metadata={"prior_low": prior_low, "stop_price": stop_price},
+            )
+            order_intent = OrderIntent.market_entry(
+                timestamp_utc=bar.timestamp_utc,
+                symbol=bar.symbol,
+                side="sell",
+                quantity=1,
+                reason="breakdown",
+                metadata={"stop_price": stop_price},
+            )
+            return StrategyResult(signal=signal, order_intents=(order_intent,))
 
         stop_price = bar.close - self.config.stop_points
         signal = SignalDecision.accepted(

@@ -134,6 +134,12 @@ class _OpenTrade:
 
 
 @dataclass(frozen=True)
+class _ReentryBreakoutRange:
+    high: float
+    low: float
+
+
+@dataclass(frozen=True)
 class TradeLedger:
     trades: list[TradeFill]
     ignored_order_intents: int
@@ -166,7 +172,7 @@ class TradeLedger:
 
 
 ASSUMPTIONS = {
-    "position_model": "one_open_long_position_max",
+    "position_model": "one_open_position_max",
     "entry_fill": "current_bar_close",
     "stop_fill": "stop_price_when_later_bar_low_touches_stop",
     "symbol_change_exit": "new_contract_bar_open",
@@ -194,7 +200,7 @@ def simulate_strategy_trades(
     ignored_order_intents = 0
     last_bar: MarketBar | None = None
     cooldown_bars_remaining = 0
-    reentry_breakout_high: float | None = None
+    reentry_breakout_range: _ReentryBreakoutRange | None = None
 
     for bar in bars:
         exited_this_bar = False
@@ -208,9 +214,9 @@ def simulate_strategy_trades(
             open_trade = None
             exited_this_bar = True
             cooldown_bars_remaining = active_reentry_control.cooldown_bars_after_exit
-            reentry_breakout_high = _initial_reentry_breakout_high(bar, active_reentry_control)
+            reentry_breakout_range = _initial_reentry_breakout_range(bar, active_reentry_control)
 
-        if open_trade is not None and open_trade.trailing_stop_price is not None and bar.low <= open_trade.trailing_stop_price:
+        if open_trade is not None and _trailing_stop_touched(open_trade, bar):
             trades.append(
                 _close_trade(
                     open_trade,
@@ -223,16 +229,16 @@ def simulate_strategy_trades(
             open_trade = None
             exited_this_bar = True
             cooldown_bars_remaining = active_reentry_control.cooldown_bars_after_exit
-            reentry_breakout_high = _initial_reentry_breakout_high(bar, active_reentry_control)
-        elif open_trade is not None and open_trade.side == "long" and bar.low <= open_trade.stop_price:
-            open_trade = _update_long_excursion(open_trade, bar)
+            reentry_breakout_range = _initial_reentry_breakout_range(bar, active_reentry_control)
+        elif open_trade is not None and _stop_touched(open_trade, bar):
+            open_trade = _update_excursion(open_trade, bar)
             trades.append(_close_trade(open_trade, bar.timestamp_utc, open_trade.stop_price, "stop", active_costs))
             open_trade = None
             exited_this_bar = True
             cooldown_bars_remaining = active_reentry_control.cooldown_bars_after_exit
-            reentry_breakout_high = _initial_reentry_breakout_high(bar, active_reentry_control)
-        elif open_trade is not None and open_trade.side == "long":
-            open_trade = _update_long_excursion(open_trade, bar)
+            reentry_breakout_range = _initial_reentry_breakout_range(bar, active_reentry_control)
+        elif open_trade is not None:
+            open_trade = _update_excursion(open_trade, bar)
             open_trade = _update_mfe_trailing_stop(open_trade, active_exit_conversion)
 
         result = strategy.on_bar(bar)
@@ -243,18 +249,18 @@ def simulate_strategy_trades(
             if exited_this_bar or cooldown_bars_remaining > 0:
                 ignored_order_intents += 1
                 continue
-            if _blocked_by_fresh_breakout_gate(bar, reentry_breakout_high, active_reentry_control):
+            if _blocked_by_fresh_breakout_gate(bar, order_intent.side, reentry_breakout_range, active_reentry_control):
                 ignored_order_intents += 1
                 continue
-            if order_intent.side != "buy":
+            if order_intent.side not in {"buy", "sell"}:
                 ignored_order_intents += 1
                 continue
-            open_trade = _open_long_trade(order_intent, bar, len(trades) + 1, active_costs)
-            reentry_breakout_high = None
+            open_trade = _open_trade(order_intent, bar, len(trades) + 1, active_costs)
+            reentry_breakout_range = None
         if open_trade is None and not exited_this_bar and cooldown_bars_remaining > 0:
             cooldown_bars_remaining -= 1
-        if open_trade is None and not exited_this_bar and reentry_breakout_high is not None:
-            reentry_breakout_high = max(reentry_breakout_high, bar.high)
+        if open_trade is None and not exited_this_bar and reentry_breakout_range is not None:
+            reentry_breakout_range = _update_reentry_breakout_range(reentry_breakout_range, bar)
         last_bar = bar
 
     if open_trade is not None and last_bar is not None:
@@ -280,23 +286,38 @@ def _symbol_change_exit_assumption(symbol_change_exit_mode: str) -> str:
     return "new_contract_bar_open"
 
 
-def _initial_reentry_breakout_high(
+def _initial_reentry_breakout_range(
     bar: MarketBar,
     reentry_control: ReentryControlConfig,
-) -> float | None:
+) -> _ReentryBreakoutRange | None:
     if not reentry_control.require_fresh_breakout_after_exit:
         return None
-    return bar.high
+    return _ReentryBreakoutRange(high=bar.high, low=bar.low)
+
+
+def _update_reentry_breakout_range(
+    reentry_range: _ReentryBreakoutRange,
+    bar: MarketBar,
+) -> _ReentryBreakoutRange:
+    return _ReentryBreakoutRange(
+        high=max(reentry_range.high, bar.high),
+        low=min(reentry_range.low, bar.low),
+    )
 
 
 def _blocked_by_fresh_breakout_gate(
     bar: MarketBar,
-    reentry_breakout_high: float | None,
+    order_side: str,
+    reentry_breakout_range: _ReentryBreakoutRange | None,
     reentry_control: ReentryControlConfig,
 ) -> bool:
-    if reentry_breakout_high is None:
+    if reentry_breakout_range is None:
         return False
-    return bar.close <= reentry_breakout_high + reentry_control.fresh_breakout_clearance_points
+    if order_side == "buy":
+        return bar.close <= reentry_breakout_range.high + reentry_control.fresh_breakout_clearance_points
+    if order_side == "sell":
+        return bar.close >= reentry_breakout_range.low - reentry_control.fresh_breakout_clearance_points
+    return True
 
 
 def write_trades_csv(ledger: TradeLedger, path: str | Path) -> None:
@@ -336,30 +357,50 @@ def write_trade_summary_json(ledger: TradeLedger, path: str | Path) -> None:
     output_path.write_text(json.dumps(ledger.summary(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _open_long_trade(
+def _open_trade(
     order_intent: OrderIntent,
     bar: MarketBar,
     trade_number: int,
     costs: SimulationCosts,
 ) -> _OpenTrade:
     stop_price = float(order_intent.metadata["stop_price"])
+    trade_side = "long" if order_intent.side == "buy" else "short"
+    entry_price = (
+        bar.close + costs.slippage_points_per_side
+        if trade_side == "long"
+        else bar.close - costs.slippage_points_per_side
+    )
     return _OpenTrade(
         trade_id=f"trade-{trade_number:08d}",
         symbol=bar.symbol,
-        side="long",
+        side=trade_side,
         quantity=order_intent.quantity,
         entry_timestamp_utc=bar.timestamp_utc,
-        entry_price=bar.close + costs.slippage_points_per_side,
+        entry_price=entry_price,
         stop_price=stop_price,
-        max_favorable_excursion_points=max(0.0, bar.high - (bar.close + costs.slippage_points_per_side)),
-        max_adverse_excursion_points=min(0.0, bar.low - (bar.close + costs.slippage_points_per_side)),
+        max_favorable_excursion_points=_bar_mfe_points(trade_side, entry_price, bar),
+        max_adverse_excursion_points=_bar_mae_points(trade_side, entry_price, bar),
         trailing_stop_price=None,
         exit_conversion_name="none",
         metadata={"entry_reason": order_intent.reason},
     )
 
 
-def _update_long_excursion(open_trade: _OpenTrade, bar: MarketBar) -> _OpenTrade:
+def _trailing_stop_touched(open_trade: _OpenTrade, bar: MarketBar) -> bool:
+    if open_trade.trailing_stop_price is None:
+        return False
+    if open_trade.side == "long":
+        return bar.low <= open_trade.trailing_stop_price
+    return bar.high >= open_trade.trailing_stop_price
+
+
+def _stop_touched(open_trade: _OpenTrade, bar: MarketBar) -> bool:
+    if open_trade.side == "long":
+        return bar.low <= open_trade.stop_price
+    return bar.high >= open_trade.stop_price
+
+
+def _update_excursion(open_trade: _OpenTrade, bar: MarketBar) -> _OpenTrade:
     return _OpenTrade(
         trade_id=open_trade.trade_id,
         symbol=open_trade.symbol,
@@ -370,11 +411,11 @@ def _update_long_excursion(open_trade: _OpenTrade, bar: MarketBar) -> _OpenTrade
         stop_price=open_trade.stop_price,
         max_favorable_excursion_points=max(
             open_trade.max_favorable_excursion_points,
-            bar.high - open_trade.entry_price,
+            _bar_mfe_points(open_trade.side, open_trade.entry_price, bar),
         ),
         max_adverse_excursion_points=min(
             open_trade.max_adverse_excursion_points,
-            bar.low - open_trade.entry_price,
+            _bar_mae_points(open_trade.side, open_trade.entry_price, bar),
         ),
         trailing_stop_price=open_trade.trailing_stop_price,
         exit_conversion_name=open_trade.exit_conversion_name,
@@ -392,12 +433,28 @@ def _update_mfe_trailing_stop(
     assert exit_conversion.mfe_trailing_giveback_points is not None
     if open_trade.max_favorable_excursion_points < exit_conversion.mfe_trailing_activation_points:
         return open_trade
-    candidate_stop = open_trade.entry_price + open_trade.max_favorable_excursion_points - exit_conversion.mfe_trailing_giveback_points
-    trailing_stop_price = (
-        candidate_stop
-        if open_trade.trailing_stop_price is None
-        else max(open_trade.trailing_stop_price, candidate_stop)
-    )
+    if open_trade.side == "long":
+        candidate_stop = (
+            open_trade.entry_price
+            + open_trade.max_favorable_excursion_points
+            - exit_conversion.mfe_trailing_giveback_points
+        )
+        trailing_stop_price = (
+            candidate_stop
+            if open_trade.trailing_stop_price is None
+            else max(open_trade.trailing_stop_price, candidate_stop)
+        )
+    else:
+        candidate_stop = (
+            open_trade.entry_price
+            - open_trade.max_favorable_excursion_points
+            + exit_conversion.mfe_trailing_giveback_points
+        )
+        trailing_stop_price = (
+            candidate_stop
+            if open_trade.trailing_stop_price is None
+            else min(open_trade.trailing_stop_price, candidate_stop)
+        )
     return _OpenTrade(
         trade_id=open_trade.trade_id,
         symbol=open_trade.symbol,
@@ -414,6 +471,18 @@ def _update_mfe_trailing_stop(
     )
 
 
+def _bar_mfe_points(side: str, entry_price: float, bar: MarketBar) -> float:
+    if side == "long":
+        return max(0.0, bar.high - entry_price)
+    return max(0.0, entry_price - bar.low)
+
+
+def _bar_mae_points(side: str, entry_price: float, bar: MarketBar) -> float:
+    if side == "long":
+        return min(0.0, bar.low - entry_price)
+    return min(0.0, entry_price - bar.high)
+
+
 def _close_trade(
     open_trade: _OpenTrade,
     exit_timestamp_utc: str,
@@ -421,8 +490,16 @@ def _close_trade(
     exit_reason: str,
     costs: SimulationCosts,
 ) -> TradeFill:
-    adjusted_exit_price = exit_price - costs.slippage_points_per_side
-    pnl_points = adjusted_exit_price - open_trade.entry_price
+    adjusted_exit_price = (
+        exit_price - costs.slippage_points_per_side
+        if open_trade.side == "long"
+        else exit_price + costs.slippage_points_per_side
+    )
+    pnl_points = (
+        adjusted_exit_price - open_trade.entry_price
+        if open_trade.side == "long"
+        else open_trade.entry_price - adjusted_exit_price
+    )
     gross_pnl_dollars = pnl_points * costs.point_value * open_trade.quantity
     commission_dollars = 2 * costs.commission_per_contract * open_trade.quantity
     return TradeFill(

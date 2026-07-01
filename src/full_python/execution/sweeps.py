@@ -25,6 +25,8 @@ class ExitSweepConfig:
     slippage_points_per_side: float = 1.0
     commission_per_contract: float = 1.0
     symbol_change_exit_mode: str = "previous_close"
+    enable_long: bool = True
+    enable_short: bool = False
 
 
 def run_exit_sweep(
@@ -74,7 +76,12 @@ def _run_one_combo(
 ) -> dict[str, Any]:
     ledger = simulate_strategy_trades(
         bars,
-        BaselineMomentumStrategy(BaselineMomentumConfig()),
+        BaselineMomentumStrategy(
+            BaselineMomentumConfig(
+                enable_long=config.enable_long,
+                enable_short=config.enable_short,
+            )
+        ),
         costs=SimulationCosts(
             point_value=config.point_value,
             slippage_points_per_side=config.slippage_points_per_side,

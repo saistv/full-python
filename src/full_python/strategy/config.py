@@ -18,6 +18,8 @@ class BaselineMomentumConfig:
     breakout_lookback_bars: int = 2
     stop_points: float = 30.0
     min_body_points: float = 0.0
+    enable_long: bool = True
+    enable_short: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
