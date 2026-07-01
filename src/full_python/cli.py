@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 from full_python.data.databento import load_databento_ohlcv_bars
+from full_python.data.contract_calendar import build_dominant_contract_calendar
 from full_python.data.inventory import inspect_databento_ohlcv_folder
 from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
@@ -124,6 +125,30 @@ def run_databento_inventory(
     return json_path
 
 
+def run_contract_calendar(
+    *,
+    folder: str | Path,
+    output_dir: str | Path,
+    symbol_root: str = "NQ",
+    markdown: bool = False,
+) -> Path:
+    inventories = inspect_databento_ohlcv_folder(folder, symbol_root=symbol_root)
+    calendar = build_dominant_contract_calendar(inventories, symbol_root=symbol_root)
+    run_dir = Path(output_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        **calendar.to_dict(),
+        "source_format": "databento-ohlcv",
+        "folder": str(Path(folder)),
+    }
+    json_path = run_dir / "contract_calendar.json"
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if markdown:
+        markdown_path = run_dir / "contract_calendar.md"
+        markdown_path.write_text(_render_contract_calendar_markdown(payload), encoding="utf-8")
+    return json_path
+
+
 def _render_inventory_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Databento Contract Inventory",
@@ -159,6 +184,37 @@ def _render_inventory_markdown(payload: dict[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_contract_calendar_markdown(payload: dict[str, object]) -> str:
+    lines = [
+        "# Databento Contract Calendar",
+        "",
+        f"Folder: `{payload['folder']}`",
+        "",
+        f"Selection rule: `{payload['selection_rule']}`",
+        "",
+        "| Trading Date | Selected Contract | File | Candidate Count |",
+        "| --- | --- | --- | ---: |",
+    ]
+    for entry_payload in payload["entries"]:
+        assert isinstance(entry_payload, dict)
+        file_name = Path(str(entry_payload["file_path"])).name
+        candidates = entry_payload["candidates"]
+        assert isinstance(candidates, list)
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(entry_payload["trading_date"]),
+                    str(entry_payload["selected_contract"] or ""),
+                    file_name,
+                    str(len(candidates)),
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def run_inventory_databento_command(argv: list[str]) -> Path:
     parser = argparse.ArgumentParser(description="Inventory Databento OHLCV files.")
     parser.add_argument("--folder", required=True, help="Folder containing .ohlcv-1m.csv.zst files")
@@ -182,10 +238,37 @@ def run_inventory_databento_command(argv: list[str]) -> Path:
     )
 
 
+def run_build_contract_calendar_command(argv: list[str]) -> Path:
+    parser = argparse.ArgumentParser(description="Build a Databento dominant contract calendar.")
+    parser.add_argument("--folder", required=True, help="Folder containing .ohlcv-1m.csv.zst files")
+    parser.add_argument("--output-dir", required=True, help="Directory for contract_calendar outputs")
+    parser.add_argument(
+        "--symbol-root",
+        default="NQ",
+        help="Symbol root to include in the calendar",
+    )
+    parser.add_argument(
+        "--markdown",
+        action="store_true",
+        help="Also write contract_calendar.md",
+    )
+    args = parser.parse_args(argv)
+    return run_contract_calendar(
+        folder=args.folder,
+        output_dir=args.output_dir,
+        symbol_root=args.symbol_root,
+        markdown=args.markdown,
+    )
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "inventory-databento":
         inventory_path = run_inventory_databento_command(sys.argv[2:])
         print(inventory_path)
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "build-contract-calendar":
+        calendar_path = run_build_contract_calendar_command(sys.argv[2:])
+        print(calendar_path)
         return
 
     parser = argparse.ArgumentParser(description="Run the Full Python baseline replay.")

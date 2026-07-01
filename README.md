@@ -72,3 +72,18 @@ This writes:
 - `contract_inventory.md`, when `--markdown` is passed
 
 The inventory lists every matching symbol per file, including outright contracts and spread symbols whose `symbol` starts with the selected root. Use it before building replay inputs so contract selection, roll behavior, and spread exclusions are explicit instead of assumed.
+
+## Dominant Contract Calendar
+
+After inventorying the raw folder, build a first-pass contract calendar:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli build-contract-calendar --folder path/to/NQ-data --output-dir runs/contract-calendar --markdown
+```
+
+This writes:
+
+- `contract_calendar.json`
+- `contract_calendar.md`, when `--markdown` is passed
+
+The first calendar rule is `dominant_outright_row_count`: ignore spread symbols, then choose the outright contract with the most rows in each daily file. This is an auditable starting point for replay input selection, not the final roll methodology or a back-adjusted continuous contract.
