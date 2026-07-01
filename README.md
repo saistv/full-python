@@ -148,6 +148,17 @@ The MFE trailing rule activates only after a completed bar has reached the confi
 
 Re-entry control blocks same-bar re-entry after every exit. Use `--cooldown-bars-after-exit` to also block the next N bars after an exit. Use `--require-fresh-breakout-after-exit` to block new entries until price closes above the highest high formed after the previous exit; `--fresh-breakout-clearance-points` adds extra required clearance. This is research instrumentation for churn control, not a signal-edge claim by itself.
 
+Sweep the current exit-conversion branch:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli sweep-exit-branch --data path/to/selected_bars.csv --output-dir runs/exit-branch-sweep --stream-input --session rth --point-value 2 --slippage-points-per-side 1 --commission-per-contract 1 --mfe-activations 30,40 --mfe-givebacks 20,30 --fresh-breakout-clearances 0 --cooldowns 0
+```
+
+This writes:
+
+- `sweep_results.json`
+- `sweep_results.csv`
+
 ## Trade Analysis Report
 
 Analyze any generated `trades.csv` ledger:
@@ -160,4 +171,4 @@ This writes:
 
 - `trade_analysis.json`
 
-The report includes headline P&L, drawdown, max loss streak, top-trade dependency, monthly and quarterly breakdowns, exit-reason breakdowns, symbol breakdowns, side breakdowns, and stopped-trade MFE/MAE metrics. Use this after every candidate simulation so results are judged by survivability and robustness, not just net P&L.
+The report includes headline P&L, drawdown, max loss streak, top-trade dependency, monthly and quarterly breakdowns, exit-reason breakdowns, symbol breakdowns, side breakdowns, stopped-trade MFE/MAE metrics, and MNQ/NQ dollar equivalents. Use this after every candidate simulation so results are judged by survivability and robustness, not just net P&L.

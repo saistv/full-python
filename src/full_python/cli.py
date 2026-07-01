@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -26,6 +27,7 @@ from full_python.execution.simulator import (
     write_trade_summary_json,
     write_trades_csv,
 )
+from full_python.execution.sweeps import ExitSweepConfig, run_exit_sweep
 from full_python.replay import ReplayEngine
 from full_python.reporting.survivability import build_survivability_report
 from full_python.reporting.trade_analysis import (
@@ -301,6 +303,84 @@ def run_trade_analysis(
     return analysis_path
 
 
+def run_exit_branch_sweep(
+    *,
+    data_path: str | Path,
+    output_dir: str | Path,
+    stream_input: bool = False,
+    session: str = "all",
+    point_value: float = 2.0,
+    slippage_points_per_side: float = 1.0,
+    commission_per_contract: float = 1.0,
+    mfe_activations: tuple[float, ...],
+    mfe_givebacks: tuple[float, ...],
+    fresh_breakout_clearances: tuple[float, ...],
+    cooldowns: tuple[int, ...],
+) -> Path:
+    input_path = Path(data_path)
+    run_dir = Path(output_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    column_map = CsvBarColumnMap(
+        timestamp="timestamp",
+        symbol="symbol",
+        open="open",
+        high="high",
+        low="low",
+        close="close",
+        volume="volume",
+    )
+    bars = iter_csv_bars(input_path, column_map) if stream_input else load_csv_bars(input_path, column_map)
+    session_bars = filter_bars_by_session(bars, session)
+    sweep = run_exit_sweep(
+        session_bars,
+        ExitSweepConfig(
+            mfe_trailing_activation_points=mfe_activations,
+            mfe_trailing_giveback_points=mfe_givebacks,
+            fresh_breakout_clearance_points=fresh_breakout_clearances,
+            cooldown_bars_after_exit=cooldowns,
+            point_value=point_value,
+            slippage_points_per_side=slippage_points_per_side,
+            commission_per_contract=commission_per_contract,
+        ),
+    )
+    sweep["assumptions"] = {
+        "session": session,
+        "point_value": point_value,
+        "slippage_points_per_side": slippage_points_per_side,
+        "commission_per_contract": commission_per_contract,
+        "symbol_change_exit_mode": "previous_close",
+        "require_fresh_breakout_after_exit": True,
+    }
+    json_path = run_dir / "sweep_results.json"
+    csv_path = run_dir / "sweep_results.csv"
+    json_path.write_text(json.dumps(sweep, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_sweep_results_csv(sweep["results"], csv_path)
+    return json_path
+
+
+def _write_sweep_results_csv(results: list[dict[str, object]], path: str | Path) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "mfe_trailing_activation_points",
+        "mfe_trailing_giveback_points",
+        "fresh_breakout_clearance_points",
+        "cooldown_bars_after_exit",
+        "trade_count",
+        "win_rate",
+        "total_net_pnl_dollars",
+        "max_drawdown_dollars",
+        "max_loss_streak",
+        "pnl_without_best_5_trades",
+        "exit_reason_counts",
+    ]
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for result in results:
+            writer.writerow({field: result[field] for field in fieldnames})
+
+
 def _render_inventory_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Databento Contract Inventory",
@@ -527,6 +607,56 @@ def run_analyze_trades_command(argv: list[str]) -> Path:
     )
 
 
+def run_sweep_exit_branch_command(argv: list[str]) -> Path:
+    parser = argparse.ArgumentParser(description="Sweep MFE trailing plus fresh-breakout re-entry settings.")
+    parser.add_argument("--data", required=True, help="Input CSV market-bar data file")
+    parser.add_argument("--output-dir", required=True, help="Directory for sweep_results outputs")
+    parser.add_argument(
+        "--stream-input",
+        action="store_true",
+        help="Stream CSV bars into memory before sweeping",
+    )
+    parser.add_argument(
+        "--session",
+        choices=["all", "rth"],
+        default="all",
+        help="Session filter for sweep",
+    )
+    parser.add_argument("--point-value", type=float, default=2.0)
+    parser.add_argument("--slippage-points-per-side", type=float, default=1.0)
+    parser.add_argument("--commission-per-contract", type=float, default=1.0)
+    parser.add_argument("--mfe-activations", required=True, help="Comma-separated activation points, e.g. 30,40,50")
+    parser.add_argument("--mfe-givebacks", required=True, help="Comma-separated giveback points, e.g. 15,20,25")
+    parser.add_argument(
+        "--fresh-breakout-clearances",
+        required=True,
+        help="Comma-separated fresh breakout clearance points, e.g. 0,0.5,1",
+    )
+    parser.add_argument("--cooldowns", required=True, help="Comma-separated cooldown bars, e.g. 0,3,5")
+    args = parser.parse_args(argv)
+    return run_exit_branch_sweep(
+        data_path=args.data,
+        output_dir=args.output_dir,
+        stream_input=args.stream_input,
+        session=args.session,
+        point_value=args.point_value,
+        slippage_points_per_side=args.slippage_points_per_side,
+        commission_per_contract=args.commission_per_contract,
+        mfe_activations=_parse_float_list(args.mfe_activations),
+        mfe_givebacks=_parse_float_list(args.mfe_givebacks),
+        fresh_breakout_clearances=_parse_float_list(args.fresh_breakout_clearances),
+        cooldowns=_parse_int_list(args.cooldowns),
+    )
+
+
+def _parse_float_list(value: str) -> tuple[float, ...]:
+    return tuple(float(part.strip()) for part in value.split(",") if part.strip())
+
+
+def _parse_int_list(value: str) -> tuple[int, ...]:
+    return tuple(int(part.strip()) for part in value.split(",") if part.strip())
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "inventory-databento":
         inventory_path = run_inventory_databento_command(sys.argv[2:])
@@ -547,6 +677,10 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "analyze-trades":
         analysis_path = run_analyze_trades_command(sys.argv[2:])
         print(analysis_path)
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "sweep-exit-branch":
+        sweep_path = run_sweep_exit_branch_command(sys.argv[2:])
+        print(sweep_path)
         return
 
     parser = argparse.ArgumentParser(description="Run the Full Python baseline replay.")

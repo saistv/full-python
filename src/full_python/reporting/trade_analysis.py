@@ -57,6 +57,7 @@ def build_trade_analysis(trades: list[AnalyzedTrade]) -> dict[str, Any]:
         "symbol_breakdown": _build_category_breakdown(trades, lambda trade: trade.symbol),
         "side_breakdown": _build_category_breakdown(trades, lambda trade: trade.side),
         "stopped_trade_excursion": _build_stopped_trade_excursion(trades),
+        "dollar_equivalents": _build_dollar_equivalents(trades),
     }
 
 
@@ -133,6 +134,39 @@ def _build_stopped_trade_excursion(trades: list[AnalyzedTrade]) -> dict[str, flo
         "average_mae_points": total_mae / len(stopped_trades),
         "min_mae_points": min(trade.max_adverse_excursion_points for trade in stopped_trades),
     }
+
+
+def _build_dollar_equivalents(trades: list[AnalyzedTrade]) -> dict[str, dict[str, float | str]]:
+    return {
+        "MNQ": _build_equivalent_metrics(trades, point_value=2.0),
+        "NQ": _build_equivalent_metrics(trades, point_value=20.0),
+    }
+
+
+def _build_equivalent_metrics(trades: list[AnalyzedTrade], *, point_value: float) -> dict[str, float | str]:
+    pnl_values = [
+        trade.pnl_points * point_value - trade.commission_dollars
+        for trade in trades
+    ]
+    total_net_pnl = sum(pnl_values)
+    return {
+        "point_value": point_value,
+        "commission_model": "same_commission_dollars_as_trade_ledger",
+        "total_net_pnl_dollars": total_net_pnl,
+        "average_net_pnl_dollars": total_net_pnl / len(pnl_values) if pnl_values else 0.0,
+        "max_drawdown_dollars": _max_drawdown(pnl_values),
+    }
+
+
+def _max_drawdown(pnl_values: list[float]) -> float:
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for pnl in pnl_values:
+        equity += pnl
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, equity - peak)
+    return max_drawdown
 
 
 def _build_period_breakdown(trades: list[AnalyzedTrade], period: str) -> dict[str, dict[str, float | int]]:

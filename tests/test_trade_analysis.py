@@ -41,3 +41,9 @@ def test_trade_analysis_calculates_periods_drawdown_streaks_and_dependency(tmp_p
     assert analysis["stopped_trade_excursion"]["average_mfe_points"] == 11 / 3
     assert analysis["stopped_trade_excursion"]["max_mfe_points"] == 7.0
     assert analysis["stopped_trade_excursion"]["average_mae_points"] == -6.0
+    assert analysis["dollar_equivalents"]["MNQ"]["point_value"] == 2.0
+    assert analysis["dollar_equivalents"]["MNQ"]["total_net_pnl_dollars"] == -4.0
+    assert analysis["dollar_equivalents"]["MNQ"]["max_drawdown_dollars"] == -30.0
+    assert analysis["dollar_equivalents"]["NQ"]["point_value"] == 20.0
+    assert analysis["dollar_equivalents"]["NQ"]["total_net_pnl_dollars"] == 32.0
+    assert analysis["dollar_equivalents"]["NQ"]["max_drawdown_dollars"] == -264.0
