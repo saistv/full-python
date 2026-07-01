@@ -254,3 +254,59 @@ def test_cli_simulate_baseline_trades_accepts_reentry_cooldown(tmp_path: Path) -
         trades = list(csv.DictReader(handle))
     assert trades[0]["exit_reason"] == "stop"
     assert trades[1]["entry_timestamp_utc"] == "2026-06-30T13:35:00Z"
+
+
+def test_cli_simulate_baseline_trades_accepts_fresh_breakout_reentry_gate(tmp_path: Path) -> None:
+    data_path = tmp_path / "bars.csv"
+    data_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100,102,99,101,10\n"
+        "2026-06-30T13:32:00Z,NQU2026,101,131,100,130,10\n"
+        "2026-06-30T13:33:00Z,NQU2026,130,131,99,100,10\n"
+        "2026-06-30T13:34:00Z,NQU2026,100,132,99,131,10\n"
+        "2026-06-30T13:35:00Z,NQU2026,131,135,130,132.25,10\n"
+        "2026-06-30T13:36:00Z,NQU2026,132.25,136,132,135.75,10\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "trade-run"
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "full_python.cli",
+            "simulate-baseline-trades",
+            "--data",
+            str(data_path),
+            "--output-dir",
+            str(output_dir),
+            "--stream-input",
+            "--point-value",
+            "1",
+            "--slippage-points-per-side",
+            "0",
+            "--commission-per-contract",
+            "0",
+            "--require-fresh-breakout-after-exit",
+            "--fresh-breakout-clearance-points",
+            "0.5",
+        ],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    summary = json.loads((output_dir / "trade_summary.json").read_text(encoding="utf-8"))
+    assert summary["assumptions"]["reentry_control"] == "fresh_breakout"
+    assert summary["assumptions"]["require_fresh_breakout_after_exit"] is True
+    assert summary["assumptions"]["fresh_breakout_clearance_points"] == 0.5
+    with (output_dir / "trades.csv").open(encoding="utf-8", newline="") as handle:
+        trades = list(csv.DictReader(handle))
+    assert trades[0]["exit_reason"] == "stop"
+    assert trades[1]["entry_timestamp_utc"] == "2026-06-30T13:36:00Z"

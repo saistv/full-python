@@ -227,6 +227,53 @@ def test_simulate_strategy_trades_applies_cooldown_after_exit() -> None:
     assert ledger.summary()["assumptions"]["cooldown_bars_after_exit"] == 1
 
 
+def test_simulate_strategy_trades_requires_fresh_breakout_after_exit() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 101.0, 89.0, 95.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 95.0, 105.0, 94.0, 100.0, 12),
+        MarketBar("2026-06-30T13:33:00Z", "NQU2026", 100.0, 106.0, 99.0, 104.0, 12),
+        MarketBar("2026-06-30T13:34:00Z", "NQU2026", 104.0, 108.0, 103.0, 107.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        EntryEveryBarStrategy(),
+        costs=ZERO_COSTS,
+        reentry_control=ReentryControlConfig(require_fresh_breakout_after_exit=True),
+    )
+
+    assert len(ledger.trades) == 2
+    assert ledger.trades[0].exit_timestamp_utc == "2026-06-30T13:31:00Z"
+    assert ledger.trades[1].entry_timestamp_utc == "2026-06-30T13:34:00Z"
+    assert ledger.summary()["assumptions"]["reentry_control"] == "fresh_breakout"
+    assert ledger.summary()["assumptions"]["require_fresh_breakout_after_exit"] is True
+
+
+def test_simulate_strategy_trades_applies_fresh_breakout_clearance_after_exit() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 101.0, 89.0, 95.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 95.0, 105.0, 94.0, 102.0, 12),
+        MarketBar("2026-06-30T13:33:00Z", "NQU2026", 102.0, 106.0, 101.0, 105.25, 12),
+        MarketBar("2026-06-30T13:34:00Z", "NQU2026", 105.25, 108.0, 104.0, 107.5, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        EntryEveryBarStrategy(),
+        costs=ZERO_COSTS,
+        reentry_control=ReentryControlConfig(
+            require_fresh_breakout_after_exit=True,
+            fresh_breakout_clearance_points=1.0,
+        ),
+    )
+
+    assert len(ledger.trades) == 2
+    assert ledger.trades[1].entry_timestamp_utc == "2026-06-30T13:34:00Z"
+    assert ledger.summary()["assumptions"]["fresh_breakout_clearance_points"] == 1.0
+
+
 def test_trade_ledger_summary_counts_wins_losses_and_points() -> None:
     bars = [
         MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),

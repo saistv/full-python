@@ -239,6 +239,8 @@ def run_baseline_trade_simulation(
     mfe_trailing_activation_points: float | None = None,
     mfe_trailing_giveback_points: float | None = None,
     cooldown_bars_after_exit: int = 0,
+    require_fresh_breakout_after_exit: bool = False,
+    fresh_breakout_clearance_points: float = 0.0,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -266,6 +268,8 @@ def run_baseline_trade_simulation(
     )
     reentry_control = ReentryControlConfig(
         cooldown_bars_after_exit=cooldown_bars_after_exit,
+        require_fresh_breakout_after_exit=require_fresh_breakout_after_exit,
+        fresh_breakout_clearance_points=fresh_breakout_clearance_points,
     )
     ledger = simulate_strategy_trades(
         session_bars,
@@ -483,6 +487,17 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         default=0,
         help="Block new entries for this many bars after any exit",
     )
+    parser.add_argument(
+        "--require-fresh-breakout-after-exit",
+        action="store_true",
+        help="Require price to close above the highest high since exit before re-entry",
+    )
+    parser.add_argument(
+        "--fresh-breakout-clearance-points",
+        type=float,
+        default=0.0,
+        help="Extra points required above the post-exit high before re-entry",
+    )
     args = parser.parse_args(argv)
     return run_baseline_trade_simulation(
         data_path=args.data,
@@ -496,6 +511,8 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         mfe_trailing_activation_points=args.mfe_trailing_activation_points,
         mfe_trailing_giveback_points=args.mfe_trailing_giveback_points,
         cooldown_bars_after_exit=args.cooldown_bars_after_exit,
+        require_fresh_breakout_after_exit=args.require_fresh_breakout_after_exit,
+        fresh_breakout_clearance_points=args.fresh_breakout_clearance_points,
     )
 
 

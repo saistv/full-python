@@ -141,12 +141,12 @@ Use `--symbol-change-exit-mode previous_close` for research runs that should avo
 For exit-conversion research, enable completed-bar MFE trailing:
 
 ```bash
-PYTHONPATH=src python3 -m full_python.cli simulate-baseline-trades --data path/to/selected_bars.csv --output-dir runs/trade-ledger-mfe-trail --stream-input --session rth --point-value 2 --slippage-points-per-side 1 --commission-per-contract 1 --symbol-change-exit-mode previous_close --mfe-trailing-activation-points 40 --mfe-trailing-giveback-points 20 --cooldown-bars-after-exit 10
+PYTHONPATH=src python3 -m full_python.cli simulate-baseline-trades --data path/to/selected_bars.csv --output-dir runs/trade-ledger-mfe-trail --stream-input --session rth --point-value 2 --slippage-points-per-side 1 --commission-per-contract 1 --symbol-change-exit-mode previous_close --mfe-trailing-activation-points 40 --mfe-trailing-giveback-points 20 --require-fresh-breakout-after-exit
 ```
 
 The MFE trailing rule activates only after a completed bar has reached the configured favorable excursion. The resulting trailing stop can exit on later bars with `exit_reason=mfe_trailing_stop`; it does not assume same-bar high/low ordering.
 
-Re-entry control blocks same-bar re-entry after every exit. Use `--cooldown-bars-after-exit` to also block the next N bars after an exit. This is research instrumentation for churn control, not a signal-edge claim by itself.
+Re-entry control blocks same-bar re-entry after every exit. Use `--cooldown-bars-after-exit` to also block the next N bars after an exit. Use `--require-fresh-breakout-after-exit` to block new entries until price closes above the highest high formed after the previous exit; `--fresh-breakout-clearance-points` adds extra required clearance. This is research instrumentation for churn control, not a signal-edge claim by itself.
 
 ## Trade Analysis Report
 
