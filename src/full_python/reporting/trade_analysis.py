@@ -110,7 +110,7 @@ def _build_top_trade_dependency(trades: list[AnalyzedTrade]) -> dict[str, float]
     dependency = {
         "best_trade_net_pnl_dollars": best_pnls[0] if best_pnls else 0.0,
     }
-    for count in (1, 3, 5):
+    for count in (1, 3, 5, 10):
         dependency[f"pnl_without_best_{count}_trades"] = total_net_pnl - sum(best_pnls[:count])
     return dependency
 

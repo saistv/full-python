@@ -31,6 +31,7 @@ def test_trade_analysis_calculates_periods_drawdown_streaks_and_dependency(tmp_p
     assert analysis["top_trade_dependency"]["best_trade_net_pnl_dollars"] == 38.0
     assert analysis["top_trade_dependency"]["pnl_without_best_1_trades"] == -42.0
     assert analysis["top_trade_dependency"]["pnl_without_best_3_trades"] == -22.0
+    assert analysis["top_trade_dependency"]["pnl_without_best_10_trades"] == 0.0
     assert analysis["monthly_breakdown"]["2026-01"]["net_pnl_dollars"] == 26.0
     assert analysis["monthly_breakdown"]["2026-02"]["net_pnl_dollars"] == -30.0
     assert analysis["quarterly_breakdown"]["2026-Q1"]["trade_count"] == 4
