@@ -16,6 +16,20 @@ class Strategy(Protocol):
 
 
 @dataclass(frozen=True)
+class SimulationCosts:
+    point_value: float = 2.0
+    slippage_points_per_side: float = 1.0
+    commission_per_contract: float = 1.0
+
+    def to_assumptions(self) -> dict[str, float]:
+        return {
+            "point_value": self.point_value,
+            "slippage_points_per_side": self.slippage_points_per_side,
+            "commission_per_contract": self.commission_per_contract,
+        }
+
+
+@dataclass(frozen=True)
 class TradeFill:
     trade_id: str
     symbol: str
@@ -28,6 +42,9 @@ class TradeFill:
     exit_reason: str
     stop_price: float
     pnl_points: float
+    gross_pnl_dollars: float
+    commission_dollars: float
+    net_pnl_dollars: float
     metadata: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,10 +67,13 @@ class _OpenTrade:
 class TradeLedger:
     trades: list[TradeFill]
     ignored_order_intents: int
-    assumptions: dict[str, str]
+    assumptions: dict[str, str | float]
 
     def summary(self) -> dict[str, Any]:
         total_pnl_points = sum(trade.pnl_points for trade in self.trades)
+        total_gross_pnl_dollars = sum(trade.gross_pnl_dollars for trade in self.trades)
+        total_commission_dollars = sum(trade.commission_dollars for trade in self.trades)
+        total_net_pnl_dollars = sum(trade.net_pnl_dollars for trade in self.trades)
         winning_trades = sum(1 for trade in self.trades if trade.pnl_points > 0)
         losing_trades = sum(1 for trade in self.trades if trade.pnl_points < 0)
         exit_reason_counts = Counter(trade.exit_reason for trade in self.trades)
@@ -65,6 +85,10 @@ class TradeLedger:
             "win_rate": winning_trades / len(self.trades) if self.trades else 0.0,
             "total_pnl_points": total_pnl_points,
             "average_pnl_points": total_pnl_points / len(self.trades) if self.trades else 0.0,
+            "total_gross_pnl_dollars": total_gross_pnl_dollars,
+            "total_commission_dollars": total_commission_dollars,
+            "total_net_pnl_dollars": total_net_pnl_dollars,
+            "average_net_pnl_dollars": total_net_pnl_dollars / len(self.trades) if self.trades else 0.0,
             "exit_reason_counts": dict(sorted(exit_reason_counts.items())),
             "ignored_order_intents": self.ignored_order_intents,
             "assumptions": self.assumptions,
@@ -77,15 +101,16 @@ ASSUMPTIONS = {
     "stop_fill": "stop_price_when_later_bar_low_touches_stop",
     "symbol_change_exit": "new_contract_bar_open",
     "final_exit": "last_bar_close",
-    "slippage": "none",
-    "commission": "none",
 }
 
 
 def simulate_strategy_trades(
     bars: Iterable[MarketBar],
     strategy: Strategy,
+    *,
+    costs: SimulationCosts | None = None,
 ) -> TradeLedger:
+    active_costs = SimulationCosts() if costs is None else costs
     trades: list[TradeFill] = []
     open_trade: _OpenTrade | None = None
     ignored_order_intents = 0
@@ -94,11 +119,11 @@ def simulate_strategy_trades(
     for bar in bars:
         last_bar = bar
         if open_trade is not None and bar.symbol != open_trade.symbol:
-            trades.append(_close_trade(open_trade, bar.timestamp_utc, bar.open, "symbol_change"))
+            trades.append(_close_trade(open_trade, bar.timestamp_utc, bar.open, "symbol_change", active_costs))
             open_trade = None
 
         if open_trade is not None and open_trade.side == "long" and bar.low <= open_trade.stop_price:
-            trades.append(_close_trade(open_trade, bar.timestamp_utc, open_trade.stop_price, "stop"))
+            trades.append(_close_trade(open_trade, bar.timestamp_utc, open_trade.stop_price, "stop", active_costs))
             open_trade = None
 
         result = strategy.on_bar(bar)
@@ -109,15 +134,15 @@ def simulate_strategy_trades(
             if order_intent.side != "buy":
                 ignored_order_intents += 1
                 continue
-            open_trade = _open_long_trade(order_intent, bar, len(trades) + 1)
+            open_trade = _open_long_trade(order_intent, bar, len(trades) + 1, active_costs)
 
     if open_trade is not None and last_bar is not None:
-        trades.append(_close_trade(open_trade, last_bar.timestamp_utc, last_bar.close, "end_of_data"))
+        trades.append(_close_trade(open_trade, last_bar.timestamp_utc, last_bar.close, "end_of_data", active_costs))
 
     return TradeLedger(
         trades=trades,
         ignored_order_intents=ignored_order_intents,
-        assumptions=dict(ASSUMPTIONS),
+        assumptions={**ASSUMPTIONS, **active_costs.to_assumptions()},
     )
 
 
@@ -136,6 +161,9 @@ def write_trades_csv(ledger: TradeLedger, path: str | Path) -> None:
         "exit_reason",
         "stop_price",
         "pnl_points",
+        "gross_pnl_dollars",
+        "commission_dollars",
+        "net_pnl_dollars",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -151,7 +179,12 @@ def write_trade_summary_json(ledger: TradeLedger, path: str | Path) -> None:
     output_path.write_text(json.dumps(ledger.summary(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _open_long_trade(order_intent: OrderIntent, bar: MarketBar, trade_number: int) -> _OpenTrade:
+def _open_long_trade(
+    order_intent: OrderIntent,
+    bar: MarketBar,
+    trade_number: int,
+    costs: SimulationCosts,
+) -> _OpenTrade:
     stop_price = float(order_intent.metadata["stop_price"])
     return _OpenTrade(
         trade_id=f"trade-{trade_number:08d}",
@@ -159,7 +192,7 @@ def _open_long_trade(order_intent: OrderIntent, bar: MarketBar, trade_number: in
         side="long",
         quantity=order_intent.quantity,
         entry_timestamp_utc=bar.timestamp_utc,
-        entry_price=bar.close,
+        entry_price=bar.close + costs.slippage_points_per_side,
         stop_price=stop_price,
         metadata={"entry_reason": order_intent.reason},
     )
@@ -170,7 +203,12 @@ def _close_trade(
     exit_timestamp_utc: str,
     exit_price: float,
     exit_reason: str,
+    costs: SimulationCosts,
 ) -> TradeFill:
+    adjusted_exit_price = exit_price - costs.slippage_points_per_side
+    pnl_points = adjusted_exit_price - open_trade.entry_price
+    gross_pnl_dollars = pnl_points * costs.point_value * open_trade.quantity
+    commission_dollars = 2 * costs.commission_per_contract * open_trade.quantity
     return TradeFill(
         trade_id=open_trade.trade_id,
         symbol=open_trade.symbol,
@@ -179,9 +217,12 @@ def _close_trade(
         entry_timestamp_utc=open_trade.entry_timestamp_utc,
         entry_price=open_trade.entry_price,
         exit_timestamp_utc=exit_timestamp_utc,
-        exit_price=exit_price,
+        exit_price=adjusted_exit_price,
         exit_reason=exit_reason,
         stop_price=open_trade.stop_price,
-        pnl_points=exit_price - open_trade.entry_price,
+        pnl_points=pnl_points,
+        gross_pnl_dollars=gross_pnl_dollars,
+        commission_dollars=commission_dollars,
+        net_pnl_dollars=gross_pnl_dollars - commission_dollars,
         metadata=dict(open_trade.metadata),
     )

@@ -11,6 +11,7 @@ from full_python.data.contract_calendar import build_dominant_contract_calendar
 from full_python.data.inventory import inspect_databento_ohlcv_folder
 from full_python.data.loaders import CsvBarColumnMap, iter_csv_bars, load_csv_bars, profile_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
+from full_python.data.sessions import filter_bars_by_session
 from full_python.data.selected_stream import (
     build_selected_contract_stream,
     write_selected_contract_stream_csv,
@@ -18,6 +19,7 @@ from full_python.data.selected_stream import (
 )
 from full_python.events import StreamingEventLedger
 from full_python.execution.simulator import (
+    SimulationCosts,
     simulate_strategy_trades,
     write_trade_summary_json,
     write_trades_csv,
@@ -222,6 +224,10 @@ def run_baseline_trade_simulation(
     data_path: str | Path,
     output_dir: str | Path,
     stream_input: bool = False,
+    session: str = "all",
+    point_value: float = 2.0,
+    slippage_points_per_side: float = 1.0,
+    commission_per_contract: float = 1.0,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -236,8 +242,15 @@ def run_baseline_trade_simulation(
         volume="volume",
     )
     bars = iter_csv_bars(input_path, column_map) if stream_input else load_csv_bars(input_path, column_map)
+    session_bars = filter_bars_by_session(bars, session)
     strategy = BaselineMomentumStrategy(BaselineMomentumConfig())
-    ledger = simulate_strategy_trades(bars, strategy)
+    costs = SimulationCosts(
+        point_value=point_value,
+        slippage_points_per_side=slippage_points_per_side,
+        commission_per_contract=commission_per_contract,
+    )
+    ledger = simulate_strategy_trades(session_bars, strategy, costs=costs)
+    ledger.assumptions["session"] = session
     trades_path = run_dir / "trades.csv"
     summary_path = run_dir / "trade_summary.json"
     write_trades_csv(ledger, trades_path)
@@ -383,11 +396,39 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         action="store_true",
         help="Stream CSV bars instead of loading the whole input into memory",
     )
+    parser.add_argument(
+        "--session",
+        choices=["all", "rth"],
+        default="all",
+        help="Session filter for trade simulation",
+    )
+    parser.add_argument(
+        "--point-value",
+        type=float,
+        default=2.0,
+        help="Dollar value per point per contract",
+    )
+    parser.add_argument(
+        "--slippage-points-per-side",
+        type=float,
+        default=1.0,
+        help="Slippage in points applied to entry and exit",
+    )
+    parser.add_argument(
+        "--commission-per-contract",
+        type=float,
+        default=1.0,
+        help="Commission dollars per contract per side",
+    )
     args = parser.parse_args(argv)
     return run_baseline_trade_simulation(
         data_path=args.data,
         output_dir=args.output_dir,
         stream_input=args.stream_input,
+        session=args.session,
+        point_value=args.point_value,
+        slippage_points_per_side=args.slippage_points_per_side,
+        commission_per_contract=args.commission_per_contract,
     )
 
 

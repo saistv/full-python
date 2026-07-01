@@ -1,5 +1,11 @@
-from full_python.execution.simulator import simulate_strategy_trades
+from full_python.execution.simulator import SimulationCosts, simulate_strategy_trades
 from full_python.models import MarketBar, OrderIntent, SignalDecision, StrategyResult
+
+ZERO_COSTS = SimulationCosts(
+    point_value=1.0,
+    slippage_points_per_side=0.0,
+    commission_per_contract=0.0,
+)
 
 
 class EntryThenStopStrategy:
@@ -49,7 +55,7 @@ def test_simulate_strategy_trades_exits_long_when_stop_touched() -> None:
         MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 101.0, 94.75, 96.0, 12),
     ]
 
-    ledger = simulate_strategy_trades(bars, EntryThenStopStrategy())
+    ledger = simulate_strategy_trades(bars, EntryThenStopStrategy(), costs=ZERO_COSTS)
 
     assert len(ledger.trades) == 1
     trade = ledger.trades[0]
@@ -68,7 +74,7 @@ def test_simulate_strategy_trades_ignores_new_entries_while_position_open() -> N
         MarketBar("2026-06-30T13:32:00Z", "NQU2026", 101.0, 103.0, 100.0, 102.0, 15),
     ]
 
-    ledger = simulate_strategy_trades(bars, EntryEveryBarStrategy())
+    ledger = simulate_strategy_trades(bars, EntryEveryBarStrategy(), costs=ZERO_COSTS)
 
     assert len(ledger.trades) == 1
     assert ledger.trades[0].entry_timestamp_utc == "2026-06-30T13:30:00Z"
@@ -83,7 +89,7 @@ def test_simulate_strategy_trades_force_exits_on_symbol_change() -> None:
         MarketBar("2026-06-30T13:31:00Z", "NQU2026", 110.0, 112.0, 109.0, 111.0, 12),
     ]
 
-    ledger = simulate_strategy_trades(bars, EntryEveryBarStrategy())
+    ledger = simulate_strategy_trades(bars, EntryEveryBarStrategy(), costs=ZERO_COSTS)
 
     assert len(ledger.trades) == 2
     assert ledger.trades[0].symbol == "NQM2026"
@@ -99,10 +105,37 @@ def test_trade_ledger_summary_counts_wins_losses_and_points() -> None:
         MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 102.0, 99.0, 101.0, 12),
     ]
 
-    ledger = simulate_strategy_trades(bars, EntryEveryBarStrategy())
+    ledger = simulate_strategy_trades(bars, EntryEveryBarStrategy(), costs=ZERO_COSTS)
 
     assert ledger.summary()["trade_count"] == 1
     assert ledger.summary()["winning_trades"] == 1
     assert ledger.summary()["losing_trades"] == 0
     assert ledger.summary()["total_pnl_points"] == 1.0
     assert ledger.summary()["exit_reason_counts"] == {"end_of_data": 1}
+
+
+def test_simulate_strategy_trades_applies_slippage_commission_and_point_value() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 102.0, 99.0, 101.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        EntryEveryBarStrategy(),
+        costs=SimulationCosts(
+            point_value=2.0,
+            slippage_points_per_side=1.0,
+            commission_per_contract=1.0,
+        ),
+    )
+
+    trade = ledger.trades[0]
+    assert trade.entry_price == 101.0
+    assert trade.exit_price == 100.0
+    assert trade.pnl_points == -1.0
+    assert trade.gross_pnl_dollars == -2.0
+    assert trade.commission_dollars == 2.0
+    assert trade.net_pnl_dollars == -4.0
+    assert ledger.summary()["total_net_pnl_dollars"] == -4.0
+    assert ledger.summary()["assumptions"]["point_value"] == 2.0

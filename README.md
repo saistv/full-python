@@ -126,7 +126,7 @@ Current replay can load this CSV through the simple CSV path while ignoring the 
 Simulate first-pass baseline trades from a CSV bar stream:
 
 ```bash
-PYTHONPATH=src python3 -m full_python.cli simulate-baseline-trades --data path/to/selected_bars.csv --output-dir runs/trade-ledger --stream-input
+PYTHONPATH=src python3 -m full_python.cli simulate-baseline-trades --data path/to/selected_bars.csv --output-dir runs/trade-ledger --stream-input --session rth --point-value 2 --slippage-points-per-side 1 --commission-per-contract 1
 ```
 
 This writes:
@@ -134,4 +134,4 @@ This writes:
 - `trades.csv`
 - `trade_summary.json`
 
-Current assumptions are deliberately simple: one long position at a time, entry at current bar close, stop exit when a later bar low touches the stop, symbol-change exit at the new contract bar open, end-of-data exit at final close, no slippage, and no commissions.
+Current assumptions are deliberately simple: one long position at a time, entry at current bar close, stop exit when a later bar low touches the stop, symbol-change exit at the new contract bar open, and end-of-data exit at final close. Use `--session rth` for full regular trading hours based on New York time. Cost assumptions are explicit through point value, slippage points per side, and commission per contract per side.
