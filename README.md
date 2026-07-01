@@ -126,7 +126,7 @@ Current replay can load this CSV through the simple CSV path while ignoring the 
 Simulate first-pass baseline trades from a CSV bar stream:
 
 ```bash
-PYTHONPATH=src python3 -m full_python.cli simulate-baseline-trades --data path/to/selected_bars.csv --output-dir runs/trade-ledger --stream-input --session rth --point-value 2 --slippage-points-per-side 1 --commission-per-contract 1
+PYTHONPATH=src python3 -m full_python.cli simulate-baseline-trades --data path/to/selected_bars.csv --output-dir runs/trade-ledger --stream-input --session rth --point-value 2 --slippage-points-per-side 1 --commission-per-contract 1 --symbol-change-exit-mode previous_close
 ```
 
 This writes:
@@ -134,7 +134,9 @@ This writes:
 - `trades.csv`
 - `trade_summary.json`
 
-Current assumptions are deliberately simple: one long position at a time, entry at current bar close, stop exit when a later bar low touches the stop, symbol-change exit at the new contract bar open, and end-of-data exit at final close. Use `--session rth` for full regular trading hours based on New York time. Cost assumptions are explicit through point value, slippage points per side, and commission per contract per side.
+Current assumptions are deliberately simple: one long position at a time, entry at current bar close, stop exit when a later bar low touches the stop, and end-of-data exit at final close. Use `--session rth` for full regular trading hours based on New York time. Cost assumptions are explicit through point value, slippage points per side, and commission per contract per side.
+
+Use `--symbol-change-exit-mode previous_close` for research runs that should avoid importing new-contract roll gaps into open-trade P&L. The legacy-compatible mode is `next_open`, which exits at the new contract bar open. Trade ledgers include `max_favorable_excursion_points` and `max_adverse_excursion_points` for every trade.
 
 ## Trade Analysis Report
 
@@ -148,4 +150,4 @@ This writes:
 
 - `trade_analysis.json`
 
-The report includes headline P&L, drawdown, max loss streak, top-trade dependency, monthly and quarterly breakdowns, exit-reason breakdowns, symbol breakdowns, and side breakdowns. Use this after every candidate simulation so results are judged by survivability and robustness, not just net P&L.
+The report includes headline P&L, drawdown, max loss streak, top-trade dependency, monthly and quarterly breakdowns, exit-reason breakdowns, symbol breakdowns, side breakdowns, and stopped-trade MFE/MAE metrics. Use this after every candidate simulation so results are judged by survivability and robustness, not just net P&L.

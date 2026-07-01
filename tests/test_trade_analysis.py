@@ -8,15 +8,16 @@ def test_trade_analysis_calculates_periods_drawdown_streaks_and_dependency(tmp_p
     trades_path.write_text(
         "trade_id,symbol,side,quantity,entry_timestamp_utc,entry_price,exit_timestamp_utc,"
         "exit_price,exit_reason,stop_price,pnl_points,gross_pnl_dollars,"
-        "commission_dollars,net_pnl_dollars\n"
+        "commission_dollars,net_pnl_dollars,max_favorable_excursion_points,"
+        "max_adverse_excursion_points\n"
         "trade-00000001,NQH6,long,1,2026-01-05T14:30:00Z,100,2026-01-05T14:40:00Z,"
-        "95,stop,95,-5,-10,2,-12\n"
+        "95,stop,95,-5,-10,2,-12,3,-5\n"
         "trade-00000002,NQH6,long,1,2026-01-06T14:30:00Z,100,2026-01-06T14:40:00Z,"
-        "120,symbol_change,95,20,40,2,38\n"
+        "120,symbol_change,95,20,40,2,38,22,-1\n"
         "trade-00000003,NQM6,short,1,2026-02-03T14:30:00Z,100,2026-02-03T14:40:00Z,"
-        "103,stop,103,-3,-6,2,-8\n"
+        "103,stop,103,-3,-6,2,-8,7,-3\n"
         "trade-00000004,NQM6,long,1,2026-02-04T14:30:00Z,100,2026-02-04T14:40:00Z,"
-        "90,stop,90,-10,-20,2,-22\n",
+        "90,stop,90,-10,-20,2,-22,1,-10\n",
         encoding="utf-8",
     )
 
@@ -36,3 +37,7 @@ def test_trade_analysis_calculates_periods_drawdown_streaks_and_dependency(tmp_p
     assert analysis["exit_reason_breakdown"]["stop"]["trade_count"] == 3
     assert analysis["symbol_breakdown"]["NQH6"]["net_pnl_dollars"] == 26.0
     assert analysis["side_breakdown"]["short"]["trade_count"] == 1
+    assert analysis["stopped_trade_excursion"]["trade_count"] == 3
+    assert analysis["stopped_trade_excursion"]["average_mfe_points"] == 11 / 3
+    assert analysis["stopped_trade_excursion"]["max_mfe_points"] == 7.0
+    assert analysis["stopped_trade_excursion"]["average_mae_points"] == -6.0

@@ -233,6 +233,7 @@ def run_baseline_trade_simulation(
     point_value: float = 2.0,
     slippage_points_per_side: float = 1.0,
     commission_per_contract: float = 1.0,
+    symbol_change_exit_mode: str = "next_open",
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -254,7 +255,12 @@ def run_baseline_trade_simulation(
         slippage_points_per_side=slippage_points_per_side,
         commission_per_contract=commission_per_contract,
     )
-    ledger = simulate_strategy_trades(session_bars, strategy, costs=costs)
+    ledger = simulate_strategy_trades(
+        session_bars,
+        strategy,
+        costs=costs,
+        symbol_change_exit_mode=symbol_change_exit_mode,
+    )
     ledger.assumptions["session"] = session
     trades_path = run_dir / "trades.csv"
     summary_path = run_dir / "trade_summary.json"
@@ -439,6 +445,12 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         default=1.0,
         help="Commission dollars per contract per side",
     )
+    parser.add_argument(
+        "--symbol-change-exit-mode",
+        choices=["next_open", "previous_close"],
+        default="next_open",
+        help="How to close an open trade when the selected contract changes",
+    )
     args = parser.parse_args(argv)
     return run_baseline_trade_simulation(
         data_path=args.data,
@@ -448,6 +460,7 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         point_value=args.point_value,
         slippage_points_per_side=args.slippage_points_per_side,
         commission_per_contract=args.commission_per_contract,
+        symbol_change_exit_mode=args.symbol_change_exit_mode,
     )
 
 

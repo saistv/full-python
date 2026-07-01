@@ -99,6 +99,42 @@ def test_simulate_strategy_trades_force_exits_on_symbol_change() -> None:
     assert ledger.trades[1].symbol == "NQU2026"
 
 
+def test_simulate_strategy_trades_tracks_long_mfe_and_mae() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 108.0, 97.0, 104.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 104.0, 106.0, 94.75, 95.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(bars, EntryThenStopStrategy(), costs=ZERO_COSTS)
+
+    trade = ledger.trades[0]
+    assert trade.max_favorable_excursion_points == 8.0
+    assert trade.max_adverse_excursion_points == -5.25
+
+
+def test_simulate_strategy_trades_can_exit_symbol_change_at_previous_close() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQM2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQM2026", 100.0, 103.0, 99.0, 102.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 110.0, 112.0, 109.0, 111.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        EntryEveryBarStrategy(),
+        costs=ZERO_COSTS,
+        symbol_change_exit_mode="previous_close",
+    )
+
+    assert ledger.trades[0].symbol == "NQM2026"
+    assert ledger.trades[0].exit_timestamp_utc == "2026-06-30T13:31:00Z"
+    assert ledger.trades[0].exit_price == 102.0
+    assert ledger.trades[0].exit_reason == "symbol_change"
+    assert ledger.summary()["assumptions"]["symbol_change_exit"] == "previous_contract_last_close"
+    assert ledger.summary()["assumptions"]["symbol_change_exit_mode"] == "previous_close"
+
+
 def test_trade_ledger_summary_counts_wins_losses_and_points() -> None:
     bars = [
         MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),

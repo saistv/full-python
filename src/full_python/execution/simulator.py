@@ -45,6 +45,8 @@ class TradeFill:
     gross_pnl_dollars: float
     commission_dollars: float
     net_pnl_dollars: float
+    max_favorable_excursion_points: float
+    max_adverse_excursion_points: float
     metadata: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
@@ -60,6 +62,8 @@ class _OpenTrade:
     entry_timestamp_utc: str
     entry_price: float
     stop_price: float
+    max_favorable_excursion_points: float
+    max_adverse_excursion_points: float
     metadata: dict[str, Any]
 
 
@@ -100,6 +104,7 @@ ASSUMPTIONS = {
     "entry_fill": "current_bar_close",
     "stop_fill": "stop_price_when_later_bar_low_touches_stop",
     "symbol_change_exit": "new_contract_bar_open",
+    "symbol_change_exit_mode": "next_open",
     "final_exit": "last_bar_close",
 }
 
@@ -109,7 +114,10 @@ def simulate_strategy_trades(
     strategy: Strategy,
     *,
     costs: SimulationCosts | None = None,
+    symbol_change_exit_mode: str = "next_open",
 ) -> TradeLedger:
+    if symbol_change_exit_mode not in {"next_open", "previous_close"}:
+        raise ValueError(f"Unsupported symbol_change_exit_mode: {symbol_change_exit_mode}")
     active_costs = SimulationCosts() if costs is None else costs
     trades: list[TradeFill] = []
     open_trade: _OpenTrade | None = None
@@ -117,14 +125,21 @@ def simulate_strategy_trades(
     last_bar: MarketBar | None = None
 
     for bar in bars:
-        last_bar = bar
         if open_trade is not None and bar.symbol != open_trade.symbol:
-            trades.append(_close_trade(open_trade, bar.timestamp_utc, bar.open, "symbol_change", active_costs))
+            if symbol_change_exit_mode == "previous_close" and last_bar is not None:
+                trades.append(
+                    _close_trade(open_trade, last_bar.timestamp_utc, last_bar.close, "symbol_change", active_costs)
+                )
+            else:
+                trades.append(_close_trade(open_trade, bar.timestamp_utc, bar.open, "symbol_change", active_costs))
             open_trade = None
 
         if open_trade is not None and open_trade.side == "long" and bar.low <= open_trade.stop_price:
+            open_trade = _update_long_excursion(open_trade, bar)
             trades.append(_close_trade(open_trade, bar.timestamp_utc, open_trade.stop_price, "stop", active_costs))
             open_trade = None
+        elif open_trade is not None and open_trade.side == "long":
+            open_trade = _update_long_excursion(open_trade, bar)
 
         result = strategy.on_bar(bar)
         for order_intent in result.order_intents:
@@ -135,6 +150,7 @@ def simulate_strategy_trades(
                 ignored_order_intents += 1
                 continue
             open_trade = _open_long_trade(order_intent, bar, len(trades) + 1, active_costs)
+        last_bar = bar
 
     if open_trade is not None and last_bar is not None:
         trades.append(_close_trade(open_trade, last_bar.timestamp_utc, last_bar.close, "end_of_data", active_costs))
@@ -142,8 +158,19 @@ def simulate_strategy_trades(
     return TradeLedger(
         trades=trades,
         ignored_order_intents=ignored_order_intents,
-        assumptions={**ASSUMPTIONS, **active_costs.to_assumptions()},
+        assumptions={
+            **ASSUMPTIONS,
+            "symbol_change_exit": _symbol_change_exit_assumption(symbol_change_exit_mode),
+            "symbol_change_exit_mode": symbol_change_exit_mode,
+            **active_costs.to_assumptions(),
+        },
     )
+
+
+def _symbol_change_exit_assumption(symbol_change_exit_mode: str) -> str:
+    if symbol_change_exit_mode == "previous_close":
+        return "previous_contract_last_close"
+    return "new_contract_bar_open"
 
 
 def write_trades_csv(ledger: TradeLedger, path: str | Path) -> None:
@@ -164,6 +191,8 @@ def write_trades_csv(ledger: TradeLedger, path: str | Path) -> None:
         "gross_pnl_dollars",
         "commission_dollars",
         "net_pnl_dollars",
+        "max_favorable_excursion_points",
+        "max_adverse_excursion_points",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -194,7 +223,30 @@ def _open_long_trade(
         entry_timestamp_utc=bar.timestamp_utc,
         entry_price=bar.close + costs.slippage_points_per_side,
         stop_price=stop_price,
+        max_favorable_excursion_points=max(0.0, bar.high - (bar.close + costs.slippage_points_per_side)),
+        max_adverse_excursion_points=min(0.0, bar.low - (bar.close + costs.slippage_points_per_side)),
         metadata={"entry_reason": order_intent.reason},
+    )
+
+
+def _update_long_excursion(open_trade: _OpenTrade, bar: MarketBar) -> _OpenTrade:
+    return _OpenTrade(
+        trade_id=open_trade.trade_id,
+        symbol=open_trade.symbol,
+        side=open_trade.side,
+        quantity=open_trade.quantity,
+        entry_timestamp_utc=open_trade.entry_timestamp_utc,
+        entry_price=open_trade.entry_price,
+        stop_price=open_trade.stop_price,
+        max_favorable_excursion_points=max(
+            open_trade.max_favorable_excursion_points,
+            bar.high - open_trade.entry_price,
+        ),
+        max_adverse_excursion_points=min(
+            open_trade.max_adverse_excursion_points,
+            bar.low - open_trade.entry_price,
+        ),
+        metadata=dict(open_trade.metadata),
     )
 
 
@@ -224,5 +276,7 @@ def _close_trade(
         gross_pnl_dollars=gross_pnl_dollars,
         commission_dollars=commission_dollars,
         net_pnl_dollars=gross_pnl_dollars - commission_dollars,
+        max_favorable_excursion_points=open_trade.max_favorable_excursion_points,
+        max_adverse_excursion_points=open_trade.max_adverse_excursion_points,
         metadata=dict(open_trade.metadata),
     )

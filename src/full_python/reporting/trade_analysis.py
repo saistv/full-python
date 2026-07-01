@@ -20,6 +20,8 @@ class AnalyzedTrade:
     gross_pnl_dollars: float
     commission_dollars: float
     net_pnl_dollars: float
+    max_favorable_excursion_points: float
+    max_adverse_excursion_points: float
 
 
 def load_trade_csv(path: str | Path) -> list[AnalyzedTrade]:
@@ -54,6 +56,7 @@ def build_trade_analysis(trades: list[AnalyzedTrade]) -> dict[str, Any]:
         "exit_reason_breakdown": _build_category_breakdown(trades, lambda trade: trade.exit_reason),
         "symbol_breakdown": _build_category_breakdown(trades, lambda trade: trade.symbol),
         "side_breakdown": _build_category_breakdown(trades, lambda trade: trade.side),
+        "stopped_trade_excursion": _build_stopped_trade_excursion(trades),
     }
 
 
@@ -73,6 +76,8 @@ def _trade_from_row(row: dict[str, str]) -> AnalyzedTrade:
         gross_pnl_dollars=float(row["gross_pnl_dollars"]),
         commission_dollars=float(row["commission_dollars"]),
         net_pnl_dollars=float(row["net_pnl_dollars"]),
+        max_favorable_excursion_points=float(row.get("max_favorable_excursion_points") or 0.0),
+        max_adverse_excursion_points=float(row.get("max_adverse_excursion_points") or 0.0),
     )
 
 
@@ -107,6 +112,27 @@ def _build_top_trade_dependency(trades: list[AnalyzedTrade]) -> dict[str, float]
     for count in (1, 3, 5):
         dependency[f"pnl_without_best_{count}_trades"] = total_net_pnl - sum(best_pnls[:count])
     return dependency
+
+
+def _build_stopped_trade_excursion(trades: list[AnalyzedTrade]) -> dict[str, float | int]:
+    stopped_trades = [trade for trade in trades if trade.exit_reason == "stop"]
+    if not stopped_trades:
+        return {
+            "trade_count": 0,
+            "average_mfe_points": 0.0,
+            "max_mfe_points": 0.0,
+            "average_mae_points": 0.0,
+            "min_mae_points": 0.0,
+        }
+    total_mfe = sum(trade.max_favorable_excursion_points for trade in stopped_trades)
+    total_mae = sum(trade.max_adverse_excursion_points for trade in stopped_trades)
+    return {
+        "trade_count": len(stopped_trades),
+        "average_mfe_points": total_mfe / len(stopped_trades),
+        "max_mfe_points": max(trade.max_favorable_excursion_points for trade in stopped_trades),
+        "average_mae_points": total_mae / len(stopped_trades),
+        "min_mae_points": min(trade.max_adverse_excursion_points for trade in stopped_trades),
+    }
 
 
 def _build_period_breakdown(trades: list[AnalyzedTrade], period: str) -> dict[str, dict[str, float | int]]:
