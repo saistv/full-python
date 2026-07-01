@@ -17,6 +17,11 @@ from full_python.data.selected_stream import (
     write_selected_contract_stream_manifest,
 )
 from full_python.events import StreamingEventLedger
+from full_python.execution.simulator import (
+    simulate_strategy_trades,
+    write_trade_summary_json,
+    write_trades_csv,
+)
 from full_python.replay import ReplayEngine
 from full_python.reporting.survivability import build_survivability_report
 from full_python.strategy.baseline import BaselineMomentumStrategy
@@ -212,6 +217,34 @@ def run_selected_stream(
     return csv_path
 
 
+def run_baseline_trade_simulation(
+    *,
+    data_path: str | Path,
+    output_dir: str | Path,
+    stream_input: bool = False,
+) -> Path:
+    input_path = Path(data_path)
+    run_dir = Path(output_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    column_map = CsvBarColumnMap(
+        timestamp="timestamp",
+        symbol="symbol",
+        open="open",
+        high="high",
+        low="low",
+        close="close",
+        volume="volume",
+    )
+    bars = iter_csv_bars(input_path, column_map) if stream_input else load_csv_bars(input_path, column_map)
+    strategy = BaselineMomentumStrategy(BaselineMomentumConfig())
+    ledger = simulate_strategy_trades(bars, strategy)
+    trades_path = run_dir / "trades.csv"
+    summary_path = run_dir / "trade_summary.json"
+    write_trades_csv(ledger, trades_path)
+    write_trade_summary_json(ledger, summary_path)
+    return trades_path
+
+
 def _render_inventory_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Databento Contract Inventory",
@@ -341,6 +374,23 @@ def run_build_selected_stream_command(argv: list[str]) -> Path:
     )
 
 
+def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
+    parser = argparse.ArgumentParser(description="Simulate first-pass baseline trades from CSV bars.")
+    parser.add_argument("--data", required=True, help="Input CSV market-bar data file")
+    parser.add_argument("--output-dir", required=True, help="Directory for trades.csv and trade_summary.json")
+    parser.add_argument(
+        "--stream-input",
+        action="store_true",
+        help="Stream CSV bars instead of loading the whole input into memory",
+    )
+    args = parser.parse_args(argv)
+    return run_baseline_trade_simulation(
+        data_path=args.data,
+        output_dir=args.output_dir,
+        stream_input=args.stream_input,
+    )
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "inventory-databento":
         inventory_path = run_inventory_databento_command(sys.argv[2:])
@@ -353,6 +403,10 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "build-selected-stream":
         csv_path = run_build_selected_stream_command(sys.argv[2:])
         print(csv_path)
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "simulate-baseline-trades":
+        trades_path = run_simulate_baseline_trades_command(sys.argv[2:])
+        print(trades_path)
         return
 
     parser = argparse.ArgumentParser(description="Run the Full Python baseline replay.")

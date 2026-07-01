@@ -120,3 +120,18 @@ source_file,trading_date,selected_contract,selection_rule
 ```
 
 Current replay can load this CSV through the simple CSV path while ignoring the provenance columns. Research code should keep the manifest beside the CSV so the roll/selection assumptions stay attached to every run.
+
+## First Trade Ledger
+
+Simulate first-pass baseline trades from a CSV bar stream:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli simulate-baseline-trades --data path/to/selected_bars.csv --output-dir runs/trade-ledger --stream-input
+```
+
+This writes:
+
+- `trades.csv`
+- `trade_summary.json`
+
+Current assumptions are deliberately simple: one long position at a time, entry at current bar close, stop exit when a later bar low touches the stop, symbol-change exit at the new contract bar open, end-of-data exit at final close, no slippage, and no commissions.
