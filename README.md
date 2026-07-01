@@ -20,7 +20,7 @@ Build the canonical replay and event-ledger foundation:
 - `full_python.models`: immutable domain records for market bars, signal decisions, order intents, risk vetoes, stop updates, and exits.
 - `full_python.strategy`: baseline momentum configuration and placeholder strategy surface for deterministic replay wiring.
 - `full_python.replay`: deterministic replay loop that feeds bars to a strategy and records resulting events in a fixed order.
-- `full_python.reporting`: survivability metrics scaffolding for baseline reports.
+- `full_python.reporting`: survivability and trade-analysis metrics for baseline reports.
 - `full_python.cli`: baseline replay command that writes `events.jsonl` and `report.json`.
 
 ## Migration Rule
@@ -135,3 +135,17 @@ This writes:
 - `trade_summary.json`
 
 Current assumptions are deliberately simple: one long position at a time, entry at current bar close, stop exit when a later bar low touches the stop, symbol-change exit at the new contract bar open, and end-of-data exit at final close. Use `--session rth` for full regular trading hours based on New York time. Cost assumptions are explicit through point value, slippage points per side, and commission per contract per side.
+
+## Trade Analysis Report
+
+Analyze any generated `trades.csv` ledger:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli analyze-trades --trades runs/trade-ledger/trades.csv --output-dir runs/trade-analysis
+```
+
+This writes:
+
+- `trade_analysis.json`
+
+The report includes headline P&L, drawdown, max loss streak, top-trade dependency, monthly and quarterly breakdowns, exit-reason breakdowns, symbol breakdowns, and side breakdowns. Use this after every candidate simulation so results are judged by survivability and robustness, not just net P&L.

@@ -26,6 +26,11 @@ from full_python.execution.simulator import (
 )
 from full_python.replay import ReplayEngine
 from full_python.reporting.survivability import build_survivability_report
+from full_python.reporting.trade_analysis import (
+    build_trade_analysis,
+    load_trade_csv,
+    write_trade_analysis_json,
+)
 from full_python.strategy.baseline import BaselineMomentumStrategy
 from full_python.strategy.config import BaselineMomentumConfig
 
@@ -258,6 +263,20 @@ def run_baseline_trade_simulation(
     return trades_path
 
 
+def run_trade_analysis(
+    *,
+    trades_path: str | Path,
+    output_dir: str | Path,
+) -> Path:
+    run_dir = Path(output_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    trades = load_trade_csv(trades_path)
+    analysis = build_trade_analysis(trades)
+    analysis_path = run_dir / "trade_analysis.json"
+    write_trade_analysis_json(analysis, analysis_path)
+    return analysis_path
+
+
 def _render_inventory_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Databento Contract Inventory",
@@ -432,6 +451,17 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
     )
 
 
+def run_analyze_trades_command(argv: list[str]) -> Path:
+    parser = argparse.ArgumentParser(description="Analyze a generated trades.csv ledger.")
+    parser.add_argument("--trades", required=True, help="Input trades.csv file")
+    parser.add_argument("--output-dir", required=True, help="Directory for trade_analysis.json")
+    args = parser.parse_args(argv)
+    return run_trade_analysis(
+        trades_path=args.trades,
+        output_dir=args.output_dir,
+    )
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "inventory-databento":
         inventory_path = run_inventory_databento_command(sys.argv[2:])
@@ -448,6 +478,10 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "simulate-baseline-trades":
         trades_path = run_simulate_baseline_trades_command(sys.argv[2:])
         print(trades_path)
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "analyze-trades":
+        analysis_path = run_analyze_trades_command(sys.argv[2:])
+        print(analysis_path)
         return
 
     parser = argparse.ArgumentParser(description="Run the Full Python baseline replay.")
