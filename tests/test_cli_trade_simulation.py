@@ -145,3 +145,59 @@ def test_cli_simulate_baseline_trades_accepts_symbol_change_exit_mode(tmp_path: 
         trades = list(csv.DictReader(handle))
     assert "max_favorable_excursion_points" in trades[0]
     assert "max_adverse_excursion_points" in trades[0]
+
+
+def test_cli_simulate_baseline_trades_accepts_mfe_trailing_exit_conversion(tmp_path: Path) -> None:
+    data_path = tmp_path / "bars.csv"
+    data_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100,102,99,101,10\n"
+        "2026-06-30T13:32:00Z,NQU2026,101,131,100,130,10\n"
+        "2026-06-30T13:33:00Z,NQU2026,130,175,129,170,10\n"
+        "2026-06-30T13:34:00Z,NQU2026,170,172,153,155,10\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "trade-run"
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "full_python.cli",
+            "simulate-baseline-trades",
+            "--data",
+            str(data_path),
+            "--output-dir",
+            str(output_dir),
+            "--stream-input",
+            "--point-value",
+            "1",
+            "--slippage-points-per-side",
+            "0",
+            "--commission-per-contract",
+            "0",
+            "--mfe-trailing-activation-points",
+            "40",
+            "--mfe-trailing-giveback-points",
+            "20",
+        ],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    summary = json.loads((output_dir / "trade_summary.json").read_text(encoding="utf-8"))
+    assert summary["assumptions"]["exit_conversion"] == "mfe_trailing"
+    assert summary["assumptions"]["mfe_trailing_activation_points"] == 40.0
+    assert summary["assumptions"]["mfe_trailing_giveback_points"] == 20.0
+    with (output_dir / "trades.csv").open(encoding="utf-8", newline="") as handle:
+        trades = list(csv.DictReader(handle))
+    assert trades[0]["exit_reason"] == "mfe_trailing_stop"
+    assert trades[0]["exit_conversion_name"] == "mfe_trailing"
+    assert trades[0]["trailing_stop_price"] == "155.0"

@@ -19,6 +19,7 @@ from full_python.data.selected_stream import (
 )
 from full_python.events import StreamingEventLedger
 from full_python.execution.simulator import (
+    ExitConversionConfig,
     SimulationCosts,
     simulate_strategy_trades,
     write_trade_summary_json,
@@ -234,6 +235,8 @@ def run_baseline_trade_simulation(
     slippage_points_per_side: float = 1.0,
     commission_per_contract: float = 1.0,
     symbol_change_exit_mode: str = "next_open",
+    mfe_trailing_activation_points: float | None = None,
+    mfe_trailing_giveback_points: float | None = None,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -255,11 +258,16 @@ def run_baseline_trade_simulation(
         slippage_points_per_side=slippage_points_per_side,
         commission_per_contract=commission_per_contract,
     )
+    exit_conversion = ExitConversionConfig(
+        mfe_trailing_activation_points=mfe_trailing_activation_points,
+        mfe_trailing_giveback_points=mfe_trailing_giveback_points,
+    )
     ledger = simulate_strategy_trades(
         session_bars,
         strategy,
         costs=costs,
         symbol_change_exit_mode=symbol_change_exit_mode,
+        exit_conversion=exit_conversion,
     )
     ledger.assumptions["session"] = session
     trades_path = run_dir / "trades.csv"
@@ -451,6 +459,18 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         default="next_open",
         help="How to close an open trade when the selected contract changes",
     )
+    parser.add_argument(
+        "--mfe-trailing-activation-points",
+        type=float,
+        default=None,
+        help="Enable MFE trailing after this many favorable points",
+    )
+    parser.add_argument(
+        "--mfe-trailing-giveback-points",
+        type=float,
+        default=None,
+        help="Trail by this many points after MFE trailing activation",
+    )
     args = parser.parse_args(argv)
     return run_baseline_trade_simulation(
         data_path=args.data,
@@ -461,6 +481,8 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         slippage_points_per_side=args.slippage_points_per_side,
         commission_per_contract=args.commission_per_contract,
         symbol_change_exit_mode=args.symbol_change_exit_mode,
+        mfe_trailing_activation_points=args.mfe_trailing_activation_points,
+        mfe_trailing_giveback_points=args.mfe_trailing_giveback_points,
     )
 
 

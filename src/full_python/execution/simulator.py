@@ -30,6 +30,39 @@ class SimulationCosts:
 
 
 @dataclass(frozen=True)
+class ExitConversionConfig:
+    mfe_trailing_activation_points: float | None = None
+    mfe_trailing_giveback_points: float | None = None
+
+    def __post_init__(self) -> None:
+        has_activation = self.mfe_trailing_activation_points is not None
+        has_giveback = self.mfe_trailing_giveback_points is not None
+        if has_activation != has_giveback:
+            raise ValueError("MFE trailing requires both activation and giveback points")
+        if self.mfe_trailing_activation_points is not None and self.mfe_trailing_activation_points <= 0:
+            raise ValueError("MFE trailing activation points must be positive")
+        if self.mfe_trailing_giveback_points is not None and self.mfe_trailing_giveback_points <= 0:
+            raise ValueError("MFE trailing giveback points must be positive")
+
+    @property
+    def enabled(self) -> bool:
+        return self.mfe_trailing_activation_points is not None
+
+    def to_assumptions(self) -> dict[str, str | float]:
+        if not self.enabled:
+            return {
+                "exit_conversion": "none",
+            }
+        assert self.mfe_trailing_activation_points is not None
+        assert self.mfe_trailing_giveback_points is not None
+        return {
+            "exit_conversion": "mfe_trailing",
+            "mfe_trailing_activation_points": self.mfe_trailing_activation_points,
+            "mfe_trailing_giveback_points": self.mfe_trailing_giveback_points,
+        }
+
+
+@dataclass(frozen=True)
 class TradeFill:
     trade_id: str
     symbol: str
@@ -47,6 +80,8 @@ class TradeFill:
     net_pnl_dollars: float
     max_favorable_excursion_points: float
     max_adverse_excursion_points: float
+    trailing_stop_price: float | None
+    exit_conversion_name: str
     metadata: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
@@ -64,6 +99,8 @@ class _OpenTrade:
     stop_price: float
     max_favorable_excursion_points: float
     max_adverse_excursion_points: float
+    trailing_stop_price: float | None
+    exit_conversion_name: str
     metadata: dict[str, Any]
 
 
@@ -115,10 +152,12 @@ def simulate_strategy_trades(
     *,
     costs: SimulationCosts | None = None,
     symbol_change_exit_mode: str = "next_open",
+    exit_conversion: ExitConversionConfig | None = None,
 ) -> TradeLedger:
     if symbol_change_exit_mode not in {"next_open", "previous_close"}:
         raise ValueError(f"Unsupported symbol_change_exit_mode: {symbol_change_exit_mode}")
     active_costs = SimulationCosts() if costs is None else costs
+    active_exit_conversion = ExitConversionConfig() if exit_conversion is None else exit_conversion
     trades: list[TradeFill] = []
     open_trade: _OpenTrade | None = None
     ignored_order_intents = 0
@@ -134,12 +173,24 @@ def simulate_strategy_trades(
                 trades.append(_close_trade(open_trade, bar.timestamp_utc, bar.open, "symbol_change", active_costs))
             open_trade = None
 
-        if open_trade is not None and open_trade.side == "long" and bar.low <= open_trade.stop_price:
+        if open_trade is not None and open_trade.trailing_stop_price is not None and bar.low <= open_trade.trailing_stop_price:
+            trades.append(
+                _close_trade(
+                    open_trade,
+                    bar.timestamp_utc,
+                    open_trade.trailing_stop_price,
+                    "mfe_trailing_stop",
+                    active_costs,
+                )
+            )
+            open_trade = None
+        elif open_trade is not None and open_trade.side == "long" and bar.low <= open_trade.stop_price:
             open_trade = _update_long_excursion(open_trade, bar)
             trades.append(_close_trade(open_trade, bar.timestamp_utc, open_trade.stop_price, "stop", active_costs))
             open_trade = None
         elif open_trade is not None and open_trade.side == "long":
             open_trade = _update_long_excursion(open_trade, bar)
+            open_trade = _update_mfe_trailing_stop(open_trade, active_exit_conversion)
 
         result = strategy.on_bar(bar)
         for order_intent in result.order_intents:
@@ -163,6 +214,7 @@ def simulate_strategy_trades(
             "symbol_change_exit": _symbol_change_exit_assumption(symbol_change_exit_mode),
             "symbol_change_exit_mode": symbol_change_exit_mode,
             **active_costs.to_assumptions(),
+            **active_exit_conversion.to_assumptions(),
         },
     )
 
@@ -193,6 +245,8 @@ def write_trades_csv(ledger: TradeLedger, path: str | Path) -> None:
         "net_pnl_dollars",
         "max_favorable_excursion_points",
         "max_adverse_excursion_points",
+        "trailing_stop_price",
+        "exit_conversion_name",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -225,6 +279,8 @@ def _open_long_trade(
         stop_price=stop_price,
         max_favorable_excursion_points=max(0.0, bar.high - (bar.close + costs.slippage_points_per_side)),
         max_adverse_excursion_points=min(0.0, bar.low - (bar.close + costs.slippage_points_per_side)),
+        trailing_stop_price=None,
+        exit_conversion_name="none",
         metadata={"entry_reason": order_intent.reason},
     )
 
@@ -246,6 +302,40 @@ def _update_long_excursion(open_trade: _OpenTrade, bar: MarketBar) -> _OpenTrade
             open_trade.max_adverse_excursion_points,
             bar.low - open_trade.entry_price,
         ),
+        trailing_stop_price=open_trade.trailing_stop_price,
+        exit_conversion_name=open_trade.exit_conversion_name,
+        metadata=dict(open_trade.metadata),
+    )
+
+
+def _update_mfe_trailing_stop(
+    open_trade: _OpenTrade,
+    exit_conversion: ExitConversionConfig,
+) -> _OpenTrade:
+    if not exit_conversion.enabled:
+        return open_trade
+    assert exit_conversion.mfe_trailing_activation_points is not None
+    assert exit_conversion.mfe_trailing_giveback_points is not None
+    if open_trade.max_favorable_excursion_points < exit_conversion.mfe_trailing_activation_points:
+        return open_trade
+    candidate_stop = open_trade.entry_price + open_trade.max_favorable_excursion_points - exit_conversion.mfe_trailing_giveback_points
+    trailing_stop_price = (
+        candidate_stop
+        if open_trade.trailing_stop_price is None
+        else max(open_trade.trailing_stop_price, candidate_stop)
+    )
+    return _OpenTrade(
+        trade_id=open_trade.trade_id,
+        symbol=open_trade.symbol,
+        side=open_trade.side,
+        quantity=open_trade.quantity,
+        entry_timestamp_utc=open_trade.entry_timestamp_utc,
+        entry_price=open_trade.entry_price,
+        stop_price=open_trade.stop_price,
+        max_favorable_excursion_points=open_trade.max_favorable_excursion_points,
+        max_adverse_excursion_points=open_trade.max_adverse_excursion_points,
+        trailing_stop_price=trailing_stop_price,
+        exit_conversion_name="mfe_trailing",
         metadata=dict(open_trade.metadata),
     )
 
@@ -278,5 +368,7 @@ def _close_trade(
         net_pnl_dollars=gross_pnl_dollars - commission_dollars,
         max_favorable_excursion_points=open_trade.max_favorable_excursion_points,
         max_adverse_excursion_points=open_trade.max_adverse_excursion_points,
+        trailing_stop_price=open_trade.trailing_stop_price,
+        exit_conversion_name=open_trade.exit_conversion_name,
         metadata=dict(open_trade.metadata),
     )

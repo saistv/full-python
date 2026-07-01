@@ -1,4 +1,4 @@
-from full_python.execution.simulator import SimulationCosts, simulate_strategy_trades
+from full_python.execution.simulator import ExitConversionConfig, SimulationCosts, simulate_strategy_trades
 from full_python.models import MarketBar, OrderIntent, SignalDecision, StrategyResult
 
 ZERO_COSTS = SimulationCosts(
@@ -133,6 +133,54 @@ def test_simulate_strategy_trades_can_exit_symbol_change_at_previous_close() -> 
     assert ledger.trades[0].exit_reason == "symbol_change"
     assert ledger.summary()["assumptions"]["symbol_change_exit"] == "previous_contract_last_close"
     assert ledger.summary()["assumptions"]["symbol_change_exit_mode"] == "previous_close"
+
+
+def test_simulate_strategy_trades_exits_on_mfe_trailing_stop_after_activation() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 145.0, 99.0, 140.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 140.0, 142.0, 123.0, 125.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        EntryThenStopStrategy(),
+        costs=ZERO_COSTS,
+        exit_conversion=ExitConversionConfig(
+            mfe_trailing_activation_points=40.0,
+            mfe_trailing_giveback_points=20.0,
+        ),
+    )
+
+    trade = ledger.trades[0]
+    assert trade.exit_timestamp_utc == "2026-06-30T13:32:00Z"
+    assert trade.exit_reason == "mfe_trailing_stop"
+    assert trade.exit_price == 125.0
+    assert trade.trailing_stop_price == 125.0
+    assert trade.exit_conversion_name == "mfe_trailing"
+    assert trade.pnl_points == 25.0
+
+
+def test_simulate_strategy_trades_does_not_apply_mfe_trail_on_activation_bar() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100.0, 145.0, 120.0, 140.0, 12),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 140.0, 146.0, 139.0, 142.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        EntryThenStopStrategy(),
+        costs=ZERO_COSTS,
+        exit_conversion=ExitConversionConfig(
+            mfe_trailing_activation_points=40.0,
+            mfe_trailing_giveback_points=20.0,
+        ),
+    )
+
+    trade = ledger.trades[0]
+    assert trade.exit_reason == "end_of_data"
+    assert trade.trailing_stop_price == 126.0
 
 
 def test_trade_ledger_summary_counts_wins_losses_and_points() -> None:

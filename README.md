@@ -138,6 +138,14 @@ Current assumptions are deliberately simple: one long position at a time, entry 
 
 Use `--symbol-change-exit-mode previous_close` for research runs that should avoid importing new-contract roll gaps into open-trade P&L. The legacy-compatible mode is `next_open`, which exits at the new contract bar open. Trade ledgers include `max_favorable_excursion_points` and `max_adverse_excursion_points` for every trade.
 
+For exit-conversion research, enable completed-bar MFE trailing:
+
+```bash
+PYTHONPATH=src python3 -m full_python.cli simulate-baseline-trades --data path/to/selected_bars.csv --output-dir runs/trade-ledger-mfe-trail --stream-input --session rth --point-value 2 --slippage-points-per-side 1 --commission-per-contract 1 --symbol-change-exit-mode previous_close --mfe-trailing-activation-points 40 --mfe-trailing-giveback-points 20
+```
+
+The MFE trailing rule activates only after a completed bar has reached the configured favorable excursion. The resulting trailing stop can exit on later bars with `exit_reason=mfe_trailing_stop`; it does not assume same-bar high/low ordering.
+
 ## Trade Analysis Report
 
 Analyze any generated `trades.csv` ledger:
