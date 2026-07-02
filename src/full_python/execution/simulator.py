@@ -3,11 +3,17 @@ from __future__ import annotations
 import csv
 from collections import Counter
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any, Iterable, Protocol
+from zoneinfo import ZoneInfo
 
 from full_python.models import MarketBar, OrderIntent, StrategyResult
+
+
+NEW_YORK = ZoneInfo("America/New_York")
+UTC = ZoneInfo("UTC")
 
 
 class Strategy(Protocol):
@@ -177,6 +183,7 @@ ASSUMPTIONS = {
     "stop_fill": "stop_price_when_later_bar_low_touches_stop",
     "symbol_change_exit": "new_contract_bar_open",
     "symbol_change_exit_mode": "next_open",
+    "exit_at_session_end": False,
     "final_exit": "last_bar_close",
 }
 
@@ -189,6 +196,7 @@ def simulate_strategy_trades(
     symbol_change_exit_mode: str = "next_open",
     exit_conversion: ExitConversionConfig | None = None,
     reentry_control: ReentryControlConfig | None = None,
+    exit_at_session_end: bool = False,
 ) -> TradeLedger:
     if symbol_change_exit_mode not in {"next_open", "previous_close"}:
         raise ValueError(f"Unsupported symbol_change_exit_mode: {symbol_change_exit_mode}")
@@ -204,6 +212,17 @@ def simulate_strategy_trades(
 
     for bar in bars:
         exited_this_bar = False
+        if (
+            exit_at_session_end
+            and open_trade is not None
+            and last_bar is not None
+            and _session_date(bar) != _session_date(last_bar)
+        ):
+            trades.append(
+                _close_trade(open_trade, last_bar.timestamp_utc, last_bar.close, "session_end", active_costs)
+            )
+            open_trade = None
+
         if open_trade is not None and bar.symbol != open_trade.symbol:
             if symbol_change_exit_mode == "previous_close" and last_bar is not None:
                 trades.append(
@@ -273,11 +292,25 @@ def simulate_strategy_trades(
             **ASSUMPTIONS,
             "symbol_change_exit": _symbol_change_exit_assumption(symbol_change_exit_mode),
             "symbol_change_exit_mode": symbol_change_exit_mode,
+            "exit_at_session_end": exit_at_session_end,
             **active_costs.to_assumptions(),
             **active_exit_conversion.to_assumptions(),
             **active_reentry_control.to_assumptions(),
         },
     )
+
+
+def _session_date(bar: MarketBar) -> str:
+    return _parse_utc_timestamp(bar.timestamp_utc).astimezone(NEW_YORK).date().isoformat()
+
+
+def _parse_utc_timestamp(timestamp_utc: str) -> datetime:
+    if timestamp_utc.endswith("Z"):
+        timestamp_utc = f"{timestamp_utc[:-1]}+00:00"
+    parsed = datetime.fromisoformat(timestamp_utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _symbol_change_exit_assumption(symbol_change_exit_mode: str) -> str:

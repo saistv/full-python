@@ -245,6 +245,7 @@ def run_baseline_trade_simulation(
     fresh_breakout_clearance_points: float = 0.0,
     enable_long: bool = True,
     enable_short: bool = False,
+    exit_at_session_end: bool = False,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -285,6 +286,7 @@ def run_baseline_trade_simulation(
         strategy,
         costs=costs,
         symbol_change_exit_mode=symbol_change_exit_mode,
+        exit_at_session_end=exit_at_session_end,
         exit_conversion=exit_conversion,
         reentry_control=reentry_control,
     )
@@ -327,6 +329,7 @@ def run_exit_branch_sweep(
     cooldowns: tuple[int, ...],
     enable_long: bool = True,
     enable_short: bool = False,
+    exit_at_session_end: bool = False,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -354,6 +357,7 @@ def run_exit_branch_sweep(
             commission_per_contract=commission_per_contract,
             enable_long=enable_long,
             enable_short=enable_short,
+            exit_at_session_end=exit_at_session_end,
         ),
     )
     sweep["assumptions"] = {
@@ -365,6 +369,7 @@ def run_exit_branch_sweep(
         "require_fresh_breakout_after_exit": True,
         "enable_long": enable_long,
         "enable_short": enable_short,
+        "exit_at_session_end": exit_at_session_end,
     }
     json_path = run_dir / "sweep_results.json"
     csv_path = run_dir / "sweep_results.csv"
@@ -603,6 +608,11 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         action="store_true",
         help="Enable short-side entries for this simulation",
     )
+    parser.add_argument(
+        "--exit-at-session-end",
+        action="store_true",
+        help="Close any open trade at the last bar before the next New York session date",
+    )
     args = parser.parse_args(argv)
     return run_baseline_trade_simulation(
         data_path=args.data,
@@ -620,6 +630,7 @@ def run_simulate_baseline_trades_command(argv: list[str]) -> Path:
         fresh_breakout_clearance_points=args.fresh_breakout_clearance_points,
         enable_long=not args.disable_long,
         enable_short=args.enable_short,
+        exit_at_session_end=args.exit_at_session_end,
     )
 
 
@@ -662,6 +673,7 @@ def run_sweep_exit_branch_command(argv: list[str]) -> Path:
     parser.add_argument("--cooldowns", required=True, help="Comma-separated cooldown bars, e.g. 0,3,5")
     parser.add_argument("--disable-long", action="store_true", help="Disable long-side entries for this sweep")
     parser.add_argument("--enable-short", action="store_true", help="Enable short-side entries for this sweep")
+    parser.add_argument("--exit-at-session-end", action="store_true", help="Close open trades at session boundaries")
     args = parser.parse_args(argv)
     return run_exit_branch_sweep(
         data_path=args.data,
@@ -677,6 +689,7 @@ def run_sweep_exit_branch_command(argv: list[str]) -> Path:
         cooldowns=_parse_int_list(args.cooldowns),
         enable_long=not args.disable_long,
         enable_short=args.enable_short,
+        exit_at_session_end=args.exit_at_session_end,
     )
 
 

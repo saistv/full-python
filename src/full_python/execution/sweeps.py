@@ -27,6 +27,7 @@ class ExitSweepConfig:
     symbol_change_exit_mode: str = "previous_close"
     enable_long: bool = True
     enable_short: bool = False
+    exit_at_session_end: bool = False
 
 
 def run_exit_sweep(
@@ -88,6 +89,7 @@ def _run_one_combo(
             commission_per_contract=config.commission_per_contract,
         ),
         symbol_change_exit_mode=config.symbol_change_exit_mode,
+        exit_at_session_end=config.exit_at_session_end,
         exit_conversion=ExitConversionConfig(
             mfe_trailing_activation_points=activation,
             mfe_trailing_giveback_points=giveback,

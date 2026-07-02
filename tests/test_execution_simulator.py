@@ -216,6 +216,28 @@ def test_simulate_strategy_trades_can_exit_symbol_change_at_previous_close() -> 
     assert ledger.summary()["assumptions"]["symbol_change_exit_mode"] == "previous_close"
 
 
+def test_simulate_strategy_trades_can_exit_at_session_end_before_next_session() -> None:
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),
+        MarketBar("2026-06-30T19:59:00Z", "NQU2026", 100.0, 103.0, 99.0, 102.0, 12),
+        MarketBar("2026-07-01T13:30:00Z", "NQU2026", 110.0, 112.0, 109.0, 111.0, 12),
+    ]
+
+    ledger = simulate_strategy_trades(
+        bars,
+        EntryThenStopStrategy(),
+        costs=ZERO_COSTS,
+        exit_at_session_end=True,
+    )
+
+    assert len(ledger.trades) == 1
+    assert ledger.trades[0].exit_timestamp_utc == "2026-06-30T19:59:00Z"
+    assert ledger.trades[0].exit_price == 102.0
+    assert ledger.trades[0].exit_reason == "session_end"
+    assert ledger.trades[0].pnl_points == 2.0
+    assert ledger.summary()["assumptions"]["exit_at_session_end"] is True
+
+
 def test_simulate_strategy_trades_exits_on_mfe_trailing_stop_after_activation() -> None:
     bars = [
         MarketBar("2026-06-30T13:30:00Z", "NQU2026", 99.0, 101.0, 98.0, 100.0, 10),

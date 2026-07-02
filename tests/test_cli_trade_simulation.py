@@ -359,3 +359,53 @@ def test_cli_simulate_baseline_trades_can_enable_short_side(tmp_path: Path) -> N
     with (output_dir / "trades.csv").open(encoding="utf-8", newline="") as handle:
         trades = list(csv.DictReader(handle))
     assert trades[0]["side"] == "short"
+
+
+def test_cli_simulate_baseline_trades_can_exit_at_session_end(tmp_path: Path) -> None:
+    data_path = tmp_path / "bars.csv"
+    data_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100,102,99,101,10\n"
+        "2026-06-30T13:32:00Z,NQU2026,101,131,100,130,10\n"
+        "2026-06-30T19:59:00Z,NQU2026,130,133,129,132,10\n"
+        "2026-07-01T13:30:00Z,NQU2026,140,142,139,141,10\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "trade-run"
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "full_python.cli",
+            "simulate-baseline-trades",
+            "--data",
+            str(data_path),
+            "--output-dir",
+            str(output_dir),
+            "--stream-input",
+            "--point-value",
+            "1",
+            "--slippage-points-per-side",
+            "0",
+            "--commission-per-contract",
+            "0",
+            "--exit-at-session-end",
+        ],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    summary = json.loads((output_dir / "trade_summary.json").read_text(encoding="utf-8"))
+    assert summary["assumptions"]["exit_at_session_end"] is True
+    with (output_dir / "trades.csv").open(encoding="utf-8", newline="") as handle:
+        trades = list(csv.DictReader(handle))
+    assert trades[0]["exit_timestamp_utc"] == "2026-06-30T19:59:00Z"
+    assert trades[0]["exit_reason"] == "session_end"
