@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
+from full_python.data.loaders import CsvBarColumnMap, iter_csv_bars, load_csv_bars, profile_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
 
 
@@ -75,3 +75,55 @@ def test_load_csv_bars_converts_rows_to_market_bars(tmp_path: Path) -> None:
     assert bars[0].symbol == "NQU2026"
     assert bars[1].close == 101.75
     assert bars[1].volume == 12.0
+
+
+def test_iter_csv_bars_streams_rows_without_requiring_list(tmp_path: Path) -> None:
+    csv_path = tmp_path / "bars.csv"
+    csv_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100.5,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100.5,102,100.25,101.75,12\n",
+        encoding="utf-8",
+    )
+    column_map = CsvBarColumnMap(
+        timestamp="timestamp",
+        symbol="symbol",
+        open="open",
+        high="high",
+        low="low",
+        close="close",
+        volume="volume",
+    )
+
+    bars = iter_csv_bars(csv_path, column_map)
+
+    first = next(bars)
+    second = next(bars)
+    assert first.timestamp_utc == "2026-06-30T13:30:00Z"
+    assert second.close == 101.75
+
+
+def test_profile_csv_bars_counts_rows_and_timestamps(tmp_path: Path) -> None:
+    csv_path = tmp_path / "bars.csv"
+    csv_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100.5,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100.5,102,100.25,101.75,12\n",
+        encoding="utf-8",
+    )
+    column_map = CsvBarColumnMap(
+        timestamp="timestamp",
+        symbol="symbol",
+        open="open",
+        high="high",
+        low="low",
+        close="close",
+        volume="volume",
+    )
+
+    profile = profile_csv_bars(csv_path, column_map)
+
+    assert profile.row_count == 2
+    assert profile.start_timestamp_utc == "2026-06-30T13:30:00Z"
+    assert profile.end_timestamp_utc == "2026-06-30T13:31:00Z"
+    assert profile.symbols == ("NQU2026",)

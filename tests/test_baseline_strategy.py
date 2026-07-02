@@ -41,3 +41,38 @@ def test_baseline_strategy_accepts_breakout_after_history() -> None:
     assert third.signal.side == "long"
     assert third.order_intents[0].side == "buy"
     assert third.order_intents[0].metadata["stop_price"] == 72.5
+
+
+def test_baseline_strategy_accepts_short_breakdown_after_history() -> None:
+    strategy = BaselineMomentumStrategy(BaselineMomentumConfig(breakout_lookback_bars=2, enable_short=True))
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 100, 101, 99, 100, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100, 102, 98, 99, 10),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 99, 100, 96, 97.5, 10),
+    ]
+
+    strategy.on_bar(bars[0])
+    strategy.on_bar(bars[1])
+    third = strategy.on_bar(bars[2])
+
+    assert third.signal.decision == "accepted"
+    assert third.signal.side == "short"
+    assert third.signal.reason == "breakdown"
+    assert third.order_intents[0].side == "sell"
+    assert third.order_intents[0].metadata["stop_price"] == 127.5
+
+
+def test_baseline_strategy_keeps_short_breakdowns_disabled_by_default() -> None:
+    strategy = BaselineMomentumStrategy(BaselineMomentumConfig(breakout_lookback_bars=2))
+    bars = [
+        MarketBar("2026-06-30T13:30:00Z", "NQU2026", 100, 101, 99, 100, 10),
+        MarketBar("2026-06-30T13:31:00Z", "NQU2026", 100, 102, 98, 99, 10),
+        MarketBar("2026-06-30T13:32:00Z", "NQU2026", 99, 100, 96, 97.5, 10),
+    ]
+
+    strategy.on_bar(bars[0])
+    strategy.on_bar(bars[1])
+    third = strategy.on_bar(bars[2])
+
+    assert third.signal.decision == "rejected"
+    assert third.order_intents == ()
