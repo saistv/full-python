@@ -16,6 +16,8 @@ class EventType(str, Enum):
     EXIT = "exit"
     RISK_VETO = "risk_veto"
     STATE_TRANSITION = "state_transition"
+    FILL = "fill"
+    TRADE_CLOSED = "trade_closed"
 
 
 @dataclass(frozen=True)
