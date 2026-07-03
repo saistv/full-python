@@ -22,6 +22,8 @@ from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
 from full_python.strategy.adaptive_trend_config import AdaptiveTrendConfig, production_am_config
 from full_python.strategy.baseline import BaselineMomentumStrategy
 from full_python.strategy.config import BaselineMomentumConfig
+from full_python.strategy.vwap_reversion import VwapReversionStrategy
+from full_python.strategy.vwap_reversion_config import VwapReversionConfig
 
 TRADE_CSV_COLUMNS = [
     "symbol",
@@ -54,6 +56,9 @@ def build_strategy(strategy_name: str):
     if strategy_name == "adaptive_trend_am":
         config = production_am_config()
         return config, AdaptiveTrendStrategy(config)
+    if strategy_name == "vwap_reversion":
+        config = VwapReversionConfig()
+        return config, VwapReversionStrategy(config)
     raise ValueError(f"Unknown strategy: {strategy_name}")
 
 
@@ -224,8 +229,8 @@ def main() -> None:
     parser.add_argument(
         "--strategy",
         default="baseline",
-        choices=["baseline", "adaptive_trend", "adaptive_trend_am"],
-        help="adaptive_trend = flat 1-contract parity core; adaptive_trend_am = production sizing (AM 1-4 + DLL $1K)",
+        choices=["baseline", "adaptive_trend", "adaptive_trend_am", "vwap_reversion"],
+        help="adaptive_trend = flat parity core; adaptive_trend_am = production sizing; vwap_reversion = MR variant 1 (v0.2)",
     )
     parser.add_argument("--point-value", type=float, help="Override contract point value (default 2.0 = MNQ)")
     parser.add_argument("--commission-rt", type=float, help="Override round-trip commission per contract")

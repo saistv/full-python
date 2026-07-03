@@ -23,6 +23,8 @@ from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
 from full_python.simulation import SimulationConfig, SimulationEngine
 from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
 from full_python.strategy.adaptive_trend_config import AdaptiveTrendConfig, production_am_config
+from full_python.strategy.vwap_reversion import VwapReversionStrategy
+from full_python.strategy.vwap_reversion_config import VwapReversionConfig
 
 COLUMN_MAP = CsvBarColumnMap(
     timestamp="timestamp", symbol="symbol", open="open",
@@ -30,12 +32,20 @@ COLUMN_MAP = CsvBarColumnMap(
 )
 
 
-def _base_config(strategy_name: str) -> AdaptiveTrendConfig:
+def _base_config(strategy_name: str):
     if strategy_name == "adaptive_trend":
         return AdaptiveTrendConfig()
     if strategy_name == "adaptive_trend_am":
         return production_am_config()
+    if strategy_name == "vwap_reversion":
+        return VwapReversionConfig()
     raise ValueError(f"Unsupported strategy for perturbation: {strategy_name}")
+
+
+def _build_strategy(config):
+    if isinstance(config, VwapReversionConfig):
+        return VwapReversionStrategy(config)
+    return AdaptiveTrendStrategy(config)
 
 
 def _coerce(config: AdaptiveTrendConfig, name: str, raw: str) -> Any:
@@ -81,13 +91,13 @@ def run_perturbation(
         raise ValueError(f"No bars loaded from {data_path}")
     base = _base_config(strategy_name)
 
-    def simulate(config: AdaptiveTrendConfig) -> dict[str, Any]:
+    def simulate(config) -> dict[str, Any]:
         sim_config = simulation_config
-        if config.enable_daily_loss_limit and sim_config.daily_loss_limit is None:
+        if getattr(config, "enable_daily_loss_limit", False) and sim_config.daily_loss_limit is None:
             sim_config = dataclasses.replace(
                 sim_config, daily_loss_limit=config.daily_loss_limit
             )
-        result = SimulationEngine(sim_config).run(bars, AdaptiveTrendStrategy(config))
+        result = SimulationEngine(sim_config).run(bars, _build_strategy(config))
         return _metrics(result.trades, sim_config)
 
     baseline = simulate(base)
@@ -133,7 +143,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Single-axis parameter sensitivity sweeps.")
     parser.add_argument("--data", required=True)
     parser.add_argument("--strategy", default="adaptive_trend_am",
-                        choices=["adaptive_trend", "adaptive_trend_am"])
+                        choices=["adaptive_trend", "adaptive_trend_am", "vwap_reversion"])
     parser.add_argument(
         "--vary", action="append", required=True, metavar="NAME=V1,V2,...",
         help="Config field and comma-separated values; repeat for multiple axes",
@@ -165,7 +175,9 @@ def main() -> None:
         axes=axes, simulation_config=simulation_config,
     )
     if args.output:
-        Path(args.output).write_text(
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
     _print_table(report)
