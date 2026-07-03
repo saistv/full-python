@@ -265,11 +265,22 @@ def main() -> None:
     parser.add_argument("--trades", required=True, help="trades.csv from a simulation run")
     parser.add_argument("--tolerance-minutes", type=float, default=3.0)
     parser.add_argument("--tv-timezone", default="America/New_York")
+    parser.add_argument(
+        "--entries-before",
+        help="Ignore TV trades entered on/after this date (YYYY-MM-DD, TV timezone) — for trimming to data coverage",
+    )
     parser.add_argument("--output", help="Optional path for the full JSON report")
     args = parser.parse_args()
 
+    tv_trades = load_tv_trades(args.tv, args.tv_timezone)
+    if args.entries_before:
+        cutoff = datetime.strptime(args.entries_before, "%Y-%m-%d").replace(
+            tzinfo=ZoneInfo(args.tv_timezone)
+        )
+        tv_trades = [trade for trade in tv_trades if trade.entry_time < cutoff]
+
     report = reconcile(
-        load_tv_trades(args.tv, args.tv_timezone),
+        tv_trades,
         load_sim_trades(args.trades),
         tolerance_minutes=args.tolerance_minutes,
     )

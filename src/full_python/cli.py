@@ -59,6 +59,7 @@ def run_baseline(
     fill_timing: str = "next_bar_open",
     allow_dirty_data: bool = False,
     strategy_name: str = "baseline",
+    simulation_overrides: dict | None = None,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -100,7 +101,9 @@ def run_baseline(
         column_map=asdict(column_map),
     )
     strategy_config, strategy = build_strategy(strategy_name)
-    simulation_config = SimulationConfig(fill_timing=fill_timing)
+    simulation_config = SimulationConfig(
+        fill_timing=fill_timing, **(simulation_overrides or {})
+    )
     result = SimulationEngine(simulation_config).run(bars, strategy)
 
     # Deterministic run identity: same data + same configs => same run id.
@@ -205,13 +208,30 @@ def main() -> None:
         choices=["baseline", "adaptive_trend"],
         help="adaptive_trend = validated production signal core, flat 1-contract",
     )
+    parser.add_argument("--point-value", type=float, help="Override contract point value (default 2.0 = MNQ)")
+    parser.add_argument("--commission-rt", type=float, help="Override round-trip commission per contract")
+    parser.add_argument("--entry-slippage-points", type=float, help="Override entry slippage (e.g. 0.75 to mirror a TV run)")
+    parser.add_argument("--exit-slippage-points", type=float, help="Override exit slippage")
+    parser.add_argument("--rth-open-extra-slippage-points", type=float, help="Override the 9:30-9:45 extra entry slippage")
     args = parser.parse_args()
+    overrides = {}
+    if args.point_value is not None:
+        overrides["point_value"] = args.point_value
+    if args.commission_rt is not None:
+        overrides["commission_per_contract_round_trip"] = args.commission_rt
+    if args.entry_slippage_points is not None:
+        overrides["entry_slippage_points"] = args.entry_slippage_points
+    if args.exit_slippage_points is not None:
+        overrides["exit_slippage_points"] = args.exit_slippage_points
+    if args.rth_open_extra_slippage_points is not None:
+        overrides["rth_open_extra_entry_slippage_points"] = args.rth_open_extra_slippage_points
     report_path = run_baseline(
         data_path=args.data,
         output_dir=args.output_dir,
         fill_timing=args.fill_timing,
         allow_dirty_data=args.allow_dirty_data,
         strategy_name=args.strategy,
+        simulation_overrides=overrides,
     )
     print(report_path)
 
