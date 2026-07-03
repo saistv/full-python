@@ -16,6 +16,8 @@ from full_python.reporting.survivability import (
     build_survivability_report,
 )
 from full_python.simulation import SimulationConfig, SimulationEngine
+from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
+from full_python.strategy.adaptive_trend_config import AdaptiveTrendConfig
 from full_python.strategy.baseline import BaselineMomentumStrategy
 from full_python.strategy.config import BaselineMomentumConfig
 
@@ -40,12 +42,23 @@ TRADE_CSV_COLUMNS = [
 ]
 
 
+def build_strategy(strategy_name: str):
+    if strategy_name == "baseline":
+        config = BaselineMomentumConfig()
+        return config, BaselineMomentumStrategy(config)
+    if strategy_name == "adaptive_trend":
+        config = AdaptiveTrendConfig()
+        return config, AdaptiveTrendStrategy(config)
+    raise ValueError(f"Unknown strategy: {strategy_name}")
+
+
 def run_baseline(
     *,
     data_path: str | Path,
     output_dir: str | Path,
     fill_timing: str = "next_bar_open",
     allow_dirty_data: bool = False,
+    strategy_name: str = "baseline",
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -86,9 +99,8 @@ def run_baseline(
         file_size_bytes=input_path.stat().st_size,
         column_map=asdict(column_map),
     )
-    strategy_config = BaselineMomentumConfig()
+    strategy_config, strategy = build_strategy(strategy_name)
     simulation_config = SimulationConfig(fill_timing=fill_timing)
-    strategy = BaselineMomentumStrategy(strategy_config)
     result = SimulationEngine(simulation_config).run(bars, strategy)
 
     # Deterministic run identity: same data + same configs => same run id.
@@ -187,12 +199,19 @@ def main() -> None:
         action="store_true",
         help="Proceed despite structural data-quality issues (they are still reported)",
     )
+    parser.add_argument(
+        "--strategy",
+        default="baseline",
+        choices=["baseline", "adaptive_trend"],
+        help="adaptive_trend = validated production signal core, flat 1-contract",
+    )
     args = parser.parse_args()
     report_path = run_baseline(
         data_path=args.data,
         output_dir=args.output_dir,
         fill_timing=args.fill_timing,
         allow_dirty_data=args.allow_dirty_data,
+        strategy_name=args.strategy,
     )
     print(report_path)
 
