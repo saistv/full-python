@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import hashlib
+import json
+
+FILL_TIMING_NEXT_BAR_OPEN = "next_bar_open"
+FILL_TIMING_SIGNAL_BAR_CLOSE = "signal_bar_close"
+
+
+@dataclass(frozen=True)
+class SimulationConfig:
+    """Execution assumptions for the fill simulator.
+
+    Defaults are MNQ-first and deliberately pessimistic; see
+    docs/decisions/2026-07-03-fill-simulation-policy.md. ``signal_bar_close``
+    exists only for reconciliation against legacy TradingView runs and must
+    not be used for promotion decisions.
+    """
+
+    point_value: float = 2.0
+    commission_per_contract_round_trip: float = 1.0
+    entry_slippage_points: float = 1.0
+    exit_slippage_points: float = 0.5
+    rth_open_extra_entry_slippage_points: float = 1.0
+    fill_timing: str = FILL_TIMING_NEXT_BAR_OPEN
+    rth_entries_only: bool = True
+    flatten_hour_et: int = 15
+    flatten_minute_et: int = 59
+    max_contracts: int = 10
+
+    def __post_init__(self) -> None:
+        if self.fill_timing not in (FILL_TIMING_NEXT_BAR_OPEN, FILL_TIMING_SIGNAL_BAR_CLOSE):
+            raise ValueError(f"Unsupported fill_timing: {self.fill_timing}")
+        if self.point_value <= 0:
+            raise ValueError("point_value must be positive")
+        if self.max_contracts < 1:
+            raise ValueError("max_contracts must be at least 1")
+
+    @property
+    def flatten_minutes_et(self) -> int:
+        return self.flatten_hour_et * 60 + self.flatten_minute_et
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    def parameter_hash(self) -> str:
+        payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()

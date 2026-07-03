@@ -177,3 +177,69 @@ class StrategyResult:
     risk_vetoes: tuple[RiskVeto, ...] = ()
     stop_updates: tuple[StopUpdate, ...] = ()
     exits: tuple[ExitDecision, ...] = ()
+
+
+@dataclass(frozen=True)
+class Fill:
+    timestamp_utc: str
+    symbol: str
+    side: str
+    quantity: int
+    price: float
+    reason: str
+    ambiguous: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_payload(self) -> dict[str, Any]:
+        payload = {
+            "symbol": self.symbol,
+            "side": self.side,
+            "quantity": self.quantity,
+            "price": self.price,
+            "reason": self.reason,
+            "ambiguous": self.ambiguous,
+        }
+        payload.update(self.metadata)
+        return payload
+
+
+@dataclass(frozen=True)
+class Trade:
+    symbol: str
+    side: str
+    quantity: int
+    entry_timestamp_utc: str
+    entry_price: float
+    exit_timestamp_utc: str
+    exit_price: float
+    exit_reason: str
+    stop_price: float
+    gross_points: float
+    gross_pnl: float
+    commission: float
+    net_pnl: float
+    mfe_points: float
+    mae_points: float
+    session_date: str
+    ambiguous_exit: bool = False
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "side": self.side,
+            "quantity": self.quantity,
+            "entry_timestamp_utc": self.entry_timestamp_utc,
+            "entry_price": self.entry_price,
+            "exit_timestamp_utc": self.exit_timestamp_utc,
+            "exit_price": self.exit_price,
+            "exit_reason": self.exit_reason,
+            "stop_price": self.stop_price,
+            "gross_points": self.gross_points,
+            "gross_pnl": self.gross_pnl,
+            "commission": self.commission,
+            "net_pnl": self.net_pnl,
+            "mfe_points": self.mfe_points,
+            "mae_points": self.mae_points,
+            "session_date": self.session_date,
+            "ambiguous_exit": self.ambiguous_exit,
+        }
