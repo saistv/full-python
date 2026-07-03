@@ -62,6 +62,22 @@ Useful flags:
 
 Two runs over the same data and configs produce byte-identical event logs and the same run ID.
 
+## Run Reports & Perturbation
+
+Every CLI run writes a self-contained `report.html` next to `report.json`:
+equity curve with drawdown shading, trade P&L distribution, winners/losers
+stats, monthly breakdown, exit reasons, entry sizing, and rejected signals
+by gate — one file, no external assets, opens anywhere.
+
+Single-axis sensitivity sweeps (measurement, not optimization — single-axis
+sweeps cannot see parameter interactions, and production changes still
+require the full promotion gate):
+
+```bash
+PYTHONPATH=src python3 -m full_python.perturb --data bars.csv --strategy adaptive_trend_am \
+  --vary prove_it_bars=1,2,3 --vary wings_close_frac=0.55,0.6,0.65,0.7,0.75 --output sweep.json
+```
+
 ## Adaptive Trend Run + TradingView Reconciliation
 
 ```bash

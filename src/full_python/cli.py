@@ -9,6 +9,8 @@ from pathlib import Path
 from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
 from full_python.data.validation import validate_bars
+from full_python.events import EventType
+from full_python.reporting.html_report import render_html_report
 from full_python.reporting.survivability import (
     TradeResult,
     build_daily_metrics,
@@ -135,12 +137,14 @@ def run_baseline(
 
     daily_path = run_dir / "daily_pnl.csv"
     cumulative = 0.0
+    daily_rows: list[tuple[str, float, float]] = []
     with daily_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["session_date", "net_pnl", "cumulative_pnl"])
         for day in result.session_dates:
             pnl = daily_pnl.get(day, 0.0)
             cumulative += pnl
+            daily_rows.append((day, pnl, cumulative))
             writer.writerow([day, f"{pnl:.2f}", f"{cumulative:.2f}"])
 
     survivability = build_survivability_report(
@@ -188,6 +192,17 @@ def run_baseline(
     }
     report_path = run_dir / "report.json"
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    rejections: dict[str, int] = {}
+    for record in result.ledger.records:
+        if record.event_type == EventType.REJECTION:
+            reason = str(record.payload.get("reason", "unknown"))
+            rejections[reason] = rejections.get(reason, 0) + 1
+    html_path = run_dir / "report.html"
+    html_path.write_text(
+        render_html_report(report, result.trades, daily_rows, rejections),
+        encoding="utf-8",
+    )
     return report_path
 
 
