@@ -45,6 +45,15 @@ class AdaptiveTrendConfig:
     contracts: int = 1
     tick_size: float = 0.25
     warmup_bars: int = 200
+    # M2b sizing layer (defaults OFF = the reconciled flat parity config).
+    # Production runs both ON: AM 1->4 with Any Non-Win reset, DLL $1,000.
+    enable_anti_martingale: bool = False
+    max_contracts_per_entry: int = 4
+    enable_daily_loss_limit: bool = False
+    daily_loss_limit: float = 1000.0
+    enable_projected_risk_dll_guard: bool = True
+    dll_risk_buffer: float = 0.0
+    dollar_point_value: float = 20.0  # must match the engine's point_value
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -52,3 +61,12 @@ class AdaptiveTrendConfig:
     def parameter_hash(self) -> str:
         payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def production_am_config() -> AdaptiveTrendConfig:
+    """The validated production sizing stack on top of the parity core."""
+    return AdaptiveTrendConfig(
+        name="adaptive_trend_v66_am",
+        enable_anti_martingale=True,
+        enable_daily_loss_limit=True,
+    )

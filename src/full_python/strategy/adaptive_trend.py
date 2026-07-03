@@ -27,6 +27,7 @@ trade was actually possible.
 from __future__ import annotations
 
 from collections import deque
+import math
 from typing import Deque, Optional, Tuple
 
 from full_python.data.sessions import classify_timestamp
@@ -84,6 +85,11 @@ class AdaptiveTrendStrategy:
         self._bars_since_stop_loss = 999
         self._bars_since_breakeven_exit = 999
         self._pending_closed_trade: Optional[Trade] = None
+        # M2b sizing state. The win streak persists across sessions (Pine var);
+        # session P&L and the halt flag arrive per bar via on_bar_context.
+        self._win_streak = 0
+        self._session_pnl = 0.0
+        self._daily_limit_hit = False
 
     # ------------------------------------------------------------------
     # Engine feedback hooks
@@ -96,6 +102,17 @@ class AdaptiveTrendStrategy:
     def on_trade_closed(self, trade: Trade) -> None:
         self._position_side = None
         self._pending_closed_trade = trade
+        if self.config.enable_anti_martingale:
+            # Pine "Any Non-Win" reset: net (commission-inclusive) P&L must
+            # be strictly positive to extend the streak; scratches reset.
+            if trade.net_pnl > 0:
+                self._win_streak += 1
+            else:
+                self._win_streak = 0
+
+    def on_bar_context(self, *, session_pnl: float, daily_limit_hit: bool) -> None:
+        self._session_pnl = session_pnl
+        self._daily_limit_hit = daily_limit_hit
 
     # ------------------------------------------------------------------
     # Main bar handler
@@ -174,6 +191,9 @@ class AdaptiveTrendStrategy:
             side = "long"
             failing = "atf_warming_up"
 
+        if failing is None and config.enable_daily_loss_limit and self._daily_limit_hit:
+            failing = "daily_limit_halt"
+
         if failing is not None:
             return StrategyResult(
                 signal=SignalDecision.rejected(
@@ -194,6 +214,24 @@ class AdaptiveTrendStrategy:
             intent_side = "sell"
             anchor = pivot_low
 
+        if config.enable_anti_martingale:
+            quantity_plan = min(
+                config.contracts + self._win_streak, config.max_contracts_per_entry
+            )
+        else:
+            quantity_plan = config.contracts
+        quantity = self._dll_safe_quantity(bar.close, stop_price, quantity_plan)
+        if quantity == 0:
+            return StrategyResult(
+                signal=SignalDecision.rejected(
+                    timestamp_utc=bar.timestamp_utc,
+                    symbol=bar.symbol,
+                    side=side,
+                    reason="dll_projected_risk",
+                ),
+                exits=exits,
+            )
+
         self._entry_just_fired = True
         self._bars_since_last_entry = 0
 
@@ -207,13 +245,16 @@ class AdaptiveTrendStrategy:
                 "sr_anchor": anchor,
                 "stop_capped": capped,
                 "prove_it_hold": self._res_hold_count if side == "long" else self._sup_hold_count,
+                "quantity": quantity,
+                "quantity_plan": quantity_plan,
+                "win_streak": self._win_streak,
             },
         )
         intent = OrderIntent.market_entry(
             timestamp_utc=bar.timestamp_utc,
             symbol=bar.symbol,
             side=intent_side,
-            quantity=self.config.contracts,
+            quantity=quantity,
             reason="sr_breakout",
             metadata={
                 "stop_price": stop_price,
@@ -222,6 +263,21 @@ class AdaptiveTrendStrategy:
             },
         )
         return StrategyResult(signal=signal, order_intents=(intent,), exits=exits)
+
+    def _dll_safe_quantity(
+        self, signal_price: float, stop_price: float, desired_qty: int
+    ) -> int:
+        """Pine f_projected_dll_safe_qty: fit size to full-stop risk."""
+        config = self.config
+        if not (config.enable_projected_risk_dll_guard and config.enable_daily_loss_limit):
+            return desired_qty
+        risk_per_contract = abs(signal_price - stop_price) * config.dollar_point_value
+        risk_budget = self._session_pnl + config.daily_loss_limit - config.dll_risk_buffer
+        if risk_per_contract > 0 and risk_budget > 0:
+            max_safe_qty = int(math.floor((risk_budget - 0.000001) / risk_per_contract))
+        else:
+            max_safe_qty = 0
+        return max(0, min(desired_qty, max_safe_qty))
 
     # ------------------------------------------------------------------
     # S/R break detection + prove-it (Pine-exact)

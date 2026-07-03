@@ -17,7 +17,7 @@ from full_python.reporting.survivability import (
 )
 from full_python.simulation import SimulationConfig, SimulationEngine
 from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
-from full_python.strategy.adaptive_trend_config import AdaptiveTrendConfig
+from full_python.strategy.adaptive_trend_config import AdaptiveTrendConfig, production_am_config
 from full_python.strategy.baseline import BaselineMomentumStrategy
 from full_python.strategy.config import BaselineMomentumConfig
 
@@ -48,6 +48,9 @@ def build_strategy(strategy_name: str):
         return config, BaselineMomentumStrategy(config)
     if strategy_name == "adaptive_trend":
         config = AdaptiveTrendConfig()
+        return config, AdaptiveTrendStrategy(config)
+    if strategy_name == "adaptive_trend_am":
+        config = production_am_config()
         return config, AdaptiveTrendStrategy(config)
     raise ValueError(f"Unknown strategy: {strategy_name}")
 
@@ -101,9 +104,10 @@ def run_baseline(
         column_map=asdict(column_map),
     )
     strategy_config, strategy = build_strategy(strategy_name)
-    simulation_config = SimulationConfig(
-        fill_timing=fill_timing, **(simulation_overrides or {})
-    )
+    overrides = dict(simulation_overrides or {})
+    if getattr(strategy_config, "enable_daily_loss_limit", False):
+        overrides.setdefault("daily_loss_limit", strategy_config.daily_loss_limit)
+    simulation_config = SimulationConfig(fill_timing=fill_timing, **overrides)
     result = SimulationEngine(simulation_config).run(bars, strategy)
 
     # Deterministic run identity: same data + same configs => same run id.
@@ -205,8 +209,8 @@ def main() -> None:
     parser.add_argument(
         "--strategy",
         default="baseline",
-        choices=["baseline", "adaptive_trend"],
-        help="adaptive_trend = validated production signal core, flat 1-contract",
+        choices=["baseline", "adaptive_trend", "adaptive_trend_am"],
+        help="adaptive_trend = flat 1-contract parity core; adaptive_trend_am = production sizing (AM 1-4 + DLL $1K)",
     )
     parser.add_argument("--point-value", type=float, help="Override contract point value (default 2.0 = MNQ)")
     parser.add_argument("--commission-rt", type=float, help="Override round-trip commission per contract")

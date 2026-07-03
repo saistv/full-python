@@ -57,6 +57,8 @@ class MatchedPair:
     exit_price_delta: Optional[float]
     tv_entry_signal: str
     sim_exit_reason: str
+    tv_quantity: float = 1.0
+    sim_quantity: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -79,7 +81,13 @@ class ReconciliationReport:
 
     def summary(self) -> dict[str, Any]:
         entry_deltas = [abs(m["entry_price_delta"]) for m in self.matches]
+        quantity_mismatches = sum(
+            1
+            for m in self.matches
+            if m.get("tv_quantity", 1.0) != m.get("sim_quantity", 1.0)
+        )
         return {
+            "quantity_mismatches": quantity_mismatches,
             "tv_trade_count": self.tv_trade_count,
             "sim_trade_count": self.sim_trade_count,
             "matched_count": self.matched_count,
@@ -234,6 +242,8 @@ def reconcile(
                 exit_price_delta=exit_delta,
                 tv_entry_signal=tv_trade.entry_signal,
                 sim_exit_reason=best.exit_reason,
+                tv_quantity=tv_trade.quantity,
+                sim_quantity=best.quantity,
             ).to_dict()
         )
 
