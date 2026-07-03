@@ -16,6 +16,8 @@ from full_python.reporting.survivability import (
     build_survivability_report,
 )
 from full_python.simulation import SimulationConfig, SimulationEngine
+from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
+from full_python.strategy.adaptive_trend_config import AdaptiveTrendConfig, production_am_config
 from full_python.strategy.baseline import BaselineMomentumStrategy
 from full_python.strategy.config import BaselineMomentumConfig
 
@@ -40,12 +42,27 @@ TRADE_CSV_COLUMNS = [
 ]
 
 
+def build_strategy(strategy_name: str):
+    if strategy_name == "baseline":
+        config = BaselineMomentumConfig()
+        return config, BaselineMomentumStrategy(config)
+    if strategy_name == "adaptive_trend":
+        config = AdaptiveTrendConfig()
+        return config, AdaptiveTrendStrategy(config)
+    if strategy_name == "adaptive_trend_am":
+        config = production_am_config()
+        return config, AdaptiveTrendStrategy(config)
+    raise ValueError(f"Unknown strategy: {strategy_name}")
+
+
 def run_baseline(
     *,
     data_path: str | Path,
     output_dir: str | Path,
     fill_timing: str = "next_bar_open",
     allow_dirty_data: bool = False,
+    strategy_name: str = "baseline",
+    simulation_overrides: dict | None = None,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -86,9 +103,11 @@ def run_baseline(
         file_size_bytes=input_path.stat().st_size,
         column_map=asdict(column_map),
     )
-    strategy_config = BaselineMomentumConfig()
-    simulation_config = SimulationConfig(fill_timing=fill_timing)
-    strategy = BaselineMomentumStrategy(strategy_config)
+    strategy_config, strategy = build_strategy(strategy_name)
+    overrides = dict(simulation_overrides or {})
+    if getattr(strategy_config, "enable_daily_loss_limit", False):
+        overrides.setdefault("daily_loss_limit", strategy_config.daily_loss_limit)
+    simulation_config = SimulationConfig(fill_timing=fill_timing, **overrides)
     result = SimulationEngine(simulation_config).run(bars, strategy)
 
     # Deterministic run identity: same data + same configs => same run id.
@@ -187,12 +206,36 @@ def main() -> None:
         action="store_true",
         help="Proceed despite structural data-quality issues (they are still reported)",
     )
+    parser.add_argument(
+        "--strategy",
+        default="baseline",
+        choices=["baseline", "adaptive_trend", "adaptive_trend_am"],
+        help="adaptive_trend = flat 1-contract parity core; adaptive_trend_am = production sizing (AM 1-4 + DLL $1K)",
+    )
+    parser.add_argument("--point-value", type=float, help="Override contract point value (default 2.0 = MNQ)")
+    parser.add_argument("--commission-rt", type=float, help="Override round-trip commission per contract")
+    parser.add_argument("--entry-slippage-points", type=float, help="Override entry slippage (e.g. 0.75 to mirror a TV run)")
+    parser.add_argument("--exit-slippage-points", type=float, help="Override exit slippage")
+    parser.add_argument("--rth-open-extra-slippage-points", type=float, help="Override the 9:30-9:45 extra entry slippage")
     args = parser.parse_args()
+    overrides = {}
+    if args.point_value is not None:
+        overrides["point_value"] = args.point_value
+    if args.commission_rt is not None:
+        overrides["commission_per_contract_round_trip"] = args.commission_rt
+    if args.entry_slippage_points is not None:
+        overrides["entry_slippage_points"] = args.entry_slippage_points
+    if args.exit_slippage_points is not None:
+        overrides["exit_slippage_points"] = args.exit_slippage_points
+    if args.rth_open_extra_slippage_points is not None:
+        overrides["rth_open_extra_entry_slippage_points"] = args.rth_open_extra_slippage_points
     report_path = run_baseline(
         data_path=args.data,
         output_dir=args.output_dir,
         fill_timing=args.fill_timing,
         allow_dirty_data=args.allow_dirty_data,
+        strategy_name=args.strategy,
+        simulation_overrides=overrides,
     )
     print(report_path)
 

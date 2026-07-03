@@ -28,6 +28,12 @@ class SimulationConfig:
     flatten_hour_et: int = 15
     flatten_minute_et: int = 59
     max_contracts: int = 10
+    # Equity-based daily loss limit (None = off). Session P&L = realized net
+    # since session start + GROSS unrealized at bar close, matching Pine's
+    # strategy.equity (openprofit excludes the open trade's commission).
+    # On breach: the stop is cancelled, the position flattens at next bar
+    # open, and entries are vetoed for the rest of the session.
+    daily_loss_limit: float | None = None
 
     def __post_init__(self) -> None:
         if self.fill_timing not in (FILL_TIMING_NEXT_BAR_OPEN, FILL_TIMING_SIGNAL_BAR_CLOSE):
@@ -36,6 +42,8 @@ class SimulationConfig:
             raise ValueError("point_value must be positive")
         if self.max_contracts < 1:
             raise ValueError("max_contracts must be at least 1")
+        if self.daily_loss_limit is not None and self.daily_loss_limit <= 0:
+            raise ValueError("daily_loss_limit must be positive when set")
 
     @property
     def flatten_minutes_et(self) -> int:

@@ -39,6 +39,7 @@ class _Position:
     session_date: str
     mfe_points: float = 0.0
     mae_points: float = 0.0
+    stop_cancelled: bool = False  # set when a DLL flatten supersedes the stop
 
     @property
     def direction(self) -> int:
@@ -73,6 +74,10 @@ class _State:
     previous_bar: Optional[MarketBar] = None
     previous_session: Optional[SessionInfo] = None
     trades: list[Trade] = field(default_factory=list)
+    strategy: Optional[Strategy] = None
+    cumulative_net_pnl: float = 0.0
+    session_start_pnl: float = 0.0
+    daily_limit_hit: bool = False
 
 
 class SimulationEngine:
@@ -87,7 +92,7 @@ class SimulationEngine:
         ledger: Optional[EventLedger] = None,
     ) -> SimulationResult:
         active_ledger = EventLedger() if ledger is None else ledger
-        state = _State()
+        state = _State(strategy=strategy)
         session_dates: list[str] = []
 
         for bar in bars:
@@ -106,7 +111,11 @@ class SimulationEngine:
             self._update_excursions(state, bar)
             self._process_intrabar_stop_and_target(state, bar, active_ledger)
             self._process_backstop_flatten(state, bar, session, active_ledger)
+            session_pnl = self._check_daily_loss_limit(state, bar, active_ledger)
 
+            on_bar_context = getattr(strategy, "on_bar_context", None)
+            if on_bar_context is not None:
+                on_bar_context(session_pnl=session_pnl, daily_limit_hit=state.daily_limit_hit)
             result = strategy.on_bar(bar)
             self._record_strategy_result(state, bar, session, result, active_ledger)
 
@@ -147,12 +156,15 @@ class SimulationEngine:
                 timestamp_utc=state.previous_bar.timestamp_utc,
                 reason="session_end",
             )
+        # New session: re-anchor the daily-loss baseline and lift the halt.
+        state.session_start_pnl = state.cumulative_net_pnl
+        state.daily_limit_hit = False
 
     def _process_open_gap_stop(
         self, state: _State, bar: MarketBar, ledger: EventLedger
     ) -> None:
         position = state.position
-        if position is None:
+        if position is None or position.stop_cancelled:
             return
         gapped = (
             bar.open <= position.stop_price
@@ -218,7 +230,7 @@ class SimulationEngine:
         self, state: _State, bar: MarketBar, ledger: EventLedger
     ) -> None:
         position = state.position
-        if position is None:
+        if position is None or position.stop_cancelled:
             return
         if position.side == "long":
             stop_hit = bar.low <= position.stop_price
@@ -274,6 +286,50 @@ class SimulationEngine:
                 timestamp_utc=bar.timestamp_utc,
                 reason="session_flatten",
             )
+
+    def _check_daily_loss_limit(
+        self, state: _State, bar: MarketBar, ledger: EventLedger
+    ) -> float:
+        """Evaluate session P&L at bar close; trigger the DLL halt on breach.
+
+        Matches Pine: equity = realized net since session start + gross
+        unrealized at the close. On breach the stop is cancelled and the
+        flatten fills at the next bar's open (process_orders_on_close=false).
+        Returns session P&L so the strategy context sees the same number.
+        """
+        unrealized = 0.0
+        position = state.position
+        if position is not None:
+            unrealized = (
+                (bar.close - position.entry_price)
+                * position.direction
+                * self.config.point_value
+                * position.quantity
+            )
+        session_pnl = state.cumulative_net_pnl - state.session_start_pnl + unrealized
+        limit = self.config.daily_loss_limit
+        if limit is None or state.daily_limit_hit:
+            return session_pnl
+        if session_pnl <= -limit:
+            state.daily_limit_hit = True
+            ledger.append(
+                EventType.STATE_TRANSITION,
+                timestamp_utc=bar.timestamp_utc,
+                payload={
+                    "transition": "daily_limit_hit",
+                    "session_pnl": session_pnl,
+                    "daily_loss_limit": limit,
+                },
+            )
+            if position is not None:
+                position.stop_cancelled = True
+                if state.pending_exit is None:
+                    state.pending_exit = _PendingExit(
+                        reason="daily_limit", timestamp_utc=bar.timestamp_utc
+                    )
+                else:
+                    state.pending_exit.reason = "daily_limit"
+        return session_pnl
 
     def _record_strategy_result(
         self,
@@ -400,6 +456,8 @@ class SimulationEngine:
             or state.pending_exit is not None
         ):
             return "position_already_open"
+        if state.daily_limit_hit:
+            return "daily_limit"
         if session.minutes_from_midnight_et >= self.config.flatten_minutes_et:
             return "after_flatten"
         if self.config.rth_entries_only and not session.is_rth:
@@ -474,6 +532,11 @@ class SimulationEngine:
             target_price=target_price,
             session_date=session.session_date.isoformat(),
         )
+        # Strategy feedback hook: fills are how a decision-only strategy
+        # learns its actual entry price (fill anchoring, cooldown state).
+        on_fill = getattr(state.strategy, "on_fill", None)
+        if on_fill is not None:
+            on_fill(fill)
 
     def _close_position(
         self,
@@ -533,5 +596,9 @@ class SimulationEngine:
             EventType.TRADE_CLOSED, timestamp_utc=timestamp_utc, payload=trade.to_payload()
         )
         state.trades.append(trade)
+        state.cumulative_net_pnl += trade.net_pnl
         state.position = None
         state.pending_exit = None
+        on_trade_closed = getattr(state.strategy, "on_trade_closed", None)
+        if on_trade_closed is not None:
+            on_trade_closed(trade)

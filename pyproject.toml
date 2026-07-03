@@ -16,6 +16,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+databento = [
+    "zstandard>=0.22",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
