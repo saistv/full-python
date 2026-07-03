@@ -73,6 +73,7 @@ class _State:
     previous_bar: Optional[MarketBar] = None
     previous_session: Optional[SessionInfo] = None
     trades: list[Trade] = field(default_factory=list)
+    strategy: Optional[Strategy] = None
 
 
 class SimulationEngine:
@@ -87,7 +88,7 @@ class SimulationEngine:
         ledger: Optional[EventLedger] = None,
     ) -> SimulationResult:
         active_ledger = EventLedger() if ledger is None else ledger
-        state = _State()
+        state = _State(strategy=strategy)
         session_dates: list[str] = []
 
         for bar in bars:
@@ -474,6 +475,11 @@ class SimulationEngine:
             target_price=target_price,
             session_date=session.session_date.isoformat(),
         )
+        # Strategy feedback hook: fills are how a decision-only strategy
+        # learns its actual entry price (fill anchoring, cooldown state).
+        on_fill = getattr(state.strategy, "on_fill", None)
+        if on_fill is not None:
+            on_fill(fill)
 
     def _close_position(
         self,
@@ -535,3 +541,6 @@ class SimulationEngine:
         state.trades.append(trade)
         state.position = None
         state.pending_exit = None
+        on_trade_closed = getattr(state.strategy, "on_trade_closed", None)
+        if on_trade_closed is not None:
+            on_trade_closed(trade)
