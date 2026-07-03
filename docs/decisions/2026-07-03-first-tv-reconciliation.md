@@ -41,3 +41,36 @@ exact. One TV trade missing in sim; 24 sim extras.
    Monday); (d) optional: flatten fill at next bar open for exit-price parity.
 3. Only after (a)–(b) drive the in-scope match to explained-100% does M2b (AM
    sizing + DLL guard port) start, reconciled separately.
+
+---
+
+# Same-day update: flat re-export gate — 120/120 EXACT
+
+The owner provided the flat export (`am=off|dll=off` confirmed via the embedded
+CFG comment; all legs qty=1). Result vs the same continuous dataset:
+
+- The 13 DLL-class extras all matched flat TV trades — the projected-risk-guard
+  explanation was confirmed empirically, not assumed.
+- The May 13 divergence was root-caused **from the event ledger alone**: the
+  9:31 rejection said `sr_not_confirmed`, and the bar data showed tied lows at
+  09:22/09:23 (29,283.25). Pine's pivot tie semantics were then determined
+  experimentally by running all three plausible rules over the full dataset:
+
+  | Tie rule | Result |
+  |---|---|
+  | strict both sides (legacy port) | misses 2026-05-13 |
+  | non-strict right (earlier tied bar wins) | fixes May 13, breaks 2026-01-19 |
+  | **non-strict left (LATER tied bar wins)** | **120/120 exact** |
+
+  `PivotHigh`/`PivotLow` now implement non-strict-left/strict-right, verified
+  against TradingView on two independent real tie dates.
+
+**Final: 120/120 trades matched (100%), all entries minute-exact, 119/120 at
+$0.00 entry price delta.** The single nonzero delta is the June roll-basis
+trade (TV rolled NQ1! Monday Jun 15 vs the fitted Tuesday rule) — a data
+calendar artifact, not strategy logic. The 9 sim extras before 2025-10-28 are
+outside TV's 1-minute history and out of scope.
+
+The M2 authority gate is passed for the flat signal core. M2b (anti-martingale
+sizing + DLL guard) may proceed, reconciled separately against the AM/DLL
+export from the same day, whose blocking behavior is now a known test target.

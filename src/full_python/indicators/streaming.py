@@ -220,14 +220,24 @@ class _PivotBase:
 
 
 class PivotHigh(_PivotBase):
+    """Non-strict left, strict right, matching Pine ta.pivothigh on ties:
+    when equal extremes tie, the LATER bar of the tie is the pivot.
+
+    Empirically verified against TradingView on two independent tie dates
+    (NQ 1m 2026-01-19 and 2026-05-13): this rule reconciles 120/120 trades
+    exactly; strict-both-sides and non-strict-right each miss one date.
+    """
+
     def _is_pivot(self, center: float, before, after) -> bool:
-        return all(item < center for item in before) and all(
+        return all(item <= center for item in before) and all(
             item < center for item in after
         )
 
 
 class PivotLow(_PivotBase):
+    """Non-strict left, strict right (see PivotHigh for the verification)."""
+
     def _is_pivot(self, center: float, before, after) -> bool:
-        return all(item > center for item in before) and all(
+        return all(item >= center for item in before) and all(
             item > center for item in after
         )

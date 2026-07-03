@@ -102,12 +102,20 @@ def test_pivot_high_confirms_late_and_shifts_like_pine() -> None:
     assert results[6] == 5.0
 
 
-def test_pivot_high_requires_strict_dominance() -> None:
+def test_pivot_tie_confirms_later_bar_like_pine() -> None:
+    # Equal highs at indexes 1 and 2: Pine treats the LATER tied bar as the
+    # pivot (non-strict left, strict right) — verified against TV on real
+    # NQ ties (2026-01-19, 2026-05-13). The value confirms from the later
+    # bar's window and appears after shift+fixnan at index 5.
     pivot = PivotHigh(2, 2)
-    # Center equals a neighbor -> not a pivot.
-    for high in [1.0, 5.0, 5.0, 3.0, 2.0, 2.0]:
-        result = pivot.update(high)
-    assert result is None
+    results = [pivot.update(high) for high in [1.0, 5.0, 5.0, 3.0, 2.0, 2.0]]
+    assert results[:5] == [None, None, None, None, None]
+    assert results[5] == 5.0
+
+    # A tie to the RIGHT of the candidate blocks it (strict right).
+    pivot = PivotHigh(2, 2)
+    results = [pivot.update(high) for high in [1.0, 2.0, 5.0, 5.0, 2.0, 1.0, 1.0]]
+    assert results[6] == 5.0  # only the later 5 (index 3) is the pivot
 
 
 def test_pivot_low_mirrors_pivot_high() -> None:
