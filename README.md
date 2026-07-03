@@ -15,13 +15,14 @@ Build the canonical replay and event-ledger foundation:
 
 ## Current Components
 
-- `full_python.data`: CSV market-bar loading plus data manifests with content checksums, row counts, file sizes, column maps, and stable provenance hashes.
+- `full_python.data`: CSV market-bar loading, data manifests with content checksums and stable provenance hashes, the ET/CME session model (RTH classification, 18:00 ET session boundary), and structural data validation (ordering, duplicates, malformed OHLC, gap accounting).
 - `full_python.events`: append-only event records, stable event IDs, JSONL persistence.
-- `full_python.models`: immutable domain records for market bars, signal decisions, order intents, risk vetoes, stop updates, and exits.
-- `full_python.strategy`: baseline momentum configuration and placeholder strategy surface for deterministic replay wiring.
+- `full_python.models`: immutable domain records for market bars, signal decisions, order intents, risk vetoes, stop updates, exits, fills, and closed trades.
+- `full_python.strategy`: baseline momentum-breakout strategy (entry, breakdown exit signal, frozen stop) and hashed config.
 - `full_python.replay`: deterministic replay loop that feeds bars to a strategy and records resulting events in a fixed order.
-- `full_python.reporting`: survivability metrics scaffolding for baseline reports.
-- `full_python.cli`: baseline replay command that writes `events.jsonl` and `report.json`.
+- `full_python.simulation`: deterministic fill/position engine — next-bar-open fills with adverse slippage, frozen stops with gap-through handling, worst-case intrabar ordering with ambiguity flagging, session risk gate (RTH-only entries, 15:59 ET backstop, session-boundary flatten), and costs always applied. Policy: `docs/decisions/2026-07-03-fill-simulation-policy.md`.
+- `full_python.reporting`: survivability metrics plus daily-resolution metrics (annualized Sharpe over the full trading calendar including flat days, time underwater, profitable-day rate, best-day dependency) and monthly breakdowns.
+- `full_python.cli`: baseline run command that writes `events.jsonl`, `trades.csv`, `daily_pnl.csv`, and `report.json` with a deterministic run ID.
 
 ## Migration Rule
 
@@ -47,5 +48,14 @@ PYTHONPATH=src python3 -m full_python.cli --data path/to/bars.csv --output-dir r
 
 The command writes:
 
-- `events.jsonl`
-- `report.json`
+- `events.jsonl` — the full event ledger (bars, signals, rejections, vetoes, fills, trades)
+- `trades.csv` — closed trades with fills, costs, MFE/MAE, and ambiguity flags
+- `daily_pnl.csv` — per-session P&L and cumulative equity
+- `report.json` — manifest, data quality, config hashes, survivability, daily and monthly metrics
+
+Useful flags:
+
+- `--fill-timing signal_bar_close` — legacy TradingView reconciliation mode only; never for promotion decisions
+- `--allow-dirty-data` — proceed despite structural data issues (they are still reported)
+
+Two runs over the same data and configs produce byte-identical event logs and the same run ID.
