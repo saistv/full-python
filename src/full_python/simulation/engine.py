@@ -448,6 +448,17 @@ class SimulationEngine:
     def _veto_reason(
         self, state: _State, session: SessionInfo, intent: OrderIntent
     ) -> Optional[str]:
+        # NOTE: reference_price is now computed eagerly here (before all veto checks),
+        # whereas the original inline implementation computed it lazily (only inside the
+        # final invalid_stop branches after every earlier check had passed). This is safe
+        # because every current strategy (baseline.py, vwap_reversion.py, adaptive_trend.py)
+        # always populates intent.metadata["signal_price"] with a numeric bar.close value,
+        # so _reference_price() cannot raise or behave unexpectedly. However, if a future
+        # strategy supplies non-numeric/absent signal_price and an intent that would be
+        # vetoed earlier (e.g., invalid_quantity), that potential failure is now hit eagerly
+        # instead of never reached. If this ever needs to change, make reference_price lazy
+        # in RiskManager.veto_reason's signature (e.g., a callable) rather than precomputing
+        # it at every call site.
         return self._risk_manager.veto_reason(
             has_open_order=(
                 state.position is not None
