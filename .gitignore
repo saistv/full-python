@@ -8,3 +8,6 @@ venv/
 # Research outputs are reproducible artifacts unless explicitly promoted.
 runs/*
 !runs/.gitkeep
+
+# Local git worktrees for isolated task execution.
+.worktrees/
