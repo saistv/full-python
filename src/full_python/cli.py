@@ -5,6 +5,7 @@ import csv
 from dataclasses import asdict
 import json
 from pathlib import Path
+import subprocess
 
 from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
@@ -62,6 +63,21 @@ def build_strategy(strategy_name: str):
     raise ValueError(f"Unknown strategy: {strategy_name}")
 
 
+def _code_version_hash() -> str:
+    """Git SHA of the current checkout; 'unknown' outside a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
 def run_baseline(
     *,
     data_path: str | Path,
@@ -117,12 +133,14 @@ def run_baseline(
     simulation_config = SimulationConfig(fill_timing=fill_timing, **overrides)
     result = SimulationEngine(simulation_config).run(bars, strategy)
 
-    # Deterministic run identity: same data + same configs => same run id.
+    # Deterministic run identity: same data + same configs + same code => same run id.
+    code_version = _code_version_hash()
     run_id = "-".join(
         [
             manifest.stable_hash()[:8],
             strategy_config.parameter_hash()[:8],
             simulation_config.parameter_hash()[:8],
+            code_version[:8],
         ]
     )
 
@@ -173,6 +191,7 @@ def run_baseline(
 
     report = {
         "run_id": run_id,
+        "code_version": code_version,
         "data": {
             **manifest.to_dict(),
             "manifest_hash": manifest.stable_hash(),

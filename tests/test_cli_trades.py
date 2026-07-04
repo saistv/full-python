@@ -28,7 +28,7 @@ def test_cli_produces_real_trades_and_reports(tmp_path: Path) -> None:
     assert report["quality"]["is_structurally_clean"]
     assert report["daily"]["trading_days"] == 1
     assert report["exit_reasons"] == {"stop": 1}
-    assert len(report["run_id"]) == 26  # three 8-char hashes joined by dashes
+    assert len(report["run_id"]) == 35  # four 8-char hashes joined by dashes
 
     with (tmp_path / "run" / "trades.csv").open() as handle:
         trades = list(csv.DictReader(handle))
@@ -99,3 +99,24 @@ def test_signal_bar_close_mode_changes_fills(tmp_path: Path) -> None:
     with (tmp_path / "run" / "trades.csv").open() as handle:
         trade = list(csv.DictReader(handle))[0]
     assert trade["entry_timestamp_utc"] == "2026-06-30T13:32:00Z"
+
+
+def test_run_id_includes_a_code_version_component(tmp_path: Path) -> None:
+    data_path = tmp_path / "bars.csv"
+    data_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100,102,99,101,10\n"
+        "2026-06-30T13:32:00Z,NQU2026,101,103,100,102.5,10\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "run"
+
+    report_path = run_baseline(data_path=data_path, output_dir=output_dir)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    run_id_parts = report["run_id"].split("-")
+    assert len(run_id_parts) == 4
+    assert all(len(part) == 8 for part in run_id_parts)
+    assert "code_version" in report
+    assert len(report["code_version"]) in (40, len("unknown"))
