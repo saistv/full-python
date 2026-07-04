@@ -119,4 +119,19 @@ def test_run_id_includes_a_code_version_component(tmp_path: Path) -> None:
     assert len(run_id_parts) == 4
     assert all(len(part) == 8 for part in run_id_parts)
     assert "code_version" in report
-    assert len(report["code_version"]) in (40, len("unknown"))
+    assert len(report["code_version"]) == 40
+
+
+def test_code_version_fallback_uses_null_sha(tmp_path: Path, monkeypatch) -> None:
+    """Test that _code_version_hash() fallback returns a 40-char string for consistent run_id segments."""
+    from full_python import cli
+
+    def mock_subprocess_run(*args, **kwargs):
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr("full_python.cli.subprocess.run", mock_subprocess_run)
+    code_version = cli._code_version_hash()
+
+    assert code_version == "0" * 40
+    assert len(code_version) == 40
+    assert code_version[:8] == "00000000"

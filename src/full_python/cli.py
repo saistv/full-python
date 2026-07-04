@@ -64,7 +64,7 @@ def build_strategy(strategy_name: str):
 
 
 def _code_version_hash() -> str:
-    """Git SHA of the current checkout; 'unknown' outside a git repo."""
+    """Git SHA of the current checkout; git's null-SHA (all zeros) outside a git repo."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -75,7 +75,7 @@ def _code_version_hash() -> str:
         )
         return result.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return "unknown"
+        return "0" * 40
 
 
 def run_baseline(
