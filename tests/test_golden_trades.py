@@ -1,4 +1,3 @@
-import csv
 import json
 import os
 from pathlib import Path
@@ -10,13 +9,9 @@ from full_python.simulation import SimulationConfig, SimulationEngine
 from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
 from full_python.strategy.adaptive_trend_config import production_am_config
 
+from scripts.freeze_baseline_anchor import FROZEN_SIMULATION_OVERRIDES
+
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "golden_trades.json"
-FROZEN_SIMULATION_OVERRIDES = {
-    "point_value": 20.0,
-    "commission_per_contract_round_trip": 10.0,
-    "entry_slippage_points": 0.75,
-    "exit_slippage_points": 0.75,
-}
 
 
 def _load_fixture() -> list[dict]:

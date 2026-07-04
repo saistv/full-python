@@ -34,6 +34,14 @@ def test_freeze_baseline_anchor_writes_report_with_expected_config(tmp_path: Pat
     assert report["simulation"]["commission_per_contract_round_trip"] == 10.0
     assert report["simulation"]["entry_slippage_points"] == 0.75
     assert report["simulation"]["exit_slippage_points"] == 0.75
+    # SimulationConfig's default (1.0) stacks on top of entry_slippage_points
+    # during the 9:30-9:45 ET window -- almost every Adaptive Trend entry
+    # fires inside that window (entry_start_minutes_et=9:30), so leaving
+    # this at its default silently doubles slippage on nearly every trade
+    # and breaks parity with the TV export. Confirmed empirically against
+    # the real 9-month reconciliation run: TV trade #1's fill (26,084.50)
+    # is bar-open (26,083.75) + exactly 3 ticks (0.75), not + 1.75.
+    assert report["simulation"]["rth_open_extra_entry_slippage_points"] == 0.0
     assert "code_version" in report
     assert "metrics" in report
 

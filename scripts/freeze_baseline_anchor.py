@@ -3,8 +3,8 @@
 Replaces the missing 3-year TV export as the reference point (see
 docs/decisions/2026-07-04-python-baseline-anchor.md). Data span is the
 2025-10-01 -> 2026-06-26 window that is actually reconciled against
-TradingView (120/120 trades matched) -- NOT a 3-year window, which does
-not exist in this repo. Run with:
+TradingView (106/106 AM/DLL trades matched) -- NOT a 3-year window, which
+does not exist in this repo. Run with:
 
     FULL_PYTHON_BASELINE_DATA=/path/to/9mo_bars.csv \
         PYTHONPATH=src python3 scripts/freeze_baseline_anchor.py
@@ -24,6 +24,13 @@ FROZEN_SIMULATION_OVERRIDES = {
     "commission_per_contract_round_trip": 10.0,
     "entry_slippage_points": 0.75,
     "exit_slippage_points": 0.75,
+    # SimulationConfig defaults this to 1.0, stacking on top of
+    # entry_slippage_points during the 9:30-9:45 ET window. Adaptive
+    # Trend's entry window starts at 9:30, so almost every trade fires
+    # there -- leaving this at its default silently doubles slippage on
+    # nearly every entry and breaks TV parity (confirmed empirically: TV
+    # trade #1's fill is bar-open + exactly 3 ticks / 0.75, not 1.75).
+    "rth_open_extra_entry_slippage_points": 0.0,
 }
 
 
