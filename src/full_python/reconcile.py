@@ -35,6 +35,7 @@ class TvTrade:
     exit_price: Optional[float]
     exit_signal: str
     quantity: float
+    net_pnl: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class SimTrade:
     exit_price: float
     exit_reason: str
     quantity: float
+    net_pnl: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -55,8 +57,13 @@ class MatchedPair:
     entry_time_delta_minutes: float
     entry_price_delta: float
     exit_price_delta: Optional[float]
+    exit_time_delta_minutes: Optional[float]
     tv_entry_signal: str
+    tv_exit_signal: str
     sim_exit_reason: str
+    tv_net_pnl: Optional[float]
+    sim_net_pnl: Optional[float]
+    net_pnl_delta: Optional[float]
     tv_quantity: float = 1.0
     sim_quantity: float = 1.0
 
@@ -129,6 +136,10 @@ def load_tv_trades(path: str | Path, timezone_name: str = "America/New_York") ->
         col_signal = _find_column(fieldnames, "signal")
         col_price = _find_column(fieldnames, "price")
         col_qty = _find_column(fieldnames, "qty", "size")
+        try:
+            col_pnl = _find_column(fieldnames, "net p&l", "net pnl")
+        except ValueError:
+            col_pnl = None
 
         legs: dict[str, dict[str, Any]] = {}
         for row in reader:
@@ -153,6 +164,9 @@ def load_tv_trades(path: str | Path, timezone_name: str = "America/New_York") ->
                 record["exit_time"] = parsed_time
                 record["exit_price"] = price
                 record["exit_signal"] = str(row[col_signal]).strip()
+                if col_pnl is not None:
+                    raw_pnl = str(row[col_pnl]).replace(",", "").strip()
+                    record["net_pnl"] = float(raw_pnl) if raw_pnl else None
 
     trades = []
     for number, record in legs.items():
@@ -169,6 +183,7 @@ def load_tv_trades(path: str | Path, timezone_name: str = "America/New_York") ->
                 exit_price=record.get("exit_price"),
                 exit_signal=record.get("exit_signal", ""),
                 quantity=record.get("quantity", 1.0),
+                net_pnl=record.get("net_pnl"),
             )
         )
     trades.sort(key=lambda trade: trade.entry_time)
@@ -188,6 +203,7 @@ def load_sim_trades(path: str | Path) -> list[SimTrade]:
                     exit_price=float(row["exit_price"]),
                     exit_reason=row["exit_reason"],
                     quantity=float(row["quantity"]),
+                    net_pnl=float(row["net_pnl"]) if "net_pnl" in row and row["net_pnl"] else None,
                 )
             )
     trades.sort(key=lambda trade: trade.entry_time)
@@ -233,6 +249,16 @@ def reconcile(
         exit_delta = (
             best.exit_price - tv_trade.exit_price if tv_trade.exit_price is not None else None
         )
+        exit_time_delta = (
+            abs((best.exit_time - tv_trade.exit_time).total_seconds() / 60.0)
+            if tv_trade.exit_time is not None
+            else None
+        )
+        net_pnl_delta = (
+            best.net_pnl - tv_trade.net_pnl
+            if best.net_pnl is not None and tv_trade.net_pnl is not None
+            else None
+        )
         matches.append(
             MatchedPair(
                 tv_trade_number=tv_trade.trade_number,
@@ -240,8 +266,13 @@ def reconcile(
                 entry_time_delta_minutes=best_delta if best_delta is not None else 0.0,
                 entry_price_delta=best.entry_price - tv_trade.entry_price,
                 exit_price_delta=exit_delta,
+                exit_time_delta_minutes=exit_time_delta,
                 tv_entry_signal=tv_trade.entry_signal,
+                tv_exit_signal=tv_trade.exit_signal,
                 sim_exit_reason=best.exit_reason,
+                tv_net_pnl=tv_trade.net_pnl,
+                sim_net_pnl=best.net_pnl,
+                net_pnl_delta=net_pnl_delta,
                 tv_quantity=tv_trade.quantity,
                 sim_quantity=best.quantity,
             ).to_dict()
