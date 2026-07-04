@@ -113,3 +113,41 @@ def max_win_streak(trades: Iterable[Trade]) -> int:
         else:
             current = 0
     return best
+
+
+def max_loss_streak(trades: Iterable[Trade]) -> int:
+    current = 0
+    best = 0
+    for trade in trades:
+        if trade.net_pnl < 0:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+@dataclass(frozen=True)
+class MetricsReport:
+    expectancy: ExpectancyReport
+    by_exit_reason: list[ExitReasonBucket]
+    max_win_streak: int
+    max_loss_streak: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "expectancy": self.expectancy.to_dict(),
+            "by_exit_reason": [bucket.to_dict() for bucket in self.by_exit_reason],
+            "max_win_streak": self.max_win_streak,
+            "max_loss_streak": self.max_loss_streak,
+        }
+
+
+def build_metrics_report(trades: Iterable[Trade], *, point_value: float) -> MetricsReport:
+    trades = list(trades)
+    return MetricsReport(
+        expectancy=build_expectancy_report(trades, point_value=point_value),
+        by_exit_reason=build_exit_reason_breakdown(trades, point_value=point_value),
+        max_win_streak=max_win_streak(trades),
+        max_loss_streak=max_loss_streak(trades),
+    )

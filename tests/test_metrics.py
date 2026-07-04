@@ -5,6 +5,8 @@ from full_python.reporting.metrics import (
     initial_risk_points,
     max_win_streak,
     r_multiple,
+    MetricsReport,
+    build_metrics_report,
 )
 
 
@@ -117,3 +119,21 @@ def test_max_win_streak_counts_consecutive_wins_and_resets_on_non_win() -> None:
     ]
 
     assert max_win_streak(trades) == 3
+
+
+def test_build_metrics_report_assembles_expectancy_streak_and_exit_breakdown() -> None:
+    trades = [
+        _trade(net_pnl=200.0, exit_reason="atf_flip", entry_price=100.0, stop_price=95.0),
+        _trade(net_pnl=200.0, exit_reason="atf_flip", entry_price=100.0, stop_price=95.0),
+        _trade(net_pnl=-100.0, exit_reason="stop", entry_price=100.0, stop_price=95.0),
+    ]
+
+    report = build_metrics_report(trades, point_value=20.0)
+
+    assert isinstance(report, MetricsReport)
+    assert report.expectancy.trade_count == 3
+    assert report.max_win_streak == 2
+    assert report.max_loss_streak == 1
+    assert [b.exit_reason for b in report.by_exit_reason] == ["atf_flip", "stop"]
+    assert report.to_dict()["expectancy"]["trade_count"] == 3
+    assert report.to_dict()["by_exit_reason"][0]["exit_reason"] == "atf_flip"
