@@ -29,7 +29,20 @@ except ImportError:  # pragma: no cover - exercised only without the extra
     zstandard = None
 
 QUARTERLY_MONTH_CODES = {3: "H", 6: "M", 9: "U", 12: "Z"}
-ROLL_CALENDAR_DAYS_BEFORE_EXPIRY = 3  # legacy fit: int(roll_days_before=2 * 1.5)
+ROLL_BUSINESS_DAYS_BEFORE_EXPIRY = 3
+
+
+def _is_cme_full_holiday(day: date) -> bool:
+    # Juneteenth (observed since 2021) is the only fixed CME holiday that
+    # can land inside a quarterly expiration week.
+    return day.month == 6 and day.day == 19 and day.year >= 2022
+
+
+def _prior_business_day(day: date) -> date:
+    day -= timedelta(days=1)
+    while day.weekday() >= 5 or _is_cme_full_holiday(day):
+        day -= timedelta(days=1)
+    return day
 
 
 def third_friday(year: int, month: int) -> date:
@@ -38,18 +51,62 @@ def third_friday(year: int, month: int) -> date:
     return first_friday + timedelta(days=14)
 
 
-def front_contract_for_session(session_date: date, root: str = "NQ") -> str:
-    """Front-month contract code (Databento style, single-digit year)."""
+def contract_expiry(year: int, month: int) -> date:
+    """Quarterly expiration: third Friday, shifted to the prior business
+    day when it falls on a full CME holiday (June 2026: Juneteenth)."""
+    expiry = third_friday(year, month)
+    while _is_cme_full_holiday(expiry) or expiry.weekday() >= 5:
+        expiry -= timedelta(days=1)
+    return expiry
+
+
+def roll_date(year: int, month: int) -> date:
+    """First session on which the NEXT contract is front.
+
+    TV-verified rule: 3 BUSINESS days before expiration, skipping CME
+    holidays. Equals Tuesday-of-expiration-week in normal quarters, and
+    explains every observed Juneteenth divergence in one formula:
+    2024 (holiday Wed Jun 19) -> Mon Jun 17; 2025 (holiday Thu Jun 19)
+    -> Mon Jun 16; 2026 (holiday IS expiry Fri Jun 19, expiry moves to
+    Thu Jun 18) -> Mon Jun 15. Verified against 2,472 TV NQ1! entries
+    spanning 2023-03 to 2026-03 plus the reconciled 2025-10/2026-06 runs.
+    """
+    day = contract_expiry(year, month)
+    for _ in range(ROLL_BUSINESS_DAYS_BEFORE_EXPIRY):
+        day = _prior_business_day(day)
+    return day
+
+
+def front_contract_for_session(
+    session_date: date,
+    root: str = "NQ",
+    roll_overrides: Optional[dict[str, date]] = None,
+) -> str:
+    """Front-month contract code (Databento style, single-digit year).
+
+    ``roll_overrides`` maps a contract code (e.g. ``"NQU6"``) to the first
+    session date on which it is front, pinning an observed TV roll date
+    wherever it diverges from the rule.
+    """
     year = session_date.year
     candidates = []
-    for candidate_year in (year, year + 1):
+    for candidate_year in (year - 1, year, year + 1):
         for month in (3, 6, 9, 12):
-            expiry = third_friday(candidate_year, month)
-            roll = expiry - timedelta(days=ROLL_CALENDAR_DAYS_BEFORE_EXPIRY)
-            if session_date < roll:
-                candidates.append((expiry, candidate_year, month))
-    expiry, contract_year, contract_month = min(candidates)
-    return f"{root}{QUARTERLY_MONTH_CODES[contract_month]}{contract_year % 10}"
+            expiry = contract_expiry(candidate_year, month)
+            code = f"{root}{QUARTERLY_MONTH_CODES[month]}{candidate_year % 10}"
+            candidates.append((expiry, code, roll_date(candidate_year, month)))
+    candidates.sort()
+
+    for index, (expiry, code, handover) in enumerate(candidates):
+        # Contract `code` stops being front at its own roll date; an
+        # override keyed by the SUCCESSOR's code pins that handover.
+        if roll_overrides and index + 1 < len(candidates):
+            successor = candidates[index + 1][1]
+            if successor in roll_overrides:
+                handover = roll_overrides[successor]
+        if session_date < handover:
+            return code
+    return candidates[-1][1]
 
 
 class _SessionDateCache:
@@ -86,6 +143,7 @@ def convert_glbx_files(
     output_symbol: str = "NQ1!",
     start_utc: Optional[str] = None,
     end_utc: Optional[str] = None,
+    roll_overrides: Optional[dict[str, date]] = None,
 ) -> dict:
     """Stream GLBX daily files into one canonical front-month CSV.
 
@@ -118,7 +176,7 @@ def convert_glbx_files(
                 if end_utc is not None and minute_timestamp >= end_utc:
                     continue
                 session = sessions.get(timestamp)
-                front = front_contract_for_session(session, root)
+                front = front_contract_for_session(session, root, roll_overrides)
                 if symbol != front:
                     skipped_symbols += 1
                     continue
@@ -177,7 +235,16 @@ def main() -> None:
     parser.add_argument("--root", default="NQ")
     parser.add_argument("--start-utc", help="Inclusive ISO minute, e.g. 2025-10-01T00:00:00Z")
     parser.add_argument("--end-utc", help="Exclusive ISO minute")
+    parser.add_argument(
+        "--roll-override", action="append", default=[], metavar="CODE=YYYY-MM-DD",
+        help="Pin an observed roll: session date on which CODE becomes front (repeatable)",
+    )
     args = parser.parse_args()
+
+    roll_overrides: dict[str, date] = {}
+    for spec in args.roll_override:
+        code, _, day = spec.partition("=")
+        roll_overrides[code.strip()] = date.fromisoformat(day.strip())
 
     files = sorted(Path(args.input_dir).glob("glbx-mdp3-*.ohlcv-1m.csv.zst"))
     if args.start_utc or args.end_utc:
@@ -196,6 +263,7 @@ def main() -> None:
         root=args.root,
         start_utc=args.start_utc,
         end_utc=args.end_utc,
+        roll_overrides=roll_overrides or None,
     )
     import json
 

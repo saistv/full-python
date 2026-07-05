@@ -5,6 +5,7 @@ import csv
 from dataclasses import asdict
 import json
 from pathlib import Path
+import subprocess
 
 from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
@@ -22,6 +23,8 @@ from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
 from full_python.strategy.adaptive_trend_config import AdaptiveTrendConfig, production_am_config
 from full_python.strategy.baseline import BaselineMomentumStrategy
 from full_python.strategy.config import BaselineMomentumConfig
+from full_python.strategy.vwap_reversion import VwapReversionStrategy
+from full_python.strategy.vwap_reversion_config import VwapReversionConfig
 
 TRADE_CSV_COLUMNS = [
     "symbol",
@@ -54,7 +57,25 @@ def build_strategy(strategy_name: str):
     if strategy_name == "adaptive_trend_am":
         config = production_am_config()
         return config, AdaptiveTrendStrategy(config)
+    if strategy_name == "vwap_reversion":
+        config = VwapReversionConfig()
+        return config, VwapReversionStrategy(config)
     raise ValueError(f"Unknown strategy: {strategy_name}")
+
+
+def _code_version_hash() -> str:
+    """Git SHA of the current checkout; git's null-SHA (all zeros) outside a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "0" * 40
 
 
 def run_baseline(
@@ -112,12 +133,14 @@ def run_baseline(
     simulation_config = SimulationConfig(fill_timing=fill_timing, **overrides)
     result = SimulationEngine(simulation_config).run(bars, strategy)
 
-    # Deterministic run identity: same data + same configs => same run id.
+    # Deterministic run identity: same data + same configs + same code => same run id.
+    code_version = _code_version_hash()
     run_id = "-".join(
         [
             manifest.stable_hash()[:8],
             strategy_config.parameter_hash()[:8],
             simulation_config.parameter_hash()[:8],
+            code_version[:8],
         ]
     )
 
@@ -168,6 +191,7 @@ def run_baseline(
 
     report = {
         "run_id": run_id,
+        "code_version": code_version,
         "data": {
             **manifest.to_dict(),
             "manifest_hash": manifest.stable_hash(),
@@ -224,8 +248,8 @@ def main() -> None:
     parser.add_argument(
         "--strategy",
         default="baseline",
-        choices=["baseline", "adaptive_trend", "adaptive_trend_am"],
-        help="adaptive_trend = flat 1-contract parity core; adaptive_trend_am = production sizing (AM 1-4 + DLL $1K)",
+        choices=["baseline", "adaptive_trend", "adaptive_trend_am", "vwap_reversion"],
+        help="adaptive_trend = flat parity core; adaptive_trend_am = production sizing; vwap_reversion = MR variant 1 (v0.2)",
     )
     parser.add_argument("--point-value", type=float, help="Override contract point value (default 2.0 = MNQ)")
     parser.add_argument("--commission-rt", type=float, help="Override round-trip commission per contract")

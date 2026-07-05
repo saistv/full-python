@@ -20,6 +20,8 @@ from full_python.data.sessions import SessionInfo, classify_timestamp
 from full_python.events import EventLedger, EventType
 from full_python.models import Fill, MarketBar, OrderIntent, StrategyResult, Trade
 from full_python.replay import Strategy
+from full_python.risk.daily_loss import is_daily_loss_breached
+from full_python.risk.risk_manager import RiskManager
 from full_python.simulation.config import (
     FILL_TIMING_NEXT_BAR_OPEN,
     FILL_TIMING_SIGNAL_BAR_CLOSE,
@@ -83,6 +85,7 @@ class _State:
 class SimulationEngine:
     def __init__(self, config: SimulationConfig) -> None:
         self.config = config
+        self._risk_manager = RiskManager(config)
 
     def run(
         self,
@@ -307,10 +310,9 @@ class SimulationEngine:
                 * position.quantity
             )
         session_pnl = state.cumulative_net_pnl - state.session_start_pnl + unrealized
-        limit = self.config.daily_loss_limit
-        if limit is None or state.daily_limit_hit:
+        if state.daily_limit_hit:
             return session_pnl
-        if session_pnl <= -limit:
+        if is_daily_loss_breached(session_pnl, self.config.daily_loss_limit):
             state.daily_limit_hit = True
             ledger.append(
                 EventType.STATE_TRANSITION,
@@ -318,7 +320,7 @@ class SimulationEngine:
                 payload={
                     "transition": "daily_limit_hit",
                     "session_pnl": session_pnl,
-                    "daily_loss_limit": limit,
+                    "daily_loss_limit": self.config.daily_loss_limit,
                 },
             )
             if position is not None:
@@ -446,30 +448,28 @@ class SimulationEngine:
     def _veto_reason(
         self, state: _State, session: SessionInfo, intent: OrderIntent
     ) -> Optional[str]:
-        if intent.side not in ("buy", "sell"):
-            return "invalid_side"
-        if intent.quantity < 1 or intent.quantity > self.config.max_contracts:
-            return "invalid_quantity"
-        if (
-            state.position is not None
-            or state.pending_entry is not None
-            or state.pending_exit is not None
-        ):
-            return "position_already_open"
-        if state.daily_limit_hit:
-            return "daily_limit"
-        if session.minutes_from_midnight_et >= self.config.flatten_minutes_et:
-            return "after_flatten"
-        if self.config.rth_entries_only and not session.is_rth:
-            return "outside_rth"
-        if "stop_price" not in intent.metadata:
-            return "missing_stop"
-        stop_price = float(intent.metadata["stop_price"])
-        if intent.side == "buy" and stop_price >= self._reference_price(state, intent):
-            return "invalid_stop"
-        if intent.side == "sell" and stop_price <= self._reference_price(state, intent):
-            return "invalid_stop"
-        return None
+        # NOTE: reference_price is now computed eagerly here (before all veto checks),
+        # whereas the original inline implementation computed it lazily (only inside the
+        # final invalid_stop branches after every earlier check had passed). This is safe
+        # because every current strategy (baseline.py, vwap_reversion.py, adaptive_trend.py)
+        # always populates intent.metadata["signal_price"] with a numeric bar.close value,
+        # so _reference_price() cannot raise or behave unexpectedly. However, if a future
+        # strategy supplies non-numeric/absent signal_price and an intent that would be
+        # vetoed earlier (e.g., invalid_quantity), that potential failure is now hit eagerly
+        # instead of never reached. If this ever needs to change, make reference_price lazy
+        # in RiskManager.veto_reason's signature (e.g., a callable) rather than precomputing
+        # it at every call site.
+        return self._risk_manager.veto_reason(
+            has_open_order=(
+                state.position is not None
+                or state.pending_entry is not None
+                or state.pending_exit is not None
+            ),
+            daily_limit_hit=state.daily_limit_hit,
+            session=session,
+            intent=intent,
+            reference_price=self._reference_price(state, intent),
+        )
 
     def _reference_price(self, state: _State, intent: OrderIntent) -> float:
         signal_price = intent.metadata.get("signal_price")

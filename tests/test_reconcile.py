@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from full_python.reconcile import load_sim_trades, load_tv_trades, reconcile
 
 TV_EXPORT = (
@@ -66,6 +68,25 @@ def test_reconcile_matches_missing_and_extra(tmp_path: Path) -> None:
     summary = report.summary()
     assert summary["match_rate"] == 2 / 3
     assert summary["max_abs_entry_price_delta"] == 1.0
+
+
+def test_tv_export_parses_net_pnl_column(tmp_path: Path) -> None:
+    trades = load_tv_trades(_write(tmp_path, "tv_pnl.csv", TV_EXPORT))
+    assert trades[0].net_pnl == -625.0
+    assert trades[1].net_pnl == 1400.0
+
+
+def test_matched_pair_carries_exit_time_delta_and_pnl_delta(tmp_path: Path) -> None:
+    tv_trades = load_tv_trades(_write(tmp_path, "tv.csv", TV_EXPORT))
+    sim_trades = load_sim_trades(_write(tmp_path, "trades.csv", SIM_TRADES))
+
+    report = reconcile(tv_trades, sim_trades, tolerance_minutes=3.0)
+
+    long_match = next(m for m in report.matches if m["side"] == "long")
+    assert long_match["exit_time_delta_minutes"] == 0.0
+    assert long_match["tv_exit_signal"] == "Stop Loss"
+    # sim net_pnl (-65.5) - tv net_pnl (-625.0)
+    assert long_match["net_pnl_delta"] == pytest.approx(-65.5 - (-625.0))
 
 
 def test_side_mismatch_never_matches(tmp_path: Path) -> None:

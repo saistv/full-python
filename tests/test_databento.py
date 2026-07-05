@@ -23,10 +23,31 @@ def test_front_contract_rolls_tuesday_of_expiration_week() -> None:
     # NQZ5 expires Fri Dec 19 2025 -> roll boundary Dec 16 (Tuesday).
     assert front_contract_for_session(date(2025, 12, 15)) == "NQZ5"
     assert front_contract_for_session(date(2025, 12, 16)) == "NQH6"
-    # NQM6 expires Jun 19 2026 -> NQU6 from Jun 16.
-    assert front_contract_for_session(date(2026, 6, 15)) == "NQM6"
-    assert front_contract_for_session(date(2026, 6, 16)) == "NQU6"
     assert front_contract_for_session(date(2025, 10, 28)) == "NQZ5"
+
+
+def test_juneteenth_shifts_all_three_observed_june_rolls() -> None:
+    # Rule: 3 BUSINESS days before expiry, skipping CME holidays.
+    # 2024: Juneteenth Wed Jun 19, expiry Fri Jun 21 -> roll Mon Jun 17.
+    assert front_contract_for_session(date(2024, 6, 14)) == "NQM4"
+    assert front_contract_for_session(date(2024, 6, 17)) == "NQU4"
+    # 2025: Juneteenth Thu Jun 19, expiry Fri Jun 20 -> roll Mon Jun 16.
+    assert front_contract_for_session(date(2025, 6, 13)) == "NQM5"
+    assert front_contract_for_session(date(2025, 6, 16)) == "NQU5"
+    # 2026: Juneteenth IS the third Friday -> expiry Thu Jun 18, roll Mon Jun 15.
+    assert front_contract_for_session(date(2026, 6, 12)) == "NQM6"
+    assert front_contract_for_session(date(2026, 6, 15)) == "NQU6"
+    # Non-June quarters: plain Tuesday of expiration week.
+    assert front_contract_for_session(date(2024, 9, 16)) == "NQU4"
+    assert front_contract_for_session(date(2024, 9, 17)) == "NQZ4"
+
+
+def test_roll_override_pins_observed_handover() -> None:
+    overrides = {"NQH6": date(2025, 12, 18)}
+    assert front_contract_for_session(date(2025, 12, 17), roll_overrides=overrides) == "NQZ5"
+    assert front_contract_for_session(date(2025, 12, 18), roll_overrides=overrides) == "NQH6"
+    # Other rolls are untouched by an unrelated override.
+    assert front_contract_for_session(date(2026, 3, 17), roll_overrides=overrides) == "NQM6"
 
 
 GLBX_HEADER = "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume,symbol\n"
