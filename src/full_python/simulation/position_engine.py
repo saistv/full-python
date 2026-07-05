@@ -555,3 +555,25 @@ class PositionEngine:
         on_trade_closed = getattr(self._strategy, "on_trade_closed", None)
         if on_trade_closed is not None:
             on_trade_closed(trade)
+
+    def flatten_now(self, bar: MarketBar, reason: str) -> None:
+        """Supervisor-initiated flatten: cancel pendings, close at bar close.
+
+        Exists only for the live-execution supervisor path
+        (execution/supervisor.py). SimulationEngine never calls this --
+        the deterministic replay path is unchanged.
+        """
+        if self._pending_entry is not None or self._pending_exit is not None:
+            self._ledger.append(
+                EventType.STATE_TRANSITION,
+                timestamp_utc=bar.timestamp_utc,
+                payload={"transition": "pending_orders_cancelled", "reason": reason},
+            )
+            self._pending_entry = None
+            self._pending_exit = None
+        if self._position is not None:
+            self._close_position(
+                raw_price=bar.close,
+                timestamp_utc=bar.timestamp_utc,
+                reason=reason,
+            )
