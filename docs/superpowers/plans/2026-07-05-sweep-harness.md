@@ -815,7 +815,7 @@ and pinned by tests/test_sweep_driver.py. Runs the train window only;
 NEVER touches holdout. Row 8 (slippage sensitivity) is run separately
 for the selected qualifier only, before any holdout decision.
 
-Usage: PYTHONPATH=src python3 scripts/sweep_ma_lengths.py
+Usage: PYTHONPATH=src:. python3 scripts/sweep_ma_lengths.py
 Expected runtime: ~17 minutes (25 cells x ~41s).
 """
 from __future__ import annotations
@@ -1015,7 +1015,7 @@ Expected: 1 passed
 
 The worktree has no `runs/multi-year/` data (gitignored), so the driver must exit nonzero with a clear message:
 
-Run: `PYTHONPATH=src python3 scripts/sweep_ma_lengths.py; echo "exit=$?"`
+Run: `PYTHONPATH=src:. python3 scripts/sweep_ma_lengths.py; echo "exit=$?"`
 Expected output: `ERROR: bars file not found: runs/multi-year/nq1_2021-03-16_2026-06-26.csv` and `exit=1`
 
 - [ ] **Step 6: Run the full suite**

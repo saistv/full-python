@@ -6,7 +6,7 @@ and pinned by tests/test_sweep_driver.py. Runs the train window only;
 NEVER touches holdout. Row 8 (slippage sensitivity) is run separately
 for the selected qualifier only, before any holdout decision.
 
-Usage: PYTHONPATH=src python3 scripts/sweep_ma_lengths.py
+Usage: PYTHONPATH=src:. python3 scripts/sweep_ma_lengths.py
 Expected runtime: ~17 minutes (25 cells x ~41s).
 """
 from __future__ import annotations
