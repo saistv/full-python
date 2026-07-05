@@ -303,7 +303,7 @@ from full_python.research.sweep import CellScore, score_cell
 # its own session. Cell: the same 12 trades (same sessions -> paired diff 0)
 # plus 2 extra winners/year on new sessions.
 #
-# Hand-computed: baseline net 3000 (1000/year), cell net 33000, delta 30000.
+# Hand-computed: baseline net 3000 (1000/year), cell net 30000, delta 27000.
 # Paired t: diffs = twelve 0s, three +5000s, three +4000s -> mean 1500,
 # sum sq dev 82.5e6, sample var 4,852,941.18, se 519.2377, t = 2.88885.
 # ---------------------------------------------------------------------------
@@ -337,8 +337,8 @@ def test_score_cell_all_rows_pass():
     cell, baseline = _all_pass_pair()
     score = score_cell(cell, baseline)
     assert score.trade_count == 18
-    assert score.net_pnl == 33000.0
-    assert score.delta_vs_baseline == 30000.0
+    assert score.net_pnl == 30000.0
+    assert score.delta_vs_baseline == 27000.0
     for name, row in score.rows.items():
         assert row["pass"], f"row {name} unexpectedly failed: {row}"
     assert score.rows["trade_count"]["needs_justification"] is False
