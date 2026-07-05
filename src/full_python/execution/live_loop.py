@@ -57,8 +57,10 @@ class LiveLoop:
     def run(self) -> LiveLoopResult:
         halted_reason: Optional[str] = None
         breach_flattened: set[str] = set()  # session_dates already acted on
+        last_timestamp = ""  # for stamping a halt raised outside a live bar
         try:
             for bar in self._bar_source:
+                last_timestamp = bar.timestamp_utc
                 session = classify_timestamp(bar.timestamp_utc)
                 session_iso = session.session_date.isoformat()
                 self._ledger.append(
@@ -102,10 +104,17 @@ class LiveLoop:
             self._drain_events()
         except ExecutionInvariantError as exc:
             halted_reason = f"execution_halt: {exc}"
+            # Same "reason" key as the breach-halt path above, so a ledger
+            # consumer filtering transition=="execution_halt" reads one field
+            # for both halt variants; "error" carries the invariant detail.
             self._ledger.append(
                 EventType.STATE_TRANSITION,
-                timestamp_utc="",
-                payload={"transition": "execution_halt", "error": str(exc)},
+                timestamp_utc=last_timestamp,
+                payload={
+                    "transition": "execution_halt",
+                    "reason": "invariant_violation",
+                    "error": str(exc),
+                },
             )
         return LiveLoopResult(
             trades=tuple(self._broker.trades), halted_reason=halted_reason
