@@ -54,17 +54,6 @@ class AdaptiveTrendConfig:
     enable_projected_risk_dll_guard: bool = True
     dll_risk_buffer: float = 0.0
     dollar_point_value: float = 20.0  # must match the engine's point_value
-    enable_prior_vol_gate: bool = False
-    # Train-calibrated high-tercile boundary of prior_realized_vol (stdev
-    # of log returns over the PRIOR completed RTH session's 1-minute
-    # closes, >=30 observations required). Derived from
-    # full_python.regime._tercile_bounds over ONLY the Gate 1 train
-    # window (2023-01-01 -> 2025-06-30, 642 sessions with enough prior
-    # data) -- see docs/decisions/2026-07-05-gate1-phase2-diagnosis.md.
-    # Fixed deliberately, not recomputed dynamically, to avoid lookahead
-    # into holdout/live data. Re-derive only if the train window itself
-    # is redefined.
-    prior_vol_high_threshold: float = 0.0004638315483775433
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

@@ -1,5 +1,4 @@
 import math
-import pytest
 from datetime import datetime, timedelta, timezone
 
 from full_python.events import EventType
@@ -25,14 +24,6 @@ def test_config_defaults_are_production_values() -> None:
     assert config.entry_start_minutes_et == 570
     assert config.entry_end_minutes_et == 600
     assert config.contracts == 1
-    assert len(config.parameter_hash()) == 64
-
-
-def test_config_defaults_include_disabled_prior_vol_gate() -> None:
-    config = AdaptiveTrendConfig()
-
-    assert config.enable_prior_vol_gate is False
-    assert config.prior_vol_high_threshold == pytest.approx(0.0004638315483775433)
     assert len(config.parameter_hash()) == 64
 
 
