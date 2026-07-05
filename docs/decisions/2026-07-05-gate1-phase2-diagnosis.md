@@ -68,29 +68,47 @@ axis, since it governs the 89.2% majority dynamic-stop path.
 
 ## 4. Regime attribution (measurement only — `regime.py` never gates entries)
 
+**Correction (2026-07-05, post-hoc, caught by the final whole-branch
+review on the prior-vol-gate feature branch):** the numbers originally
+reported in this section were computed with a methodology error —
+`_assign_tags`'s tercile bounds were fit over 706 sessions spanning
+2022-10-01 → 2025-06-30 (the train window PLUS a ~3-month pre-train
+lookback buffer used to warm up the ADX/variance-ratio indicators),
+not the train window alone. That leaks 64 pre-train sessions into the
+threshold calibration — exactly the kind of leakage Phase 0 exists to
+prevent ("all sweep decisions run on this window only"). The
+`prior_vol_high_threshold` value later shipped in
+`AdaptiveTrendConfig` (`0.0004638315483775433`) was, in fact, computed
+correctly from the strict 642-session train-only population — so the
+**code is correct**; this document's numbers were not, and are
+corrected below. The underlying finding survives the correction (see
+Conclusion), just with different exact figures — this is not a
+retraction.
+
 Ran `full_python.regime.compute_session_features` +
-`attribute_trades` on the train window (709 sessions, 5 regime axes:
-`adx`, `variance_ratio`, `gap`, `prior_vol`, `overnight_range`). Every
-bucket below clears the `MIN_PROVEN_TRADES=50` floor.
+`_tercile_bounds` restricted to the train window's own 642 sessions
+with a computable `prior_realized_vol` (2023-01-01 → 2025-06-30 only,
+no pre-train sessions), then `full_python.regime.welch_t` per bucket
+against train trades. Every bucket below clears the
+`MIN_PROVEN_TRADES=50` floor.
 
 **One result is statistically significant and survives outlier removal — flagged, not acted on:**
 
 | `prior_vol` bucket | Sessions | Trades | Net P&L | Win rate | Mean | Median | Welch t vs. rest |
 |---|---|---|---|---|---|---|---|
-| High | 235 | 107 | **-$30,310** | **7.5%** | -$283 | -$650 | **-3.311** |
-| Mid | 235 | 131 | $49,500 | 25.2% | $378 | -$540 | 1.457 |
-| Low | 236 | 139 | $47,325 | 28.8% | $340 | -$485 | 1.297 |
+| High | 213 | 128 | **-$22,610** | **10.2%** | -$177 | -$645 | **-2.762** |
+| Mid | 214 | 123 | $47,720 | 25.2% | $388 | -$530 | 1.445 |
+| Low | 215 | 126 | $41,405 | 29.4% | $329 | -$478 | 1.119 |
 
-`|t| = 3.311` clears the Phase 0 materiality bar's significance
-threshold (`|t| >= 2.0`) by a wide margin, on a proven sample (n=107),
-and the direction is confirmed by both mean AND median (Standard 1) —
-not a case where one statistic tells a nicer story than the other.
-**Outlier sensitivity (Standard 4): removing the top 3 winning trades
-in the high-vol bucket — including the single largest winning trade in
-the entire train set ($13,280) — makes the bucket's net P&L MORE
-negative (-$51,870), not less.** This is the opposite of what an
+`|t| = 2.762` clears the Phase 0 materiality bar's significance
+threshold (`|t| >= 2.0`), on a proven sample (n=128), and the direction
+is confirmed by both mean AND median (Standard 1) — not a case where
+one statistic tells a nicer story than the other. **Outlier sensitivity
+(Standard 4): removing the top 3 winning trades in the high-vol bucket
+still leaves it deeply negative (-$46,885 net, i.e. MORE negative than
+before removal, not less).** This is the opposite of what an
 outlier-driven false positive would look like; it is strong evidence the
-underperformance is systematic across the 107-trade population, not a
+underperformance is systematic across the 128-trade population, not a
 tail artifact.
 
 **Why this is reported as a finding, not a recommendation:** `regime.py`'s
