@@ -49,6 +49,24 @@ A candidate config change must, on the **train** window, satisfy:
   guaranteed to share; a pooled-variance (Student's) t-test would be
   reported alongside if requested, never in place of Welch.
 
+**Amendment 2026-07-05 (recorded before any Phase 4 sweep cell was
+run):** for config-sweep comparisons — where candidate and baseline are
+the same strategy run over the same sessions and their trade
+populations overlap heavily — the significance statistic is a
+**session-level paired t-test** on per-session net P&L differences
+(cell minus baseline over the union of active sessions, absent session
+= $0), implemented in `full_python.research.sweep._paired_session_t`,
+same `|t| >= 2.0` bar. An unpaired Welch t between two
+heavily-overlapping trade lists treats them as independent samples,
+which they are not — the same error class documented in
+`feedback_mc_comparison_rules` and flagged in the prior-vol
+evaluation's own setup. Welch remains the stated statistic for
+comparisons of genuinely distinct populations (e.g. regime-bucket
+diagnosis within one run, as used in Phase 2). Approved during the
+sweep-harness design review
+(`docs/superpowers/specs/2026-07-05-sweep-harness-design.md`); the
+bar's value (2.0) and the materiality dollar bar are unchanged.
+
 Below this bar: reported as "not significant," not treated as a lead.
 
 ## OPEN axes for Phase 4 (from the migration plan's Phase 3 axis map)
@@ -96,9 +114,11 @@ holdout is touched:
    short-only gains with the other side flat/worse fails this row).
 8. Survives a slippage-sensitivity check at 0.5pt and 1.0pt entry/exit
    slippage (not just the 0.75pt baseline).
-9. Welch `|t| >= 2.0` (already required by the materiality bar, restated
-   here as a promotion-table row so it can't be dropped silently in a
-   later summary).
+9. Significance `|t| >= 2.0` (already required by the materiality bar,
+   restated here as a promotion-table row so it can't be dropped
+   silently in a later summary; per the 2026-07-05 amendment above,
+   this is the session-level paired t for config-sweep comparisons and
+   Welch for distinct-population comparisons).
 
 **Holdout rule:** once a candidate clears rows 1-9 on train, it is run
 on holdout exactly once. The holdout result must be same-sign (net P&L
