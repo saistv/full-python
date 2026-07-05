@@ -203,6 +203,8 @@ class AdaptiveTrendStrategy:
 
         if failing is None and config.enable_daily_loss_limit and self._daily_limit_hit:
             failing = "daily_limit_halt"
+        if failing is None:
+            failing = self._prior_vol_gate_failing()
 
         if failing is not None:
             return StrategyResult(
@@ -309,6 +311,22 @@ class AdaptiveTrendStrategy:
                 sum((r - mean) ** 2 for r in returns) / len(returns)
             )
         self._current_session_rth_closes = []
+
+    def _prior_vol_gate_failing(self) -> Optional[str]:
+        """Session-level veto: block entries when the prior session's
+        realized vol exceeded the train-calibrated high-tercile
+        threshold. See adaptive_trend_config.py's
+        prior_vol_high_threshold docstring for how the threshold was
+        derived. Returns None (never blocks) until the gate is enabled
+        and at least one prior session's vol has been computed.
+        """
+        if (
+            self.config.enable_prior_vol_gate
+            and self._prior_session_realized_vol is not None
+            and self._prior_session_realized_vol > self.config.prior_vol_high_threshold
+        ):
+            return "prior_vol_gate"
+        return None
 
     # ------------------------------------------------------------------
     # S/R break detection + prove-it (Pine-exact)

@@ -259,3 +259,35 @@ def test_on_bar_accumulates_rth_closes_and_finalizes_vol_at_session_boundary() -
     expected = statistics.pstdev(returns)
     assert strategy._prior_session_realized_vol == pytest.approx(expected)
     assert strategy._current_session_rth_closes == [21000.0]
+
+
+def test_prior_vol_gate_failing_blocks_when_enabled_and_above_threshold() -> None:
+    config = AdaptiveTrendConfig(enable_prior_vol_gate=True, prior_vol_high_threshold=0.0005)
+    strategy = AdaptiveTrendStrategy(config)
+    strategy._prior_session_realized_vol = 0.0006
+
+    assert strategy._prior_vol_gate_failing() == "prior_vol_gate"
+
+
+def test_prior_vol_gate_failing_allows_when_enabled_and_below_threshold() -> None:
+    config = AdaptiveTrendConfig(enable_prior_vol_gate=True, prior_vol_high_threshold=0.0005)
+    strategy = AdaptiveTrendStrategy(config)
+    strategy._prior_session_realized_vol = 0.0003
+
+    assert strategy._prior_vol_gate_failing() is None
+
+
+def test_prior_vol_gate_failing_allows_when_disabled_even_if_above_threshold() -> None:
+    config = AdaptiveTrendConfig(enable_prior_vol_gate=False, prior_vol_high_threshold=0.0005)
+    strategy = AdaptiveTrendStrategy(config)
+    strategy._prior_session_realized_vol = 0.0006  # would trigger if enabled
+
+    assert strategy._prior_vol_gate_failing() is None
+
+
+def test_prior_vol_gate_failing_allows_on_cold_start_with_no_prior_vol_yet() -> None:
+    config = AdaptiveTrendConfig(enable_prior_vol_gate=True, prior_vol_high_threshold=0.0005)
+    strategy = AdaptiveTrendStrategy(config)
+    # self._prior_session_realized_vol defaults to None (cold start)
+
+    assert strategy._prior_vol_gate_failing() is None
