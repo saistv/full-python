@@ -5,7 +5,9 @@ Behavior-preserving extraction from SimulationEngine._veto_reason
 same order, so SimulationEngine's refactor to call this module is proven
 unchanged by tests/test_golden_trades.py passing identically before and
 after. Any live BrokerExecutionEngine (future work, Gate 5+) calls this
-same module, never simulation-internal code.
+same module, never simulation-internal code. Decoupled from SimulationConfig
+via risk.limits.RiskLimits (2026-07-05); SimulationEngine constructs the
+limits at init.
 """
 from __future__ import annotations
 
@@ -14,14 +16,14 @@ from typing import Optional
 from full_python.data.sessions import SessionInfo
 from full_python.models import OrderIntent
 from full_python.risk.daily_loss import check_daily_limit_halt
+from full_python.risk.limits import RiskLimits
 from full_python.risk.position_limits import check_no_open_order, check_quantity
 from full_python.risk.session_rules import check_after_flatten, check_rth_window
-from full_python.simulation.config import SimulationConfig
 
 
 class RiskManager:
-    def __init__(self, config: SimulationConfig) -> None:
-        self.config = config
+    def __init__(self, limits: RiskLimits) -> None:
+        self.limits = limits
 
     def veto_reason(
         self,
@@ -53,7 +55,7 @@ class RiskManager:
         if intent.side not in ("buy", "sell"):
             return "invalid_side"
 
-        reason = check_quantity(intent.quantity, self.config.max_contracts)
+        reason = check_quantity(intent.quantity, self.limits.max_contracts)
         if reason is not None:
             return reason
 
@@ -65,11 +67,11 @@ class RiskManager:
         if reason is not None:
             return reason
 
-        reason = check_after_flatten(session, self.config.flatten_minutes_et)
+        reason = check_after_flatten(session, self.limits.flatten_minutes_et)
         if reason is not None:
             return reason
 
-        reason = check_rth_window(session, self.config.rth_entries_only)
+        reason = check_rth_window(session, self.limits.rth_entries_only)
         if reason is not None:
             return reason
 
