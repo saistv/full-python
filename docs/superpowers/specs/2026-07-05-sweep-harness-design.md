@@ -167,8 +167,12 @@ CSV, no SimulationEngine in scoring tests):
 
 1. `score_cell` on a hand-built baseline + cell where every row's
    pass/fail is hand-computable; assert each row's verdict and numbers.
-2. A cell constructed to fail EXACTLY row 5 (outlier-carried gain):
-   passes 1/2/4/6/7/9, fails 5, `passes_all` False.
+2. A cell constructed with an outlier-carried gain: passes 1/2/4/6/7,
+   fails 5 AND 9, `passes_all` False. (Amended during planning: a gain
+   concentrated in ~3 sessions out of 18 mathematically cannot clear
+   the paired-t bar, so rows 5 and 9 co-fail by design — the harness
+   catches outlier-carried gains twice. Row 5's isolated cut logic is
+   covered separately by a direct unit test on the top-N helper.)
 3. Paired-t fixture: known session P&L series with an independently
    hand-computed t (verified against `statistics` in the test); assert
    row 9's t matches to 1e-9 and the pass threshold behaves at the
