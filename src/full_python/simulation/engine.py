@@ -21,6 +21,7 @@ from full_python.events import EventLedger, EventType
 from full_python.models import Fill, MarketBar, OrderIntent, StrategyResult, Trade
 from full_python.replay import Strategy
 from full_python.risk.daily_loss import is_daily_loss_breached
+from full_python.risk.limits import RiskLimits
 from full_python.risk.risk_manager import RiskManager
 from full_python.simulation.config import (
     FILL_TIMING_NEXT_BAR_OPEN,
@@ -85,7 +86,13 @@ class _State:
 class SimulationEngine:
     def __init__(self, config: SimulationConfig) -> None:
         self.config = config
-        self._risk_manager = RiskManager(config)
+        self._risk_manager = RiskManager(
+            RiskLimits(
+                max_contracts=config.max_contracts,
+                flatten_minutes_et=config.flatten_minutes_et,
+                rth_entries_only=config.rth_entries_only,
+            )
+        )
 
     def run(
         self,
