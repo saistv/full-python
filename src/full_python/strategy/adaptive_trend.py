@@ -93,8 +93,12 @@ class AdaptiveTrendStrategy:
         # Prior-session-volatility gate state. Duplicates
         # full_python.regime.compute_session_features's
         # prior_realized_vol formula (not imported -- see the design
-        # spec at docs/superpowers/specs/2026-07-05-prior-vol-gate-design.md);
-        # a parity test in test_adaptive_trend.py guards against drift.
+        # spec at docs/superpowers/specs/2026-07-05-prior-vol-gate-design.md).
+        # test_adaptive_trend.py pins this formula against an
+        # independently-computed reference (statistics.pstdev), not
+        # against regime.py directly -- if regime.py's formula ever
+        # changes, this copy must be re-verified by hand, since there is
+        # no automated cross-check between the two modules.
         self._current_session_rth_closes: list[float] = []
         self._prior_session_realized_vol: Optional[float] = None
 
