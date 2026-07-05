@@ -24,6 +24,26 @@ identity is what makes every later gate (paper, reconciliation, pilot)
 meaningful: any live-vs-sim divergence is then attributable to the
 world (data, broker, latency), never to the machinery.
 
+## Amendment 2026-07-05 (pre-implementation, user-approved Option A)
+
+Reading `SimulationEngine` during planning showed the identity
+requirement demands every EXIT path, not just entry fills: gap-through
+stops (fill at open), intrabar stop/target (worst-case-wins +
+ambiguous flag), backstop flatten (bar close), session-change flatten
+(previous bar close), DLL-triggered exits (next bar open, stop
+cancelled). Duplicating ~400 reconciliation-proven lines inside the
+PaperBroker was rejected; instead the engine's position/fill lifecycle
+is extracted behavior-preservingly into a shared
+`simulation/position_engine.py` (`PositionEngine`) used by BOTH
+`SimulationEngine` and the future PaperBroker — identity by shared
+code. Two further corrections: `RiskLimits` lives in `risk/limits.py`
+(the risk package owns its config type; execution → risk, never the
+reverse), and implementation is split into two plans — Plan A
+(`2026-07-05-execution-core-foundations.md`: RiskLimits + PositionEngine
+extraction, zero-behavior-change contract) merges and re-verifies the
+real-data golden tests BEFORE Plan B (broker protocol, state machine,
+PaperBroker, supervisor, LiveLoop, identity tests) begins.
+
 ## Architecture
 
 New package `src/full_python/execution/` — six modules, each with one
