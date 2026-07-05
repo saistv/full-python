@@ -90,6 +90,13 @@ class AdaptiveTrendStrategy:
         self._win_streak = 0
         self._session_pnl = 0.0
         self._daily_limit_hit = False
+        # Prior-session-volatility gate state. Duplicates
+        # full_python.regime.compute_session_features's
+        # prior_realized_vol formula (not imported -- see the design
+        # spec at docs/superpowers/specs/2026-07-05-prior-vol-gate-design.md);
+        # a parity test in test_adaptive_trend.py guards against drift.
+        self._current_session_rth_closes: list[float] = []
+        self._prior_session_realized_vol: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Engine feedback hooks
@@ -124,8 +131,11 @@ class AdaptiveTrendStrategy:
         session = classify_timestamp(bar.timestamp_utc)
         session_iso = session.session_date.isoformat()
         if session_iso != self._session_date:
+            self._finalize_prior_session_vol()
             self._session_date = session_iso
             self._reset_break_state()
+        if session.is_rth:
+            self._current_session_rth_closes.append(bar.close)
 
         atf = self._atf.update(bar.high, bar.low, bar.close)
         squeeze = self._squeeze.update(bar.high, bar.low, bar.close)
@@ -278,6 +288,27 @@ class AdaptiveTrendStrategy:
         else:
             max_safe_qty = 0
         return max(0, min(desired_qty, max_safe_qty))
+
+    # ------------------------------------------------------------------
+    # Prior-session-volatility gate (measurement duplicated from
+    # full_python.regime.compute_session_features; see the design spec
+    # at docs/superpowers/specs/2026-07-05-prior-vol-gate-design.md)
+    # ------------------------------------------------------------------
+
+    def _finalize_prior_session_vol(self) -> None:
+        """Compute realized vol from the session just completed, to gate
+        the upcoming session's entries. Leaves the previous value
+        unchanged (None on cold start) when there isn't enough data --
+        never fabricates a value from too little history.
+        """
+        closes = self._current_session_rth_closes
+        if len(closes) >= 30:
+            returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+            mean = sum(returns) / len(returns)
+            self._prior_session_realized_vol = math.sqrt(
+                sum((r - mean) ** 2 for r in returns) / len(returns)
+            )
+        self._current_session_rth_closes = []
 
     # ------------------------------------------------------------------
     # S/R break detection + prove-it (Pine-exact)
