@@ -103,3 +103,104 @@ def _paired_session_t(
     if variance == 0.0:
         return None, n
     return mean / math.sqrt(variance / n), n
+
+
+def _year_nets(trades: Sequence[Trade]) -> dict[str, float]:
+    nets: dict[str, float] = defaultdict(float)
+    for trade in trades:
+        nets[trade.entry_timestamp_utc[:4]] += trade.net_pnl
+    return dict(nets)
+
+
+def _side_net(trades: Sequence[Trade], side: str) -> float:
+    return sum(t.net_pnl for t in trades if t.side == side)
+
+
+def score_cell(cell: CellResult, baseline: CellResult) -> CellScore:
+    """Score one cell against the baseline on the train promotion rows.
+
+    Rows 1-7 and 9 of the Phase 0 promotion table; row 3 (trade count) is
+    flag-only per the spec -- justification of a count drop is a human
+    judgment, the harness only reports it. Row 8 (slippage) is deferred
+    to the selected qualifier and is not scored here.
+    """
+    cell_net = _net(cell.trades)
+    base_net = _net(baseline.trades)
+    delta = cell_net - base_net
+    rows: dict[str, dict] = {}
+
+    rows["materiality"] = {"pass": delta >= MATERIALITY_DOLLARS, "delta": delta}
+
+    if cell.trades and baseline.trades:
+        cell_exp = cell_net / len(cell.trades)
+        base_exp = base_net / len(baseline.trades)
+        exp_pass = cell_exp >= base_exp + EXPECTANCY_MIN_IMPROVEMENT * abs(base_exp)
+    else:
+        cell_exp = None
+        base_exp = None
+        exp_pass = False
+    rows["expectancy"] = {"pass": exp_pass, "baseline": base_exp, "cell": cell_exp}
+
+    flagged = len(cell.trades) < (1.0 - TRADE_COUNT_FLAG_DROP) * len(baseline.trades)
+    rows["trade_count"] = {
+        "pass": True,  # flag-only: a drop needs human justification, not auto-fail
+        "needs_justification": flagged,
+        "baseline": len(baseline.trades),
+        "cell": len(cell.trades),
+    }
+
+    cell_dd = _max_drawdown(cell.trades)
+    base_dd = _max_drawdown(baseline.trades)
+    rows["drawdown"] = {
+        "pass": cell_dd >= base_dd * (1.0 + DRAWDOWN_MAX_WORSENING),
+        "baseline": base_dd,
+        "cell": cell_dd,
+    }
+
+    cuts = {
+        n: (_net_without_top(cell.trades, n), _net_without_top(baseline.trades, n))
+        for n in OUTLIER_CUTS
+    }
+    rows["outlier_survival"] = {
+        "pass": all(c > b for c, b in cuts.values()),
+        "cuts": {n: {"cell": c, "baseline": b} for n, (c, b) in cuts.items()},
+    }
+
+    base_years = _year_nets(baseline.trades)
+    cell_years = _year_nets(cell.trades)
+    better = sum(
+        1 for year, base_val in base_years.items()
+        if cell_years.get(year, 0.0) >= base_val
+    )
+    rows["year_by_year"] = {
+        "pass": better >= MIN_BETTER_OR_NEUTRAL_YEARS,
+        "better_or_neutral": better,
+        "years": {
+            year: {"baseline": base_val, "cell": cell_years.get(year, 0.0)}
+            for year, base_val in sorted(base_years.items())
+        },
+    }
+
+    long_delta = _side_net(cell.trades, "long") - _side_net(baseline.trades, "long")
+    short_delta = _side_net(cell.trades, "short") - _side_net(baseline.trades, "short")
+    rows["side_symmetry"] = {
+        "pass": long_delta >= 0.0 and short_delta >= 0.0,
+        "long_delta": long_delta,
+        "short_delta": short_delta,
+    }
+
+    t_stat, n_sessions = _paired_session_t(cell.trades, baseline.trades)
+    rows["paired_t"] = {
+        "pass": t_stat is not None and abs(t_stat) >= PAIRED_T_THRESHOLD,
+        "t": t_stat,
+        "n_sessions": n_sessions,
+    }
+
+    return CellScore(
+        overrides=dict(cell.overrides),
+        trade_count=len(cell.trades),
+        net_pnl=cell_net,
+        delta_vs_baseline=delta,
+        rows=rows,
+        passes_all=all(row["pass"] for row in rows.values()),
+    )
