@@ -2,14 +2,16 @@
 
 ## Context
 
-Gate 1 Phase 2 diagnosis (`docs/decisions/2026-07-05-gate1-phase2-diagnosis.md`)
-found a statistically significant effect on the train window
-(2023-01-01 → 2025-06-30, 378 trades): sessions following a high-prior-day
-realized-volatility session net **-$30,310** across 107 trades (7.5% win
-rate), Welch `t = -3.311` against the rest of the population — well past
+Gate 1 Phase 2 diagnosis (`docs/decisions/2026-07-05-gate1-phase2-diagnosis.md`,
+corrected 2026-07-05 after a methodology error was caught by this
+feature's own final review — see that doc's correction note) found a
+statistically significant effect on the train window (2023-01-01 →
+2025-06-30, 378 trades): sessions following a high-prior-day
+realized-volatility session net **-$22,610** across 128 trades (10.2%
+win rate), Welch `t = -2.762` against the rest of the population — past
 the Phase 0 materiality bar's `|t| >= 2.0` threshold — and the effect
 survives removing the 3 largest winning trades in that bucket (still
-`-$51,870`, i.e. more negative, not less).
+`-$46,885`, i.e. more negative, not less).
 
 Per explicit user direction, this is not being dismissed as
 "measurement only, don't act on it" just because it borders the
@@ -44,7 +46,7 @@ introducing a new engine↔strategy interface.
 
 ```python
 enable_prior_vol_gate: bool = False
-prior_vol_high_threshold: float = 0.00046383154837754  # train-calibrated,
+prior_vol_high_threshold: float = 0.0004638315483775433  # train-calibrated,
     # see docs/decisions/2026-07-05-gate1-phase2-diagnosis.md; the high
     # tercile boundary of prior_realized_vol computed via
     # full_python.regime._tercile_bounds over ONLY the 2023-01-01 ->
@@ -128,9 +130,15 @@ ledger and any rejection-count reporting without new plumbing.
 ## Testing
 
 1. **Vol-calc parity**: unit test with synthetic bars asserting the
-   strategy's internal calc matches `regime.py`'s `compute_
-   session_features` on the same data (guards against the two
-   implementations silently diverging).
+   strategy's internal calc matches an independently-computed reference
+   (`statistics.pstdev` over the same log returns, not `regime.py` —
+   deliberately a different code path so the check isn't just the
+   implementation re-run against itself). This pins the strategy's
+   formula to the correct math; it does NOT detect a future edit to
+   `regime.py`'s own formula diverging from this one, since the two are
+   never compared to each other directly. If `regime.py`'s formula ever
+   changes, re-verify this strategy's copy by hand against the new
+   formula — there is no automated cross-check between the two modules.
 2. **Gate blocks when triggered**: synthetic multi-session bar sequence
    where session N's closes produce a realized vol above the fixed
    threshold; assert no entry fires on session N+1 with the gate
