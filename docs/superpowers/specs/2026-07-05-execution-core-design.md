@@ -44,6 +44,24 @@ extraction, zero-behavior-change contract) merges and re-verifies the
 real-data golden tests BEFORE Plan B (broker protocol, state machine,
 PaperBroker, supervisor, LiveLoop, identity tests) begins.
 
+## Amendment 2 — 2026-07-05 (pre-Plan-B, after Plan A merged and golden-verified)
+
+With `PositionEngine` extracted and proven (157/0 including the
+real-data golden replay), the `Broker` protocol follows PositionEngine's
+proven per-bar shape rather than the original submit/cancel sketch:
+`process_bar_open(bar, session) -> session_pnl`,
+`apply_strategy_result(bar, session, result)`,
+`note_bar_processed(bar, session)`, `close_end_of_data()`,
+`flatten(bar, reason)`, `poll_events() -> list[BrokerEvent]`, plus
+`position`/`trades`/`daily_limit_hit` properties. The PaperBroker is a
+thin facade over the shared PositionEngine (identity by shared code);
+it synthesizes `BrokerEvent`s from the event ledger's tail so the order
+state machine can shadow position as an independent cross-check — the
+same state machine later becomes position-truth for the Tradovate
+adapter, which implements this identical protocol against the real API.
+`submit`/`cancel`-level granularity moves inside adapters where it
+belongs.
+
 ## Architecture
 
 New package `src/full_python/execution/` — six modules, each with one
