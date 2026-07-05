@@ -3,9 +3,24 @@
 Defense-in-depth: the strategy's own DLL is edge logic (part of the
 validated config); this supervisor is an account guard that must hold
 even if strategy state is corrupted. It consults only broker-reported
-position, closed trades, and the current bar mark. Gate 7's $150/day
-pilot cap becomes RiskSupervisorConfig(daily_loss_stop=150.0), not
-discipline.
+position, closed trades, and the current bar mark.
+
+`daily_loss_stop` IS PER-INSTRUMENT AND IN DOLLARS -- set it explicitly
+per account, and always name the instrument when quoting a cap:
+
+  * NQ = $20/point: one 30pt stop = $600/contract, AM4 worst single
+    loss ~= $2,600, and the strategy's own validated DLL is $1,000.
+    A live 1-NQ cap must sit ABOVE that $1,000 DLL (reference range
+    ~$1,500-2,000) so the validated DLL stays the primary control and
+    this supervisor only catches runaway/corruption. A cap below one
+    stop ($600) flattens on the first adverse mark -- untradeable.
+  * MNQ = $2/point (1/10th NQ): Gate 7's pilot cap is $150/day
+    (~2.5 micro stops). $150 IS AN MNQ NUMBER -- never set it on an NQ
+    account, where it is ~10x too tight.
+
+Test fixtures pass daily_loss_stop=150.0 only to trip a synthetic loss;
+that is not a deployment default. The real cap is operational config
+set when an account is wired.
 """
 from __future__ import annotations
 

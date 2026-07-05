@@ -45,6 +45,21 @@ def test_daily_loss_stop_includes_unrealized_and_latches():
     assert sup.entries_allowed() is True
 
 
+def test_short_position_unrealized_loss_breaches_when_price_rises():
+    # A short is underwater when price RISES: entered at 100.0, marked at
+    # 160.0 -> (160-100)*(-1)*pv(2.0)*qty(1) = -120 unrealized; realized 0.
+    # daily_loss_stop=100 -> -120 <= -100 breaches. This exercises the
+    # direction=-1 sign branch (the long-only fixtures never do).
+    sup = RiskSupervisor(RiskSupervisorConfig(point_value=2.0, daily_loss_stop=100.0))
+    short = BrokerPosition(side="short", quantity=1, entry_price=100.0)
+    assert sup.check_mark(session_date="2025-10-01", bar=_bar("t", 160.0),
+                          position=short, trades=[]) == "supervisor_daily_loss"
+    # and the same short in profit (price falls) does NOT breach:
+    sup2 = RiskSupervisor(RiskSupervisorConfig(point_value=2.0, daily_loss_stop=100.0))
+    assert sup2.check_mark(session_date="2025-10-01", bar=_bar("t", 40.0),
+                           position=short, trades=[]) is None
+
+
 def test_max_position_and_kill_switch(tmp_path):
     switch = tmp_path / "halt"
     sup = RiskSupervisor(RiskSupervisorConfig(point_value=2.0,
