@@ -24,7 +24,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from full_python.models import Trade
+from full_python.models import MarketBar, Trade
+from full_python.simulation import SimulationConfig, SimulationEngine
+from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
+from full_python.strategy.adaptive_trend_config import AdaptiveTrendConfig
 
 MATERIALITY_DOLLARS = 10_000.0
 EXPECTANCY_MIN_IMPROVEMENT = 0.10
@@ -204,3 +207,53 @@ def score_cell(cell: CellResult, baseline: CellResult) -> CellScore:
         rows=rows,
         passes_all=all(row["pass"] for row in rows.values()),
     )
+
+
+def select_qualifier(scores: Sequence[CellScore]) -> Optional[CellScore]:
+    """The pre-registered selection rule: among cells passing ALL scored
+    rows, the single best by net P&L -- and only that one -- may proceed
+    to the slippage row and the one-shot holdout. The baseline cell
+    (empty overrides) can never qualify against itself. Returns None when
+    nothing qualifies, which closes the axis on train evidence alone.
+    """
+    qualifiers = [s for s in scores if s.passes_all and s.overrides != {}]
+    if not qualifiers:
+        return None
+    return max(qualifiers, key=lambda s: s.net_pnl)
+
+
+def run_grid(
+    bars: Sequence[MarketBar],
+    base_config: AdaptiveTrendConfig,
+    overrides_list: Sequence[dict],
+    sim_config: SimulationConfig,
+    train_start: str,
+    train_end: str,
+) -> list[CellResult]:
+    """Run every override dict through a fresh strategy + engine.
+
+    The baseline cell is the empty dict and flows through the identical
+    path, so baseline and cells cannot diverge in cost model or slicing.
+    A raising cell is captured as CellResult.error and the grid
+    continues; it is never silently dropped.
+    """
+    results: list[CellResult] = []
+    for overrides in overrides_list:
+        try:
+            config = AdaptiveTrendConfig(**{**base_config.to_dict(), **overrides})
+            strategy = AdaptiveTrendStrategy(config)
+            outcome = SimulationEngine(sim_config).run(bars, strategy)
+            trades = tuple(
+                t for t in outcome.trades
+                if train_start <= t.entry_timestamp_utc < train_end
+            )
+            results.append(CellResult(
+                overrides=dict(overrides), trades=trades,
+                config_hash=config.parameter_hash(),
+            ))
+        except Exception as exc:  # noqa: BLE001 -- cell isolation is the contract
+            results.append(CellResult(
+                overrides=dict(overrides), trades=(),
+                error=f"{type(exc).__name__}: {exc}",
+            ))
+    return results

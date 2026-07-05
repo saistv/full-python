@@ -246,3 +246,80 @@ def test_score_cell_empty_cell_fails_without_crashing():
     assert score.rows["materiality"]["pass"] is False
     assert score.rows["expectancy"]["pass"] is False
     assert score.passes_all is False
+
+
+from full_python.models import MarketBar
+from full_python.research.sweep import run_grid, select_qualifier
+from full_python.simulation import SimulationConfig
+from full_python.strategy.adaptive_trend_config import production_am_config
+
+
+def _score(overrides: dict, net: float, passes: bool) -> CellScore:
+    return CellScore(
+        overrides=overrides, trade_count=100, net_pnl=net,
+        delta_vs_baseline=net - 50000.0, rows={}, passes_all=passes,
+    )
+
+
+def test_select_qualifier_none_pass():
+    scores = [_score({"ma_50_length": 30}, 60000.0, False),
+              _score({"ma_50_length": 40}, 70000.0, False)]
+    assert select_qualifier(scores) is None
+
+
+def test_select_qualifier_best_net_among_passers():
+    scores = [
+        _score({"ma_50_length": 30}, 80000.0, True),
+        _score({"ma_50_length": 40}, 90000.0, True),
+        _score({"ma_50_length": 60}, 95000.0, False),  # higher net but fails
+    ]
+    winner = select_qualifier(scores)
+    assert winner is not None
+    assert winner.overrides == {"ma_50_length": 40}
+
+
+def test_select_qualifier_never_returns_baseline():
+    scores = [_score({}, 99000.0, True), _score({"ma_50_length": 40}, 61000.0, True)]
+    winner = select_qualifier(scores)
+    assert winner is not None
+    assert winner.overrides == {"ma_50_length": 40}
+
+
+def _smoke_bars() -> list[MarketBar]:
+    # Two RTH sessions of flat 1-min bars inside the train window. Flat
+    # prices + MA warmup guarantee zero trades; we only exercise plumbing.
+    bars = []
+    for day in ("2023-05-01", "2023-05-02"):
+        for minute in range(31, 60):  # 14:31Z-14:59Z = 9:31-9:59 ET (EDT)
+            bars.append(MarketBar(
+                timestamp_utc=f"{day}T14:{minute:02d}:00Z", symbol="NQ",
+                open=100.0, high=100.0, low=100.0, close=100.0, volume=10.0,
+            ))
+    return bars
+
+
+def test_run_grid_smoke_baseline_identity_and_override_divergence():
+    results = run_grid(
+        _smoke_bars(), production_am_config(),
+        [{}, {"ma_50_length": 40}], SimulationConfig(),
+        "2023-01-01T00:00:00Z", "2025-07-01T00:00:00Z",
+    )
+    assert len(results) == 2
+    assert all(r.error is None for r in results)
+    assert all(r.trades == () for r in results)
+    assert results[0].config_hash == production_am_config().parameter_hash()
+    assert results[1].config_hash is not None
+    assert results[1].config_hash != results[0].config_hash
+
+
+def test_run_grid_captures_cell_error_and_continues():
+    results = run_grid(
+        _smoke_bars(), production_am_config(),
+        [{"nonexistent_field": 1}, {}], SimulationConfig(),
+        "2023-01-01T00:00:00Z", "2025-07-01T00:00:00Z",
+    )
+    assert len(results) == 2
+    assert results[0].error is not None
+    assert "nonexistent_field" in results[0].error
+    assert results[0].trades == ()
+    assert results[1].error is None  # the grid continued past the failure
