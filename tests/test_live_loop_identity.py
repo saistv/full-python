@@ -60,13 +60,20 @@ def _buy(bar, stop_offset=30.0):
 
 
 def _fixture_bars():
-    # Two RTH sessions; entry on session 1 bar 0, intrabar stop-out on bar 2;
-    # entry on session 2 that survives to session flatten.
+    # Two RTH sessions, engineered to exercise three distinct exit paths and
+    # to give the supervisor a POST-BREACH same-session entry to block:
+    #   bar 0  entry #1 (fills bar 1); bar 2 crashes through its stop -> "stop"
+    #   bar 3  entry #2, in session 1 AFTER the bar-2 loss (the supervisor's
+    #          block target); with no supervisor it fills at bar 4 and then
+    #          flattens at the session boundary (bar 5) -> "session_end"
+    #   bar 5  entry #3 in session 2 (fills bar 6), left open at the end of
+    #          data -> "end_of_data"
     return [
         _bar("2025-10-01T14:31:00Z", 100.0, 101.0, 99.0, 100.0),
         _bar("2025-10-01T14:32:00Z", 100.5, 102.0, 100.0, 101.0),
         _bar("2025-10-01T14:33:00Z", 101.0, 101.5, 60.0, 62.0),   # crashes through stop
         _bar("2025-10-01T14:34:00Z", 62.0, 63.0, 61.0, 62.5),
+        _bar("2025-10-01T14:35:00Z", 62.5, 64.0, 62.0, 63.5),
         _bar("2025-10-02T14:31:00Z", 200.0, 201.0, 199.0, 200.0),
         _bar("2025-10-02T14:32:00Z", 200.5, 202.0, 200.0, 201.5),
         _bar("2025-10-02T14:33:00Z", 201.5, 203.0, 201.0, 202.0),
@@ -74,7 +81,7 @@ def _fixture_bars():
 
 
 def _script():
-    return {0: _buy, 4: _buy}
+    return {0: _buy, 3: _buy, 5: _buy}
 
 
 def _run_sim(bars):
@@ -107,6 +114,15 @@ def test_identity_trades_and_ledger_sequence_match_simulation():
 
     assert live_result.halted_reason is None
 
+    # Guard the fixture's own coverage claim: identity is only meaningful if
+    # the fixture actually exercises the tricky exit paths (intrabar stop,
+    # cross-session-boundary flatten, end-of-data close). If a future edit
+    # trivialises the fixture, this fails loudly rather than silently
+    # narrowing what "identity" is tested over.
+    assert {"stop", "session_end", "end_of_data"} <= {
+        t.exit_reason for t in sim_result.trades
+    }
+
 
 def test_identity_hook_order_matches_simulation():
     bars = _fixture_bars()
@@ -115,20 +131,31 @@ def test_identity_hook_order_matches_simulation():
     assert sim_strategy.calls == live_strategy.calls
 
 
-def test_supervisor_daily_loss_flattens_and_blocks_entries():
+def test_supervisor_daily_loss_blocks_post_breach_entry():
+    # Discriminating ON-vs-OFF test: the supervisor's entry-blocking must
+    # change an observable outcome, or it isn't tested at all.
     bars = _fixture_bars()
+
+    # OFF: the post-breach session-1 entry (bar 3) fills at bar 4 and closes
+    # at the session boundary -> TWO session-1 trades.
+    nosup_result, _, _ = _run_live(bars)
+    nosup_s1 = [t for t in nosup_result.trades if t.session_date == "2025-10-01"]
+    assert len(nosup_s1) == 2
+    assert "session_end" in {t.exit_reason for t in nosup_s1}
+
+    # ON (tight cap): the bar-2 stop-out (~-$65) latches a session-1 breach;
+    # the bar-3 entry is stripped, so ONLY the stop-out remains in session 1.
     sup = RiskSupervisor(RiskSupervisorConfig(point_value=2.0, daily_loss_stop=10.0))
-    live_result, _, live_ledger = _run_live(bars, supervisor=sup)
-    # the session-1 stop-out loses far more than $10 -> breach latches;
-    # the session-2 scripted entry must be stripped, so only 1 trade exists
-    # from session 1 and none from session 2 of the same session... the
-    # session-2 entry occurs on a NEW session (supervisor resets) so it fills.
-    # The invariant actually asserted: no trade's entry occurs in the same
-    # session after its breach.
-    reasons = [t.exit_reason for t in live_result.trades]
-    assert "stop" in reasons  # session 1 stop-out happened
-    session1_trades = [t for t in live_result.trades if t.session_date == "2025-10-01"]
-    assert len(session1_trades) == 1  # nothing new after the breach that session
+    sup_result, _, _ = _run_live(bars, supervisor=sup)
+    sup_s1 = [t for t in sup_result.trades if t.session_date == "2025-10-01"]
+    assert len(sup_s1) == 1
+    assert sup_s1[0].exit_reason == "stop"
+    assert "session_end" not in {t.exit_reason for t in sup_s1}
+
+    # Entries resume next session (the breach latch resets on a new
+    # session_date): entry #3 fills in BOTH runs.
+    assert any(t.session_date == "2025-10-02" for t in sup_result.trades)
+    assert any(t.session_date == "2025-10-02" for t in nosup_result.trades)
 
 
 @pytest.mark.skipif(
