@@ -11,3 +11,6 @@ runs/*
 
 # Local git worktrees for isolated task execution.
 .worktrees/
+
+# Subagent-driven-development scratch (task briefs, reports, review packages).
+.superpowers/
