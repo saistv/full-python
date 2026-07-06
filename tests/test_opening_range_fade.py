@@ -135,23 +135,66 @@ def test_symmetric_failed_downside_breakout_fires_a_long_fade() -> None:
     assert fills[0].payload["side"] == "buy"  # fade the failed DOWN breakout -> long
 
 
+def _failed_up_breakout_around(day: int, start_price: float, extend_points: float) -> list[MarketBar]:
+    """A failed-upside-breakout day whose OR sits around `start_price` (so it can
+    continue from a trending warmup without a giant gap resetting the ATR)."""
+    bars = []
+    p = start_price
+    or_hi, or_lo = start_price + 5.0, start_price - 5.0
+    for m in range(390):
+        if m < 30:
+            c = or_hi if m % 2 == 0 else or_lo
+            h, l = or_hi, or_lo
+        elif m == 40:
+            c = start_price + 3.0                       # closes back inside
+            h, l = or_hi + extend_points, start_price - 1.0
+        else:
+            c = p + (0.25 if m % 2 == 0 else -0.25)
+            h, l = max(p, c) + 0.25, min(p, c) - 0.25
+        bars.append(_bar(_ts(day, m), p, h, l, c))
+        p = c
+    return bars
+
+
 def test_trending_day_adx_gate_blocks_the_fade() -> None:
-    # Warmup is strongly TRENDING (one direction every day) -> daily ADX high
-    # -> even a clean failed breakout is gated out.
-    def trend_day(day):
-        bars = []
-        p = 20000.0 + day * 50.0  # each day gaps up 50 -> persistent uptrend
+    # Strongly TRENDING warmup (steady up-drift, price carried across days) ->
+    # daily ADX high -> a CLEAN failed breakout (extension clears the threshold,
+    # so it reaches the ADX check) is rejected with adx_trending and NO fade.
+    bars = []
+    price = 20000.0
+    for day in range(40):
         for m in range(390):
-            c = p + 0.5  # drift up all day
-            bars.append(_bar(_ts(day, m), p, c + 0.25, p - 0.25, c))
-            p = c
-        return bars
-    bars = [b for d in range(40) for b in trend_day(d)]
-    bars += _or_then_failed_up_breakout(40, extend_points=10.0)
-    # not asserting zero unconditionally (ADX may warm slowly); assert the
-    # gate is *consulted*: a trending-day rejection appears OR no fade fires.
+            c = price + 0.5  # steady intraday up-drift -> high directional ADX
+            bars.append(_bar(_ts(day, m), price, c + 0.25, price - 0.25, c))
+            price = c
+    bars += _failed_up_breakout_around(40, round(price), extend_points=10.0)
+
     result = _run(bars)
     rejects = [r for r in result.ledger.records
                if r.event_type == EventType.REJECTION
                and r.payload.get("reason") == "adx_trending"]
-    assert len(_fade_fills(result)) == 0 or len(rejects) >= 1
+    assert len(_fade_fills(result)) == 0   # the gate blocked the fade
+    assert len(rejects) >= 1               # ...and did so via adx_trending, not vacuously
+
+
+def test_persistent_breakout_expires_without_fading() -> None:
+    # A breakout that EXTENDS past the OR and STAYS out (never closes back
+    # inside within the failure window) is a successful extension, not a
+    # failure -> the failure-window-expiry branch disarms it and no fade fires.
+    def or_persistent_up(day):
+        bars = []
+        p = 20000.0
+        for m in range(390):
+            if m < 30:
+                c = 20005.0 if m % 2 == 0 else 19995.0
+                h, l = 20005.0, 19995.0
+            elif m >= 40:
+                c, h, l = 20020.0, 20025.0, 20015.0   # stays well above or_high (20005)
+            else:
+                c = p + (0.25 if m % 2 == 0 else -0.25)
+                h, l = max(p, c) + 0.25, min(p, c) - 0.25
+            bars.append(_bar(_ts(day, m), p, h, l, c))
+            p = c
+        return bars
+    bars = _warmup(40) + or_persistent_up(40)
+    assert len(_fade_fills(_run(bars))) == 0
