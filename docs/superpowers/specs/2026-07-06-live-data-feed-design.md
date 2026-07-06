@@ -24,6 +24,16 @@ seam that sub-project 3 must satisfy.
 - Architecture = Approach A: `LiveBarSource` wrapping a
   `MarketDataFeed` protocol with an injected `Clock`; single-threaded,
   deterministic, testable with a scripted feed + fake clock.
+- **The trading window must stay malleable** — the operator will retune
+  it through research and must not be locked to 9:30-10:00. This is
+  already true at the strategy level: `AdaptiveTrendConfig.
+  entry_start_minutes_et` / `entry_end_minutes_et` (defaults 570 / 600)
+  gate entries, and the backstop is `SimulationConfig.flatten_hour_et` /
+  `flatten_minute_et`. **Requirement for this sub-project: the outage
+  arming window is INJECTED from those same config values — never a
+  hardcoded constant.** Changing the trading window in config
+  automatically moves the outage-arming window; there is one source of
+  truth for "when is the strategy active."
 
 ## Established seams (reused, not rebuilt)
 
@@ -103,8 +113,18 @@ backtest never exercised.
 Implements `BarSource`. Constructed with a `MarketDataFeed`, a `Clock`,
 a `ContractAuthority`, a `position_provider` (a zero-arg callable
 returning whether a position is currently open — wired to
-`broker.position is not None`), and a `grace_seconds` parameter
-(default 25.0). Its `__iter__`/`__next__`:
+`broker.position is not None`), an `ActiveWindow`, and a `grace_seconds`
+parameter (default 25.0).
+
+`ActiveWindow` is a tiny frozen value type carrying
+`start_minutes_et` and `end_minutes_et` (minutes-from-midnight ET),
+constructed from config by the caller — e.g. `ActiveWindow(
+start_minutes_et=config.entry_start_minutes_et, end_minutes_et=
+sim_config.flatten_minutes_et)`. The `LiveBarSource` treats
+`start <= session.minutes_from_midnight_et < end` as "strategy active."
+It holds NO literal window constants; retuning the trading window in
+config moves the arming window with zero code change. Its
+`__iter__`/`__next__`:
 
 1. Compute the next expected minute-open timestamp (monotonic from the
    last emitted bar, or the current minute on cold start).
@@ -119,13 +139,15 @@ returning whether a position is currently open — wired to
      out-of-order).
    - Yield the `MarketBar`.
 4. **Outage detection (session-armed):** the detector is *armed* when
-   `position_provider()` is true OR the expected minute is inside the
-   strategy's active window (RTH entry window through the backstop). When
-   armed and either (a) the feed times out past the grace window, or (b)
-   an arriving bar's timestamp skips an expected interior RTH minute →
-   `DataOutageError`. When *disarmed* (flat and outside the active
-   window — CME maintenance break, overnight, weekend), a gap is normal:
-   advance the expected minute and keep waiting, no raise.
+   `position_provider()` is true OR the expected minute falls inside the
+   injected `ActiveWindow`. When armed and either (a) the feed times out
+   past the grace window, or (b) an arriving bar's timestamp skips an
+   expected interior RTH minute → `DataOutageError`. When *disarmed*
+   (flat and outside the `ActiveWindow` — CME maintenance break,
+   overnight, weekend), a gap is normal: advance the expected minute and
+   keep waiting, no raise. Because the window is injected, if the
+   operator later moves entries to (say) 10:00-11:00, the arming window
+   follows automatically with no change here.
 
 Errors (`livedata/errors.py`): `DataOutageError`, `DataIntegrityError`,
 both subclassing a common `LiveDataError(RuntimeError)`.
@@ -165,6 +187,12 @@ guarantee, inherited from sub-project 1.
 5. **No false outage — disarmed:** flat + outside the active window,
    feed returns `None` for a maintenance-break minute → no raise,
    expected minute advances.
+5b. **Window is malleable, not hardcoded:** construct two
+   `LiveBarSource`s with *different* `ActiveWindow`s (e.g. 9:30-10:00
+   vs 10:00-11:00); an identical flat + feed-timeout at 10:30 raises
+   `DataOutageError` for the second (armed) and not the first
+   (disarmed). This pins the injected-window requirement — a future
+   edit that re-hardcodes 9:30 fails here.
 6. **Integrity:** backwards timestamp and duplicate timestamp each →
    `DataIntegrityError`.
 7. **Integration:** `LiveLoop` + `LiveBarSource(scripted feed)` +
