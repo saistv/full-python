@@ -115,6 +115,21 @@ def test_disarmed_timeout_advances_without_raising():
     assert next(it).timestamp_utc == "2025-11-03T03:05:00Z"
 
 
+def test_gap_starting_in_window_raises_even_if_next_bar_lands_after_close():
+    # Regression for the arming-moment fix: flat, window 09:30-10:00 ET.
+    # Last bar at 14:35Z (09:35 ET, in window); the feed drops bars and the
+    # NEXT bar to actually arrive is 15:05Z (10:05 ET, just past the window).
+    # The gap STARTED inside the window, so it must raise -- arming off the
+    # arrival moment (10:05, out of window) would wrongly swallow it.
+    win = ActiveWindow(start_minutes_et=9 * 60 + 30, end_minutes_et=10 * 60)
+    src = _source([_vbar("2025-11-03T14:35:00Z"), _vbar("2025-11-03T15:05:00Z")],
+                  window=win, position=FLAT)
+    it = iter(src)
+    assert next(it).timestamp_utc == "2025-11-03T14:35:00Z"
+    with pytest.raises(DataOutageError):
+        next(it)
+
+
 def test_window_is_malleable_not_hardcoded():
     # Same seed bar at 14:59Z (~09:59 ET) then feed dries up, flat.
     # Window A = 09:30-10:00 ET: 10:00 (the missing minute) is OUT -> disarmed -> no raise.

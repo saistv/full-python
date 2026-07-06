@@ -76,7 +76,12 @@ class LiveBarSource:
                 continue
             bar = self._normalize(vbar)
             self._validate_monotonic(bar)
-            if self._armed(_parse(bar.timestamp_utc)):
+            # Arm the gap check off `expected` (the first missing minute /
+            # start of the gap), NOT the arriving bar's timestamp. A gap that
+            # begins inside the active window but whose next bar lands just
+            # after the window closes must still be caught -- arming off the
+            # (later) arrival moment would silently swallow exactly that case.
+            if self._armed(expected):
                 self._validate_no_interior_gap(bar)
             self._last_emitted_ts = bar.timestamp_utc
             return bar
