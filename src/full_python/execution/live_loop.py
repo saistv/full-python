@@ -21,6 +21,7 @@ from full_python.execution.state_machine import (
     OrderStateMachine,
 )
 from full_python.execution.supervisor import RiskSupervisor
+from full_python.livedata.errors import LiveDataError
 from full_python.models import MarketBar, Trade
 
 
@@ -58,9 +59,11 @@ class LiveLoop:
         halted_reason: Optional[str] = None
         breach_flattened: set[str] = set()  # session_dates already acted on
         last_timestamp = ""  # for stamping a halt raised outside a live bar
+        last_bar = None  # last MarketBar seen, for flattening on a data outage
         try:
             for bar in self._bar_source:
                 last_timestamp = bar.timestamp_utc
+                last_bar = bar
                 session = classify_timestamp(bar.timestamp_utc)
                 session_iso = session.session_date.isoformat()
                 self._ledger.append(
@@ -116,6 +119,22 @@ class LiveLoop:
                     "error": str(exc),
                 },
             )
+        except LiveDataError as exc:
+            halted_reason = f"data_outage: {exc}"
+            self._ledger.append(
+                EventType.STATE_TRANSITION,
+                timestamp_utc=last_timestamp,
+                payload={
+                    "transition": "execution_halt",
+                    "reason": "data_outage",
+                    "error": str(exc),
+                },
+            )
+            # Unlike an invariant halt (position unknown -> do not flatten),
+            # a data outage leaves the BROKER authoritative -- flatten the
+            # open position at the last-seen bar before halting.
+            if last_bar is not None and self._broker.position is not None:
+                self._broker.flatten(last_bar, "data_outage")
         return LiveLoopResult(
             trades=tuple(self._broker.trades), halted_reason=halted_reason
         )
