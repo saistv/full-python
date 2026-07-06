@@ -198,3 +198,12 @@ def test_persistent_breakout_expires_without_fading() -> None:
         return bars
     bars = _warmup(40) + or_persistent_up(40)
     assert len(_fade_fills(_run(bars))) == 0
+
+
+def test_cli_build_strategy_registers_opening_range_fade() -> None:
+    from full_python.cli import build_strategy
+    from full_python.strategy.opening_range_fade import OpeningRangeFadeStrategy
+
+    config, strategy = build_strategy("opening_range_fade")
+    assert isinstance(strategy, OpeningRangeFadeStrategy)
+    assert isinstance(config, OpeningRangeFadeConfig)
