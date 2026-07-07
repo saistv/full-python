@@ -17,18 +17,30 @@ class FakeWebSocketTransport:
     def __init__(self, inbound_frames: List[Optional[str]]) -> None:
         self.inbound_frames = inbound_frames
         self.sent_frames: List[str] = []
+        self.received_timeouts: List[float] = []
         self.closed = False
 
     def send(self, frame: str) -> None:
         self.sent_frames.append(frame)
 
     def receive(self, timeout_seconds: float) -> Optional[str]:
+        self.received_timeouts.append(timeout_seconds)
         if not self.inbound_frames:
             return None
         return self.inbound_frames.pop(0)
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeMonotonic:
+    def __init__(self, values: List[float]) -> None:
+        self.values = list(values)
+
+    def __call__(self) -> float:
+        if not self.values:
+            raise AssertionError("No fake monotonic values left")
+        return self.values.pop(0)
 
 
 def test_encode_request_uses_compact_json_payload() -> None:
@@ -94,6 +106,24 @@ def test_receive_event_skips_heartbeat_and_returns_first_event_dict() -> None:
     assert result == {"e": "chart", "d": {"charts": []}}
 
 
+def test_receive_event_uses_remaining_timeout_budget() -> None:
+    transport = FakeWebSocketTransport(["h", 'a[{"e":"chart","d":{"charts":[]}}]'])
+    clock = FakeMonotonic([10.0, 10.0, 10.25])
+    client = TradovateWebSocketClient(transport, monotonic_clock=clock)
+
+    assert client.receive_event(timeout_seconds=1.0) == {"e": "chart", "d": {"charts": []}}
+    assert transport.received_timeouts == [1.0, 0.75]
+
+
+def test_receive_event_returns_none_when_timeout_budget_expires() -> None:
+    transport = FakeWebSocketTransport(["h"])
+    clock = FakeMonotonic([10.0, 10.0, 11.0])
+    client = TradovateWebSocketClient(transport, monotonic_clock=clock)
+
+    assert client.receive_event(timeout_seconds=1.0) is None
+    assert transport.received_timeouts == [1.0]
+
+
 def test_response_wait_preserves_unrelated_event_for_later_receive() -> None:
     transport = FakeWebSocketTransport(
         [
@@ -135,6 +165,19 @@ def test_response_wait_preserves_later_items_in_same_array_frame() -> None:
     assert client.request("md/getChart", {"symbol": "NQZ5"}) == {"historicalId": 5}
     assert client.receive_event(timeout_seconds=1.0) == {"e": "chart", "d": {"charts": [2]}}
     assert client.request("md/getChart", {"symbol": "NQZ5"}) == {"realtimeId": 6}
+
+
+def test_response_wait_uses_remaining_timeout_budget() -> None:
+    transport = FakeWebSocketTransport(["h", 'a[{"s":200,"i":1,"d":{"historicalId":5}}]'])
+    clock = FakeMonotonic([20.0, 20.0, 20.5])
+    client = TradovateWebSocketClient(
+        transport,
+        response_timeout_seconds=2.0,
+        monotonic_clock=clock,
+    )
+
+    assert client.request("md/getChart", {"symbol": "NQZ5"}) == {"historicalId": 5}
+    assert transport.received_timeouts == [2.0, 1.5]
 
 
 def test_event_wait_preserves_later_items_in_same_array_frame() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Deque, Optional, Protocol
@@ -51,10 +52,18 @@ def parse_message(frame: str) -> WebSocketMessage:
 
 
 class TradovateWebSocketClient:
-    def __init__(self, transport: WebSocketTransport, max_ignored_frames: int = 100) -> None:
+    def __init__(
+        self,
+        transport: WebSocketTransport,
+        max_ignored_frames: int = 100,
+        response_timeout_seconds: float = 30.0,
+        monotonic_clock=time.monotonic,
+    ) -> None:
         self.transport = transport
         self._request_id = 1
         self.max_ignored_frames = max_ignored_frames
+        self.response_timeout_seconds = response_timeout_seconds
+        self._monotonic_clock = monotonic_clock
         self._pending_events: Deque[dict] = deque()
         self._pending_responses: Deque[dict] = deque()
 
@@ -76,10 +85,14 @@ class TradovateWebSocketClient:
             return self._pending_events.popleft()
 
         ignored_frames = 0
+        deadline = self._monotonic_clock() + timeout_seconds
         while True:
+            remaining = deadline - self._monotonic_clock()
+            if remaining <= 0:
+                return None
             ignored_frames += 1
             self._raise_if_too_many_ignored_frames(ignored_frames)
-            frame = self.transport.receive(timeout_seconds)
+            frame = self.transport.receive(remaining)
             if frame is None:
                 return None
 
@@ -104,10 +117,16 @@ class TradovateWebSocketClient:
             return pending
 
         ignored_frames = 0
+        deadline = self._monotonic_clock() + self.response_timeout_seconds
         while True:
+            remaining = deadline - self._monotonic_clock()
+            if remaining <= 0:
+                raise TradovateWebSocketError(
+                    f"Timed out waiting for websocket response id {expected_id}"
+                )
             ignored_frames += 1
             self._raise_if_too_many_ignored_frames(ignored_frames)
-            frame = self.transport.receive(30.0)
+            frame = self.transport.receive(remaining)
             if frame is None:
                 raise TradovateWebSocketError(
                     f"Timed out waiting for websocket response id {expected_id}"
