@@ -200,6 +200,50 @@ def test_persistent_breakout_expires_without_fading() -> None:
     assert len(_fade_fills(_run(bars))) == 0
 
 
+def test_upside_breakout_must_close_back_inside_the_opening_range() -> None:
+    def failed_through_bottom(day):
+        bars = []
+        p = 20000.0
+        for m in range(390):
+            if m < 30:
+                c = 20005.0 if m % 2 == 0 else 19995.0
+                h, l = 20005.0, 19995.0
+            elif m == 40:
+                c, h, l = 19990.0, 20015.0, 19989.0  # closes below OR, not inside it
+            else:
+                c = p + (0.25 if m % 2 == 0 else -0.25)
+                h, l = max(p, c) + 0.25, min(p, c) - 0.25
+            bars.append(_bar(_ts(day, m), p, h, l, c))
+            p = c
+        return bars
+
+    bars = _warmup(40) + failed_through_bottom(40)
+
+    assert len(_fade_fills(_run(bars))) == 0
+
+
+def test_downside_breakout_must_close_back_inside_the_opening_range() -> None:
+    def failed_through_top(day):
+        bars = []
+        p = 20000.0
+        for m in range(390):
+            if m < 30:
+                c = 20005.0 if m % 2 == 0 else 19995.0
+                h, l = 20005.0, 19995.0
+            elif m == 40:
+                c, h, l = 20010.0, 20011.0, 19985.0  # closes above OR, not inside it
+            else:
+                c = p + (0.25 if m % 2 == 0 else -0.25)
+                h, l = max(p, c) + 0.25, min(p, c) - 0.25
+            bars.append(_bar(_ts(day, m), p, h, l, c))
+            p = c
+        return bars
+
+    bars = _warmup(40) + failed_through_top(40)
+
+    assert len(_fade_fills(_run(bars))) == 0
+
+
 def test_cli_build_strategy_registers_opening_range_fade() -> None:
     from full_python.cli import build_strategy
     from full_python.strategy.opening_range_fade import OpeningRangeFadeStrategy

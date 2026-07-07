@@ -140,6 +140,7 @@ class OpeningRangeFadeStrategy:
         )
         if or_ready:
             threshold = config.breakout_atr_mult * atr
+            close_inside_or = self._or_low < bar.close < self._or_high
             # upside breakout -> fade SHORT on failure
             if self._up_active:
                 self._up_age += 1
@@ -150,7 +151,7 @@ class OpeningRangeFadeStrategy:
                     self._up_extended = False
                 if (bar.high - self._or_high) >= threshold:
                     self._up_extended = True
-            if self._up_active and bar.close < self._or_high:  # closed back inside
+            if self._up_active and close_inside_or:
                 if self._up_extended and self._up_age <= config.failure_window_bars:
                     fade_side = "short"
                 self._up_active = self._up_extended = False
@@ -168,7 +169,7 @@ class OpeningRangeFadeStrategy:
                     self._dn_extended = False
                 if (self._or_low - bar.low) >= threshold:
                     self._dn_extended = True
-            if self._dn_active and bar.close > self._or_low:  # closed back inside
+            if self._dn_active and close_inside_or:
                 if self._dn_extended and self._dn_age <= config.failure_window_bars and fade_side is None:
                     fade_side = "long"
                 self._dn_active = self._dn_extended = False
