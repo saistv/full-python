@@ -25,6 +25,8 @@ from full_python.strategy.baseline import BaselineMomentumStrategy
 from full_python.strategy.config import BaselineMomentumConfig
 from full_python.strategy.vwap_reversion import VwapReversionStrategy
 from full_python.strategy.vwap_reversion_config import VwapReversionConfig
+from full_python.strategy.opening_range_fade import OpeningRangeFadeStrategy
+from full_python.strategy.opening_range_fade_config import OpeningRangeFadeConfig
 
 TRADE_CSV_COLUMNS = [
     "symbol",
@@ -60,6 +62,9 @@ def build_strategy(strategy_name: str):
     if strategy_name == "vwap_reversion":
         config = VwapReversionConfig()
         return config, VwapReversionStrategy(config)
+    if strategy_name == "opening_range_fade":
+        config = OpeningRangeFadeConfig()
+        return config, OpeningRangeFadeStrategy(config)
     raise ValueError(f"Unknown strategy: {strategy_name}")
 
 
@@ -248,8 +253,8 @@ def main() -> None:
     parser.add_argument(
         "--strategy",
         default="baseline",
-        choices=["baseline", "adaptive_trend", "adaptive_trend_am", "vwap_reversion"],
-        help="adaptive_trend = flat parity core; adaptive_trend_am = production sizing; vwap_reversion = MR variant 1 (v0.2)",
+        choices=["baseline", "adaptive_trend", "adaptive_trend_am", "vwap_reversion", "opening_range_fade"],
+        help="adaptive_trend = flat parity core; adaptive_trend_am = production sizing; vwap_reversion = MR variant 1 (v0.2); opening_range_fade = MR variant 2 (v1)",
     )
     parser.add_argument("--point-value", type=float, help="Override contract point value (default 2.0 = MNQ)")
     parser.add_argument("--commission-rt", type=float, help="Override round-trip commission per contract")
