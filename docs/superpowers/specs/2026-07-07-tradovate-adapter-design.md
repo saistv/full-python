@@ -439,6 +439,57 @@ Candidate dependency: `websockets`.
 - The adapter must make it difficult to accidentally use live URLs with
   order placement enabled.
 
+## Amendment 2026-07-10 — Tracked Risk-Management Gaps in `TradovateBroker`
+
+A first full review of Tasks 1-5 (the offline transport layer, plus the
+broker "safety skeleton" of Task 5) found that six safety-relevant
+behaviors were implemented as silent stubs, undocumented anywhere near
+the code — a real risk in its own right, independent of whether the
+stubs matter today (they don't: `order_enabled`/`flatten_enabled` default
+`False` and no live adapter is wired into `LiveLoop`, so nothing can
+trade). Recorded here, dated, so a future implementer enabling order
+routing cannot miss them; each is also flagged in-line in
+`tradovate/broker.py`'s module docstring and at its exact call site:
+
+1. `daily_limit_hit` never updates (always `False`) — the strategy's own
+   validated $1,000 DLL veto cannot fire live.
+2. `process_bar_open` always returns `0.0` — the projected-risk
+   position-sizing guard never shrinks with intraday losses.
+3. `trades` always returns `[]` — `RiskSupervisor`'s daily-loss backstop
+   only ever sees the open position's unrealized P&L, never realized
+   losses from closed trades within a session.
+4. No protective stop or OCO is ever submitted after an entry fill,
+   despite `stop_price` being validated at submission time — an
+   `order_enabled=True` entry currently fills naked.
+5. `apply_strategy_result` processes only `result.order_intents`;
+   `result.exits` and `result.stop_updates` are silently dropped — there
+   is no path for the strategy to close a position through this broker.
+6. `ingest_raw_event` has no submitted-order-id map (the "submitted order
+   map: client/local id to Tradovate order id" this spec's State And
+   Reconciliation section calls for does not exist yet). A fill for an
+   order id this broker never submitted is indistinguishable from a real
+   one and is applied as a genuine position update — which also silently
+   defeats `LiveLoop._cross_check()`'s divergence detection, since
+   position state stays in lockstep with the phantom fill.
+
+**Binding: none of `order_enabled=True` / `flatten_enabled=True` may be
+used against a funded account until all six are closed and each has a
+Failure Matrix test proving it.** The review also found the Failure
+Matrix (this spec's own acceptance bar) is at 12 of 28 scenarios covered,
+concentrated almost entirely in the protective-order and order-lifecycle
+items above — expected, since Task 6 (integration/regression) was not
+yet done at review time, but recorded so the remaining count is explicit
+rather than assumed.
+
+Separately, an open question this spec never poses: **does Tradovate
+enforce a daily-loss limit at the account/platform level** (some prop-
+firm risk add-ons do), and if so, does that supplement or substitute for
+gap #1/#2 above? Even if it does, account-level enforcement typically
+blocks *new* order submission on breach — it does not force-flatten an
+*existing* position the way the strategy's own DLL veto is specified to.
+This is now an explicit open operational decision (added below), not an
+assumption embedded in the code.
+
 ## Open Operational Decisions
 
 These are intentionally not solved in this spec:
@@ -448,7 +499,11 @@ These are intentionally not solved in this spec:
 - whether production pilot trades NQ or MNQ;
 - live daily supervisor cap;
 - how manual broker intervention is recorded;
-- whether partial fills get modeled or remain fatal permanently.
+- whether partial fills get modeled or remain fatal permanently;
+- whether Tradovate/the prop firm enforces an account-level daily-loss
+  limit that supplements or substitutes for the client-side DLL in
+  Amendment 2026-07-10 gap #1/#2 above — and if it auto-liquidates open
+  positions on breach or only blocks new orders.
 
 Those belong in sub-project 4 and the pilot checklist.
 

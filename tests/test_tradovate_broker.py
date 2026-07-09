@@ -182,6 +182,17 @@ def test_flatten_disabled_raises_and_does_not_call_liquidation():
     assert rest.liquidations == []
 
 
+def test_position_raw_event_accepts_plan_price_key():
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    broker.ingest_raw_event(TradovateRawEvent(
+        kind="position",
+        data={"side": "short", "qty": 2, "price": 101.5},
+    ))
+
+    assert broker.position == BrokerPosition(side="short", quantity=2, entry_price=101.5)
+
+
 def test_flatten_enabled_with_position_calls_liquidate_position():
     rest = FakeRestClient()
     broker = TradovateBroker(_cfg(flatten_enabled=True), rest)
