@@ -37,18 +37,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from full_python.data.sessions import SessionInfo
+from full_python.data.sessions import SessionInfo, classify_timestamp
 from full_python.execution.broker_protocol import (
     Acked,
     BrokerEvent,
     BrokerPosition,
+    Canceled,
     Filled,
     PartialFilled,
     Rejected,
 )
 from full_python.models import MarketBar, StrategyResult, Trade
+from full_python.risk.daily_loss import is_daily_loss_breached
 from full_python.tradovate.config import TradovateAdapterConfig
-from full_python.tradovate.errors import TradovateOrderSafetyError
+from full_python.tradovate.errors import (
+    TradovateConfigError,
+    TradovateError,
+    TradovateOrderSafetyError,
+    TradovateStateError,
+)
+from full_python.tradovate.ledger import FillPairingLedger
 
 
 @dataclass(frozen=True)
@@ -57,52 +65,69 @@ class TradovateRawEvent:
     data: dict[str, Any]
 
 
+ROLE_ENTRY = "entry"
+ROLE_PROTECTIVE_STOP = "protective_stop"
+ROLE_EXIT = "exit"
+
+
+@dataclass
+class SubmittedOrder:
+    order_id: str
+    role: str  # ROLE_ENTRY | ROLE_PROTECTIVE_STOP | ROLE_EXIT
+    side: str  # "buy" | "sell"
+    quantity: int
+    symbol: str
+    stop_price: Optional[float] = None
+    reason: str = ""
+    status: str = "working"  # "working" | "filled" | "canceled" | "rejected"
+
+
 class TradovateBroker:
     def __init__(self, config: TradovateAdapterConfig, rest_client: Any) -> None:
+        if config.dollar_point_value is None:
+            raise TradovateConfigError(
+                "TradovateBroker requires dollar_point_value "
+                "(per-instrument: NQ=20.0, MNQ=2.0 -- never reuse across instruments)"
+            )
+        if config.order_enabled:
+            if config.daily_loss_limit is None:
+                raise TradovateConfigError("order_enabled requires daily_loss_limit")
+            if not config.flatten_enabled:
+                raise TradovateConfigError(
+                    "order_enabled requires flatten_enabled "
+                    "(a DLL breach or failed protective stop must be able to flatten)"
+                )
         self._config = config
         self._rest_client = rest_client
         self._events: list[BrokerEvent] = []
+        self._orders: dict[str, SubmittedOrder] = {}
+        self._fill_ledger = FillPairingLedger(
+            dollar_point_value=config.dollar_point_value,
+            commission_per_contract_round_trip=config.commission_per_contract_round_trip,
+        )
         self._position: Optional[BrokerPosition] = None
-        self._trades: list[Trade] = []
-        # STUB (tracked gap #1, see module docstring): never mutated by this
-        # class. PaperBroker's equivalent property reflects a real equity-
-        # based DLL computed by the shared PositionEngine; this always
-        # returns False, so AdaptiveTrendStrategy's $1,000 DLL veto is dead
-        # code on this broker. Must be wired to real session P&L before
-        # order_enabled=True is used live.
+        self._working_stop_id: Optional[str] = None
+        self._previous_session: Optional[SessionInfo] = None
         self._daily_limit_hit = False
 
+    # -- per-bar hooks (LiveLoop sequence) --------------------------------
+
     def process_bar_open(self, bar: MarketBar, session: SessionInfo) -> float:
-        # STUB (tracked gap #2, see module docstring): always 0.0. LiveLoop
-        # feeds this to strategy.on_bar_context as session_pnl, which the
-        # projected-risk position-sizing guard (f_projected_dll_safe_qty)
-        # uses to shrink size as the session loses money. Frozen at 0.0, the
-        # guard never sees a loss and never shrinks -- sizing behaves as if
-        # every bar is the first bar of a breakeven session.
+        # STUB until Task 6: session P&L / DLL wiring lands there.
         return 0.0
 
     def apply_strategy_result(
         self, bar: MarketBar, session: SessionInfo, result: StrategyResult
     ) -> None:
-        # TRACKED GAP #5 (see module docstring): only result.order_intents is
-        # processed. result.exits and result.stop_updates are silently
-        # dropped -- there is currently no path for the strategy to close a
-        # position through this broker (only RiskSupervisor.flatten() can).
+        # result.exits handled in Task 5; result.stop_updates deliberately
+        # never applied (production policy freezes stops at entry --
+        # PositionEngine logs them applied=False and this adapter matches).
         for intent in result.order_intents:
             if not self._config.order_enabled:
                 self._events.append(Rejected(order_id="", reason="order_disabled"))
                 continue
             if "stop_price" not in intent.metadata:
                 raise TradovateOrderSafetyError("stop_price metadata required")
-
-            # TRACKED GAP #4 (see module docstring): stop_price is validated
-            # above but never submitted as a protective order. Per the design
-            # spec (docs/superpowers/specs/2026-07-07-tradovate-adapter-
-            # design.md, tradovate/broker.py responsibilities), a filled
-            # entry must be followed by a broker-held stop (OCO with target
-            # when one exists), and a confirmation failure must force a
-            # flatten + fatal state error. None of that is implemented here
-            # -- an order_enabled=True entry currently fills NAKED.
             body = {
                 "accountSpec": self._config.account_spec,
                 "accountId": self._config.account_id,
@@ -113,12 +138,24 @@ class TradovateBroker:
                 "isAutomated": True,
             }
             response = self._rest_client.order_place(body)
-            self._events.append(Acked(order_id=str(response["orderId"])))
+            order_id = str(response["orderId"])
+            self._orders[order_id] = SubmittedOrder(
+                order_id=order_id,
+                role=ROLE_ENTRY,
+                side=intent.side.lower(),
+                quantity=intent.quantity,
+                symbol=intent.symbol,
+                stop_price=float(intent.metadata["stop_price"]),
+                reason=intent.reason,
+            )
+            self._events.append(Acked(order_id=order_id))
 
     def note_bar_processed(self, bar: MarketBar, session: SessionInfo) -> None:
-        return None
+        self._previous_session = session
 
     def close_end_of_data(self) -> None:
+        # Live shutdown leaves broker state to the operator; there is no
+        # simulated end-of-data close for a real account.
         return None
 
     def flatten(self, bar: MarketBar, reason: str) -> None:
@@ -126,7 +163,6 @@ class TradovateBroker:
             raise TradovateOrderSafetyError("flatten_disabled")
         if self._position is None:
             return
-
         self._rest_client.order_liquidate_position({
             "accountSpec": self._config.account_spec,
             "accountId": self._config.account_id,
@@ -139,31 +175,122 @@ class TradovateBroker:
         self._events.clear()
         return events
 
+    # -- raw event ingestion ----------------------------------------------
+
     def ingest_raw_event(self, event: TradovateRawEvent) -> None:
-        # TRACKED GAP #6 (see module docstring): there is no submitted-
-        # order-id map here (the design spec calls for one: "submitted order
-        # map: client/local id to Tradovate order id"). A "fill" event for
-        # an order id this broker never submitted -- e.g. a stale/duplicate
-        # message, or a fill from a different session -- is indistinguishable
-        # from a real one below and is applied as a genuine position update.
-        # This also silently defeats LiveLoop._cross_check(), since
-        # self._position is updated in lockstep with the phantom fill.
         if event.kind == "position":
-            self._position = _position_from_data(event.data)
+            self._reconcile_position_event(event.data)
             return
         if event.kind == "partial_fill":
+            self._known_order(str(event.data["orderId"]))
             self._events.append(_partial_fill_from_data(event.data))
             return
         if event.kind == "fill":
-            fill = _fill_from_data(event.data)
-            self._position = BrokerPosition(
-                side="long" if fill.side == "buy" else "short",
-                quantity=fill.quantity,
-                entry_price=fill.price,
-            )
-            self._events.append(fill)
+            self._ingest_fill(_fill_from_data(event.data))
+            return
+        if event.kind == "reject":
+            self._ingest_reject(event.data)
+            return
+        if event.kind == "cancel":
+            self._ingest_cancel(event.data)
             return
         raise TradovateOrderSafetyError("unknown_tradovate_event_kind")
+
+    def _known_order(self, order_id: str) -> SubmittedOrder:
+        order = self._orders.get(order_id)
+        if order is None:
+            raise TradovateStateError(
+                f"broker event for unknown order id {order_id} "
+                "(platform liquidation or manual intervention?) -- halting"
+            )
+        return order
+
+    def _ingest_fill(self, fill: Filled) -> None:
+        order = self._known_order(fill.order_id)
+        if order.status == "filled":
+            raise TradovateStateError(f"duplicate fill for order {fill.order_id}")
+        if order.status != "working":
+            raise TradovateStateError(
+                f"fill for {order.status} order {fill.order_id}"
+            )
+        order.status = "filled"
+        if order.role == ROLE_ENTRY:
+            self._on_entry_fill(fill, order)
+        else:
+            self._on_exit_fill(fill, order)
+        self._events.append(fill)
+
+    def _on_entry_fill(self, fill: Filled, order: SubmittedOrder) -> None:
+        if self._position is not None:
+            raise TradovateStateError(
+                f"entry fill for order {fill.order_id} while a position is already open"
+            )
+        self._position = BrokerPosition(
+            side="long" if fill.side == "buy" else "short",
+            quantity=fill.quantity,
+            entry_price=fill.price,
+        )
+        session_date = classify_timestamp(fill.timestamp_utc).session_date.isoformat()
+        self._fill_ledger.open_leg(
+            symbol=order.symbol,
+            side=fill.side,
+            quantity=fill.quantity,
+            price=fill.price,
+            timestamp_utc=fill.timestamp_utc,
+            stop_price=order.stop_price if order.stop_price is not None else 0.0,
+            session_date=session_date,
+        )
+        # Protective stop submission lands in Task 4.
+
+    def _on_exit_fill(self, fill: Filled, order: SubmittedOrder) -> None:
+        position = self._position
+        if position is None:
+            raise TradovateStateError(
+                f"exit fill for order {fill.order_id} while flat"
+            )
+        closing_side = "sell" if position.side == "long" else "buy"
+        if fill.side != closing_side:
+            raise TradovateStateError(
+                f"exit fill for order {fill.order_id} on wrong side {fill.side}"
+            )
+        if fill.quantity != position.quantity:
+            raise TradovateStateError(
+                f"exit fill quantity {fill.quantity} != position quantity "
+                f"{position.quantity} (order {fill.order_id}; partial closes not modeled)"
+            )
+        if order.order_id == self._working_stop_id:
+            self._working_stop_id = None
+        self._position = None
+        self._fill_ledger.close_leg(
+            price=fill.price,
+            timestamp_utc=fill.timestamp_utc,
+            reason=order.reason or order.role,
+        )
+
+    def _ingest_reject(self, data: dict[str, Any]) -> None:
+        order = self._known_order(str(data["orderId"]))
+        order.status = "rejected"
+        self._events.append(
+            Rejected(order_id=order.order_id, reason=str(data.get("reason", "")))
+        )
+        # Protective-stop rejection handling (flatten + fatal) lands in Task 4.
+
+    def _ingest_cancel(self, data: dict[str, Any]) -> None:
+        order = self._known_order(str(data["orderId"]))
+        order.status = "canceled"
+        if order.order_id == self._working_stop_id:
+            self._working_stop_id = None
+        self._events.append(Canceled(order_id=order.order_id))
+
+    def _reconcile_position_event(self, data: dict[str, Any]) -> None:
+        reported = _position_from_data(data)
+        if not _positions_match(reported, self._position):
+            raise TradovateStateError(
+                f"broker position snapshot {reported!r} contradicts "
+                f"fill-derived position {self._position!r}"
+            )
+
+    # -- account state -----------------------------------------------------
 
     @property
     def position(self) -> Optional[BrokerPosition]:
@@ -171,14 +298,8 @@ class TradovateBroker:
 
     @property
     def trades(self) -> list[Trade]:
-        # STUB (tracked gap #3, see module docstring): self._trades is never
-        # appended to -- there is no closed-trade reconstruction from broker
-        # fills yet. RiskSupervisor.check_mark sums this list as "realized"
-        # session P&L (execution/supervisor.py); with this always empty, the
-        # independent daily-loss backstop only ever sees the open position's
-        # unrealized P&L and never accumulates realized losses within a
-        # session -- a day of losing round-trips would not trip it.
-        return list(self._trades)
+        # STUB (gap #3) until Task 6 exposes the fill ledger's trades.
+        return []
 
     @property
     def daily_limit_hit(self) -> bool:
@@ -214,6 +335,16 @@ def _position_from_data(data: dict[str, Any]) -> BrokerPosition:
         quantity=int(data["qty"]),
         entry_price=float(price),
     )
+
+
+def _positions_match(
+    reported: Optional[BrokerPosition], derived: Optional[BrokerPosition]
+) -> bool:
+    if reported is None or derived is None:
+        return reported is None and derived is None
+    # entry price is NOT compared: broker netPrice averaging legitimately
+    # differs from our fill price; side+quantity define position identity.
+    return reported.side == derived.side and reported.quantity == derived.quantity
 
 
 def _fill_from_data(data: dict[str, Any]) -> Filled:

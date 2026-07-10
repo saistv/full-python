@@ -18,24 +18,38 @@ from full_python.tradovate.errors import TradovateOrderSafetyError
 class FakeRestClient:
     def __init__(self):
         self.placed = []
-        self.oco = []
+        self.canceled = []
         self.liquidations = []
-        self.next_order_place_response = {"orderId": 101}
+        # queue of order_place responses; each call pops one (default ids 101, 102, ...)
+        self.order_place_responses = []
+        self._auto_id = 100
+        self.order_place_error = None      # set to an exception to make order_place raise
+        self.order_cancel_error = None     # set to an exception to make order_cancel raise
 
     def order_place(self, body):
+        if self.order_place_error is not None:
+            error, self.order_place_error = self.order_place_error, None
+            raise error
         self.placed.append(body)
-        return self.next_order_place_response
+        if self.order_place_responses:
+            return self.order_place_responses.pop(0)
+        self._auto_id += 1
+        return {"orderId": self._auto_id}
 
-    def order_place_oco(self, body):
-        self.oco.append(body)
-        return {"orderId": 202}
+    def order_cancel(self, body):
+        if self.order_cancel_error is not None:
+            error, self.order_cancel_error = self.order_cancel_error, None
+            raise error
+        self.canceled.append(body)
+        return {}
 
     def order_liquidate_position(self, body):
         self.liquidations.append(body)
-        return {"orderId": 303}
+        self._auto_id += 1
+        return {"orderId": self._auto_id}
 
 
-def _cfg(order_enabled=False, flatten_enabled=False):
+def _cfg(order_enabled=False, flatten_enabled=False, daily_loss_limit=1000.0):
     return TradovateAdapterConfig(
         environment=DEMO_ENVIRONMENT,
         account_spec="DEMO123",
@@ -43,6 +57,9 @@ def _cfg(order_enabled=False, flatten_enabled=False):
         root_symbol="NQ",
         order_enabled=order_enabled,
         flatten_enabled=flatten_enabled,
+        dollar_point_value=20.0,
+        commission_per_contract_round_trip=1.0,
+        daily_loss_limit=daily_loss_limit,
     )
 
 
@@ -76,6 +93,23 @@ def _entry_result(bar=None, side="buy", metadata=None):
     ))
 
 
+def _fill_event(order_id, action="Buy", qty=1, price=100.25, ts="2026-07-07T14:32:00Z", reason=""):
+    return TradovateRawEvent(kind="fill", data={
+        "orderId": order_id, "action": action, "qty": qty,
+        "price": price, "timestamp": ts, "reason": reason,
+    })
+
+
+def _entered_broker(rest=None, side="buy", price=100.25, config=None):
+    """Broker with a filled entry: order 101 placed, filled at `price`."""
+    rest = rest or FakeRestClient()
+    broker = TradovateBroker(config or _cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar, side=side))
+    broker.ingest_raw_event(_fill_event(101, action="Buy" if side == "buy" else "Sell", price=price))
+    return broker, rest
+
+
 def test_orders_disabled_rejects_order_intent_without_calling_rest():
     rest = FakeRestClient()
     broker = TradovateBroker(_cfg(order_enabled=False), rest)
@@ -89,7 +123,7 @@ def test_orders_disabled_rejects_order_intent_without_calling_rest():
 
 def test_orders_enabled_places_automated_market_order_and_emits_ack():
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(order_enabled=True), rest)
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
     bar = _bar()
 
     broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
@@ -108,7 +142,7 @@ def test_orders_enabled_places_automated_market_order_and_emits_ack():
 
 def test_live_enabled_entry_requires_stop_price_metadata():
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(order_enabled=True), rest)
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
     bar = _bar()
 
     with pytest.raises(TradovateOrderSafetyError, match="stop_price"):
@@ -118,38 +152,27 @@ def test_live_enabled_entry_requires_stop_price_metadata():
 
 
 def test_fill_raw_event_updates_position_and_emits_filled():
-    broker = TradovateBroker(_cfg(), FakeRestClient())
-
-    broker.ingest_raw_event(TradovateRawEvent(
-        kind="fill",
-        data={
-            "orderId": 77,
-            "action": "Buy",
-            "qty": 1,
-            "price": 100.25,
-            "timestamp": "2026-07-07T14:32:00Z",
-            "reason": "adaptive_trend",
-        },
-    ))
+    broker, _rest = _entered_broker()
 
     assert broker.position == BrokerPosition(side="long", quantity=1, entry_price=100.25)
-    assert broker.poll_events() == [Filled(
-        order_id="77",
+    filled = [e for e in broker.poll_events() if isinstance(e, Filled)]
+    assert filled == [Filled(
+        order_id="101",
         side="buy",
         quantity=1,
         price=100.25,
         timestamp_utc="2026-07-07T14:32:00Z",
-        reason="adaptive_trend",
+        reason="",
     )]
 
 
 def test_partial_fill_raw_event_maps_to_partial_filled():
-    broker = TradovateBroker(_cfg(), FakeRestClient())
+    broker, _rest = _entered_broker()
 
     broker.ingest_raw_event(TradovateRawEvent(
         kind="partial_fill",
         data={
-            "orderId": 77,
+            "orderId": 101,
             "action": "Sell",
             "qty": 1,
             "remaining": 2,
@@ -158,8 +181,9 @@ def test_partial_fill_raw_event_maps_to_partial_filled():
         },
     ))
 
-    assert broker.poll_events() == [PartialFilled(
-        order_id="77",
+    partials = [e for e in broker.poll_events() if isinstance(e, PartialFilled)]
+    assert partials == [PartialFilled(
+        order_id="101",
         side="sell",
         quantity=1,
         remaining=2,
@@ -168,13 +192,20 @@ def test_partial_fill_raw_event_maps_to_partial_filled():
     )]
 
 
+def test_position_snapshot_matching_fill_derived_state_passes():
+    broker, _rest = _entered_broker()
+
+    broker.ingest_raw_event(TradovateRawEvent(
+        kind="position",
+        data={"side": "long", "qty": 1, "price": 100.25},
+    ))  # matching snapshot: no exception
+
+    assert broker.position == BrokerPosition(side="long", quantity=1, entry_price=100.25)
+
+
 def test_flatten_disabled_raises_and_does_not_call_liquidation():
     rest = FakeRestClient()
     broker = TradovateBroker(_cfg(flatten_enabled=False), rest)
-    broker.ingest_raw_event(TradovateRawEvent(
-        kind="position",
-        data={"side": "long", "qty": 1, "entryPrice": 100.25},
-    ))
 
     with pytest.raises(TradovateOrderSafetyError, match="flatten_disabled"):
         broker.flatten(_bar(), "supervisor_halt")
@@ -182,24 +213,8 @@ def test_flatten_disabled_raises_and_does_not_call_liquidation():
     assert rest.liquidations == []
 
 
-def test_position_raw_event_accepts_plan_price_key():
-    broker = TradovateBroker(_cfg(), FakeRestClient())
-
-    broker.ingest_raw_event(TradovateRawEvent(
-        kind="position",
-        data={"side": "short", "qty": 2, "price": 101.5},
-    ))
-
-    assert broker.position == BrokerPosition(side="short", quantity=2, entry_price=101.5)
-
-
 def test_flatten_enabled_with_position_calls_liquidate_position():
-    rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(flatten_enabled=True), rest)
-    broker.ingest_raw_event(TradovateRawEvent(
-        kind="position",
-        data={"side": "long", "qty": 1, "entryPrice": 100.25},
-    ))
+    broker, rest = _entered_broker()
 
     broker.flatten(_bar(), "supervisor_halt")
 
@@ -212,12 +227,13 @@ def test_flatten_enabled_with_position_calls_liquidate_position():
 
 
 def test_partial_fill_event_from_broker_is_fatal_for_order_state_machine():
-    broker = TradovateBroker(_cfg(), FakeRestClient())
+    broker, _rest = _entered_broker()
+    broker.poll_events()  # drain entry lifecycle events
     broker.ingest_raw_event(TradovateRawEvent(
         kind="partial_fill",
         data={
-            "orderId": 77,
-            "action": "Buy",
+            "orderId": 101,
+            "action": "Sell",
             "qty": 1,
             "remaining": 1,
             "price": 100.25,
@@ -227,4 +243,60 @@ def test_partial_fill_event_from_broker_is_fatal_for_order_state_machine():
 
     sm = OrderStateMachine()
     with pytest.raises(ExecutionInvariantError, match="partial fill not modeled"):
-        sm.on_event(broker.poll_events()[0])
+        for event in broker.poll_events():
+            sm.on_event(event)
+
+
+def test_fill_for_unknown_order_id_raises_state_error():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    with pytest.raises(TradovateStateError, match="unknown order id 999"):
+        broker.ingest_raw_event(_fill_event(999))
+
+
+def test_duplicate_fill_for_same_order_id_raises_state_error():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, _rest = _entered_broker()
+
+    with pytest.raises(TradovateStateError, match="duplicate fill"):
+        broker.ingest_raw_event(_fill_event(101))
+
+
+def test_entry_fill_while_position_open_raises_state_error():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, _rest = _entered_broker()
+    bar = _bar()
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))  # second entry order
+    acks = [e for e in broker.poll_events() if isinstance(e, Acked)]
+
+    with pytest.raises(TradovateStateError, match="position is already open"):
+        broker.ingest_raw_event(_fill_event(int(acks[-1].order_id)))
+
+
+def test_reject_and_cancel_for_unknown_order_ids_raise_state_error():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    with pytest.raises(TradovateStateError, match="unknown order id"):
+        broker.ingest_raw_event(TradovateRawEvent(kind="reject", data={"orderId": 5, "reason": "x"}))
+    with pytest.raises(TradovateStateError, match="unknown order id"):
+        broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 6}))
+
+
+def test_broker_requires_dollar_point_value_and_live_pairing():
+    from full_python.tradovate.errors import TradovateConfigError
+
+    bare = TradovateAdapterConfig(environment=DEMO_ENVIRONMENT, account_spec="D", account_id=1)
+    with pytest.raises(TradovateConfigError, match="dollar_point_value"):
+        TradovateBroker(bare, FakeRestClient())
+
+    with pytest.raises(TradovateConfigError, match="daily_loss_limit"):
+        TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True, daily_loss_limit=None), FakeRestClient())
+
+    with pytest.raises(TradovateConfigError, match="flatten_enabled"):
+        TradovateBroker(_cfg(order_enabled=True, flatten_enabled=False), FakeRestClient())
