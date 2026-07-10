@@ -191,6 +191,10 @@ target, so the row is closed by this documented decision rather than
 silently skipped; implementing OCO would be dead code guarding
 nothing.
 
+Implemented: see the row-by-row audit table in
+`docs/superpowers/plans/2026-07-10-tradovate-gap-closure.md` — 27 rows
+test-covered + 1 N/A-by-design as of the closure commits.
+
 ## Acceptance Criteria
 
 - All six gap annotations in `broker.py` are replaced by working

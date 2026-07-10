@@ -481,6 +481,19 @@ items above — expected, since Task 6 (integration/regression) was not
 yet done at review time, but recorded so the remaining count is explicit
 rather than assumed.
 
+**Closure (2026-07-10, same day):** all six gaps were closed by the
+gap-closure sub-spec (`2026-07-10-tradovate-gap-closure-design.md`) —
+fill-derived ledger accounting (gaps 1-3), broker-held frozen protective
+stop with flatten-and-halt on confirmation failure (gap 4), the
+cancel-then-close exit path (gap 5), and the submitted-order map with
+halt-on-unknown/duplicate events (gap 6). The Failure Matrix stands at
+28/28: 27 rows test-covered, and the stop+target OCO row recorded
+N/A-by-design (the production strategy emits no `target_price`). The
+binding above is amended accordingly: `order_enabled=True` /
+`flatten_enabled=True` remain forbidden against a funded account until
+the sub-project 4 gates (demo observe → demo order test → pilot
+checklist) are passed — the gap list itself is no longer the blocker.
+
 Separately, an open question this spec never poses: **does Tradovate
 enforce a daily-loss limit at the account/platform level** (some prop-
 firm risk add-ons do), and if so, does that supplement or substitute for

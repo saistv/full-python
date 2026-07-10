@@ -1,36 +1,37 @@
-"""Tradovate broker safety skeleton.
+"""Tradovate broker adapter.
 
-This adapter deliberately contains no live-order enablement by default. It
-only calls the injected REST client when explicit config gates are enabled.
+Implements execution.broker_protocol.Broker against the Tradovate REST/WS
+surface, offline-first (all tests run on fake transports). Safety model:
 
-**NOT SAFE TO ENABLE LIVE ORDER ROUTING YET.** `order_enabled=True` is
-gated correctly (no order is placed unless the flag is set, and a missing
-`stop_price` is rejected before submission), but the risk-management and
-order-lifecycle layers behind that gate are NOT feature-complete. Tracked
-gaps, found and recorded 2026-07-10 (see the dated amendment in
-docs/superpowers/specs/2026-07-07-tradovate-adapter-design.md), all of
-which must be closed before `order_enabled=True` is ever used against a
-funded account:
+- Submitted-order map: every order this adapter places is recorded; any
+  fill/cancel/reject for an unknown order id (platform liquidation,
+  manual intervention, stale message) raises TradovateStateError, which
+  subclasses ExecutionInvariantError so LiveLoop halts WITHOUT flatten
+  (position truth unknown). Duplicate fills likewise halt.
+- Broker-held protective stop: submitted immediately on every entry fill
+  at the entry's frozen stop_price, never modified afterwards (production
+  policy freezes stops at entry; result.stop_updates are deliberately not
+  applied, matching PositionEngine). If the stop cannot be confirmed the
+  adapter flattens and raises. No OCO: the production strategy emits no
+  target_price (N/A-by-design in the Failure Matrix).
+- Exits: result.exits cancel the working stop, then market-close. A stop
+  cancel failure halts WITHOUT submitting the close (two live closing
+  orders must never coexist). flatten() cancels working orders
+  best-effort, liquidates, and registers the liquidation order so its
+  fill is a known id.
+- Accounting is broker truth: FillPairingLedger pairs real fills into
+  models.Trade (arithmetic pinned against PositionEngine). Session P&L =
+  realized net + gross unrealized at bar close (the sim's equity
+  formula); daily_limit_hit uses the shared is_daily_loss_breached with
+  config.daily_loss_limit; breach cancels the stop and flattens.
+- Config is per-instrument: dollar_point_value has no default (NQ=20.0,
+  MNQ=2.0). order_enabled requires flatten_enabled and daily_loss_limit
+  at broker construction. Both live flags default False.
 
-1. `daily_limit_hit` is a stub that never updates -- the strategy's own
-   validated $1,000 DLL veto (AdaptiveTrendStrategy) can never fire live.
-2. `process_bar_open` always returns 0.0 -- the projected-risk position-
-   sizing guard never shrinks with intraday losses (frozen-open budget).
-3. `trades` always returns [] -- RiskSupervisor's daily-loss backstop only
-   sees the open position's unrealized P&L, never realized session losses.
-4. No protective stop/OCO is ever submitted after an entry fill, despite
-   `stop_price` being validated -- an enabled entry is a NAKED position.
-5. `apply_strategy_result` only processes `result.order_intents`; it drops
-   `result.exits` and `result.stop_updates` entirely -- there is no path
-   for the strategy to close a position through this broker.
-6. `ingest_raw_event` has no submitted-order-id map -- a fill for an
-   unrecognized order id is silently treated as a real position update,
-   which also defeats LiveLoop._cross_check()'s divergence detection.
-
-None of this is reachable today (`order_enabled`/`flatten_enabled` default
-False and no live adapter is wired into LiveLoop), but it was previously
-undocumented, which is the actual risk: a future change enabling order
-routing without independently rediscovering this list.
+The six 2026-07-10 tracked gaps are CLOSED as of the 2026-07-10 gap-
+closure spec (docs/superpowers/specs/2026-07-10-tradovate-gap-closure-
+design.md); each is pinned by the Failure Matrix tests listed there.
+Partial fills remain fatal by design (OrderStateMachine raises).
 """
 from __future__ import annotations
 
