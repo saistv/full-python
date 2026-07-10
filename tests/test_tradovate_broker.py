@@ -218,6 +218,7 @@ def test_flatten_enabled_with_position_calls_liquidate_position():
 
     broker.flatten(_bar(), "supervisor_halt")
 
+    assert rest.canceled == [{"orderId": 102}]
     assert rest.liquidations == [{
         "accountSpec": "DEMO123",
         "accountId": 456,
@@ -362,3 +363,103 @@ def test_reject_event_for_known_entry_emits_rejected():
     assert rejects == [Rejected(order_id="101", reason="outside_market_hours")]
     assert broker.position is None
     assert rest.liquidations == []   # entry rejection needs no flatten
+
+
+def _exit_result(bar=None, reason="atf_flip"):
+    from full_python.models import ExitDecision
+    bar = bar or _bar()
+    return StrategyResult(exits=(
+        ExitDecision(timestamp_utc=bar.timestamp_utc, symbol=bar.symbol, reason=reason),
+    ))
+
+
+def test_strategy_exit_cancels_stop_then_market_closes():
+    broker, rest = _entered_broker()
+    bar = _bar()
+
+    broker.apply_strategy_result(bar, _session(bar), _exit_result(bar))
+
+    assert rest.canceled == [{"orderId": 102}]
+    close_bodies = [b for b in rest.placed if b["orderType"] == "Market"][1:]
+    assert close_bodies == [{
+        "accountSpec": "DEMO123",
+        "accountId": 456,
+        "action": "Sell",
+        "symbol": "NQ",
+        "orderQty": 1,
+        "orderType": "Market",
+        "isAutomated": True,
+    }]
+    # exit fill closes the trade with the strategy's reason
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+    broker.ingest_raw_event(_fill_event(103, action="Sell", price=101.25,
+                                        ts="2026-07-07T14:33:00Z"))
+    assert broker.position is None
+
+
+def test_strategy_exit_while_flat_is_a_no_op():
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+
+    broker.apply_strategy_result(bar, _session(bar), _exit_result(bar))
+
+    assert rest.canceled == [] and rest.placed == []
+
+
+def test_strategy_exit_stop_cancel_failure_halts_without_close_order():
+    from full_python.tradovate.errors import TradovateRequestError, TradovateStateError
+
+    broker, rest = _entered_broker()
+    rest.order_cancel_error = TradovateRequestError("cancel refused")
+    bar = _bar()
+
+    with pytest.raises(TradovateStateError, match="cancel protective stop"):
+        broker.apply_strategy_result(bar, _session(bar), _exit_result(bar))
+
+    # No market close was submitted: the stop still protects the position,
+    # and two live closing orders must never coexist.
+    assert [b for b in rest.placed if b["orderType"] == "Market"] == [rest.placed[0]]
+
+
+def test_exit_fill_quantity_mismatch_raises_state_error():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, _rest = _entered_broker()
+
+    with pytest.raises(TradovateStateError, match="quantity"):
+        broker.ingest_raw_event(_fill_event(102, action="Sell", qty=3))
+
+
+def test_cancel_event_for_known_order_emits_canceled():
+    from full_python.execution.broker_protocol import Canceled
+
+    broker, _rest = _entered_broker()
+
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+
+    cancels = [e for e in broker.poll_events() if isinstance(e, Canceled)]
+    assert cancels == [Canceled(order_id="102")]
+
+
+def test_flatten_while_flat_is_a_no_op():
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(flatten_enabled=True), rest)
+
+    broker.flatten(_bar(), "supervisor_halt")
+
+    assert rest.liquidations == []
+
+
+def test_flatten_while_short_cancels_stop_then_liquidates():
+    broker, rest = _entered_broker(side="sell")
+
+    broker.flatten(_bar(), "daily_limit")
+
+    assert rest.canceled == [{"orderId": 102}]
+    assert len(rest.liquidations) == 1
+    # the liquidation order is registered: its fill is a KNOWN id
+    liq_id = 103
+    broker.ingest_raw_event(_fill_event(liq_id, action="Buy", price=99.0,
+                                        ts="2026-07-07T14:34:00Z"))
+    assert broker.position is None

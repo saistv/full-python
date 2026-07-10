@@ -119,9 +119,37 @@ class TradovateBroker:
     def apply_strategy_result(
         self, bar: MarketBar, session: SessionInfo, result: StrategyResult
     ) -> None:
-        # result.exits handled in Task 5; result.stop_updates deliberately
-        # never applied (production policy freezes stops at entry --
-        # PositionEngine logs them applied=False and this adapter matches).
+        # result.stop_updates deliberately never applied (production policy
+        # freezes stops at entry -- PositionEngine logs them applied=False
+        # and this adapter matches).
+        for exit_decision in result.exits:
+            if self._position is None:
+                continue  # mirror PositionEngine: exit with no position is a no-op
+            if not self._config.order_enabled:
+                self._events.append(Rejected(order_id="", reason="order_disabled"))
+                continue
+            self._cancel_working_stop_or_halt()
+            action = "Sell" if self._position.side == "long" else "Buy"
+            body = {
+                "accountSpec": self._config.account_spec,
+                "accountId": self._config.account_id,
+                "action": action,
+                "symbol": bar.symbol,
+                "orderQty": self._position.quantity,
+                "orderType": "Market",
+                "isAutomated": True,
+            }
+            response = self._rest_client.order_place(body)
+            order_id = str(response["orderId"])
+            self._orders[order_id] = SubmittedOrder(
+                order_id=order_id,
+                role=ROLE_EXIT,
+                side=action.lower(),
+                quantity=self._position.quantity,
+                symbol=bar.symbol,
+                reason=exit_decision.reason,
+            )
+            self._events.append(Acked(order_id=order_id))
         for intent in result.order_intents:
             if not self._config.order_enabled:
                 self._events.append(Rejected(order_id="", reason="order_disabled"))
@@ -161,14 +189,26 @@ class TradovateBroker:
     def flatten(self, bar: MarketBar, reason: str) -> None:
         if not self._config.flatten_enabled:
             raise TradovateOrderSafetyError("flatten_disabled")
-        if self._position is None:
+        position = self._position
+        if position is None:
             return
-        self._rest_client.order_liquidate_position({
+        self._cancel_working_orders_best_effort()
+        response = self._rest_client.order_liquidate_position({
             "accountSpec": self._config.account_spec,
             "accountId": self._config.account_id,
             "symbol": bar.symbol,
             "admin": False,
         })
+        order_id = str(response["orderId"])
+        self._orders[order_id] = SubmittedOrder(
+            order_id=order_id,
+            role=ROLE_EXIT,
+            side="sell" if position.side == "long" else "buy",
+            quantity=position.quantity,
+            symbol=bar.symbol,
+            reason=reason,
+        )
+        self._events.append(Acked(order_id=order_id))
 
     def poll_events(self) -> list[BrokerEvent]:
         events = list(self._events)
@@ -311,6 +351,20 @@ class TradovateBroker:
                 self._rest_client.order_cancel({"orderId": int(order.order_id)})
             except TradovateError:
                 continue
+
+    def _cancel_working_stop_or_halt(self) -> None:
+        stop_id = self._working_stop_id
+        if stop_id is None:
+            return
+        try:
+            self._rest_client.order_cancel({"orderId": int(stop_id)})
+        except TradovateError as exc:
+            # Two live closing orders must never coexist. The stop still
+            # protects the position; halt for human review instead of
+            # submitting the market close.
+            raise TradovateStateError(
+                f"failed to cancel protective stop {stop_id} before exit"
+            ) from exc
 
     def _on_exit_fill(self, fill: Filled, order: SubmittedOrder) -> None:
         position = self._position
