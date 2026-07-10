@@ -467,7 +467,29 @@ class TradovateBroker:
 
     def reconcile_rest_positions(self, positions: list) -> None:
         """Cross-check a REST /position/list snapshot against fill-derived
-        truth (Failure Matrix: REST vs WebSocket disagreement -> halt)."""
+        truth (Failure Matrix: REST vs WebSocket disagreement -> halt).
+
+        Assumes a single instrument with at most one open contract
+        position at a time. A compliant snapshot therefore has at most
+        one item with a nonzero ``netPos``. If more than one item
+        reports a nonzero ``netPos`` (e.g. a contract-roll straddle
+        holding both the old and new contract, or a duplicated/
+        contradictory feed), this halts rather than summing them --
+        a +1/-1 pair must never be netted down to a false flat.
+
+        ``entry_price`` in the mismatch message below is diagnostic
+        only: it is the last non-null ``netPrice`` seen while scanning
+        the snapshot, never a value that is compared. ``_positions_match``
+        compares side + quantity only -- broker netPrice averaging
+        legitimately differs from our fill price.
+        """
+        open_items = [item for item in positions if int(item.get("netPos", 0)) != 0]
+        if len(open_items) > 1:
+            raise TradovateStateError(
+                "REST position snapshot reports multiple open contract "
+                f"positions {open_items!r} -- cannot reconcile a single-"
+                "instrument position from this (e.g. a roll straddle); halting"
+            )
         net = 0
         price = 0.0
         for item in positions:

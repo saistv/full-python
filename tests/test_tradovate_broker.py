@@ -601,3 +601,30 @@ def test_rest_position_snapshot_disagreement_raises():
 
     with pytest.raises(TradovateStateError, match="REST position"):
         broker.reconcile_rest_positions([])  # broker flat, we are long
+
+
+def test_rest_position_snapshot_multiple_open_items_raises_even_if_net_flat():
+    # A +1/-1 pair (e.g. a contract-roll straddle, or a duplicated/
+    # contradictory feed) must never be summed down to a false flat --
+    # more than one item with a nonzero netPos is itself an anomaly,
+    # even against a fresh (fill-derived flat) broker.
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    with pytest.raises(TradovateStateError, match="REST position"):
+        broker.reconcile_rest_positions([
+            {"netPos": 1, "netPrice": 100.0},
+            {"netPos": -1, "netPrice": 99.0},
+        ])
+
+
+def test_flat_position_snapshot_while_flat_passes():
+    # Common real-world path: fill-derived flat + a WS "position" event
+    # reporting flat -- must not raise (previously crashed inside
+    # _position_from_data with unsupported_position_side).
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    broker.ingest_raw_event(TradovateRawEvent(
+        kind="position", data={"side": "flat", "qty": 0},
+    ))
