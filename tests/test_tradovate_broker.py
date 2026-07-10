@@ -463,3 +463,105 @@ def test_flatten_while_short_cancels_stop_then_liquidates():
     broker.ingest_raw_event(_fill_event(liq_id, action="Buy", price=99.0,
                                         ts="2026-07-07T14:34:00Z"))
     assert broker.position is None
+
+
+def test_process_bar_open_returns_realized_plus_unrealized_gross():
+    broker, _rest = _entered_broker(price=100.0)  # long 1 @ 100
+    bar = _bar()  # close 100.25
+
+    session_pnl = broker.process_bar_open(bar, _session(bar))
+
+    assert session_pnl == pytest.approx(0.25 * 20.0)  # unrealized gross only
+    assert broker.daily_limit_hit is False
+
+
+def test_realized_losses_accumulate_into_session_pnl_and_trades():
+    broker, _rest = _entered_broker(price=100.0)
+    # stop fills 30pts against: -600 gross, -601 net
+    broker.ingest_raw_event(_fill_event(102, action="Sell", price=70.0,
+                                        ts="2026-07-07T14:35:00Z"))
+    bar = _bar()
+
+    session_pnl = broker.process_bar_open(bar, _session(bar))
+
+    assert session_pnl == pytest.approx(-601.0)
+    assert len(broker.trades) == 1
+    assert broker.trades[0].net_pnl == pytest.approx(-601.0)
+    assert broker.trades[0].exit_reason == "stop"
+    assert broker.trades[0].session_date == "2026-07-07"
+    assert broker.daily_limit_hit is False  # -601 > -1000
+
+
+def test_daily_loss_breach_sets_flag_and_flattens_open_position():
+    broker, rest = _entered_broker(price=100.0)
+    # first round trip: -601 net realized
+    broker.ingest_raw_event(_fill_event(102, action="Sell", price=70.0,
+                                        ts="2026-07-07T14:35:00Z"))
+    # second entry, long 1 @ 100 (order 103 entry, 104 stop)
+    bar = _bar()
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+    broker.ingest_raw_event(_fill_event(103, price=100.0, ts="2026-07-07T14:36:00Z"))
+    # bar closes 25pts against: unrealized -500 -> session -1101 <= -1000
+    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQ",
+                           open=100.0, high=100.0, low=75.0, close=75.0, volume=1.0)
+
+    session_pnl = broker.process_bar_open(losing_bar, _session(losing_bar))
+
+    assert session_pnl == pytest.approx(-601.0 - 500.0)
+    assert broker.daily_limit_hit is True
+    assert len(rest.liquidations) == 1          # DLL breach flattened
+    assert {"orderId": 104} in rest.canceled    # stop canceled first
+
+
+def test_daily_loss_breach_with_flatten_disabled_halts():
+    from full_python.tradovate.errors import TradovateStateError
+
+    # orders disabled so the flag pairing rule allows flatten_enabled=False;
+    # build the losing position via direct fill ingestion on a manual order.
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+    broker.ingest_raw_event(_fill_event(101, price=100.0))
+    # simulate a misconfigured runtime by flipping the internal config object
+    # is not possible (frozen); instead assert the code path via a broker
+    # whose position was built while flatten was enabled and a NEW broker is
+    # not constructible in that state -- so this test pins the guard directly:
+    broker._config = _cfg(order_enabled=False, flatten_enabled=False)
+    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQ",
+                           open=100.0, high=100.0, low=40.0, close=40.0, volume=1.0)
+
+    with pytest.raises(TradovateStateError, match="flatten"):
+        broker.process_bar_open(losing_bar, _session(losing_bar))
+
+
+def test_session_rollover_resets_daily_limit_when_flat():
+    broker, rest = _entered_broker(price=100.0)
+    # lose big enough to breach: stop fill 60pts against = -1201 net
+    broker.ingest_raw_event(_fill_event(102, action="Sell", price=40.0,
+                                        ts="2026-07-07T14:35:00Z"))
+    bar = _bar()
+    broker.process_bar_open(bar, _session(bar))
+    assert broker.daily_limit_hit is True
+    broker.note_bar_processed(bar, _session(bar))
+
+    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQ",
+                         open=100.0, high=100.0, low=100.0, close=100.0, volume=1.0)
+    session_pnl = broker.process_bar_open(next_day, _session(next_day))
+
+    assert broker.daily_limit_hit is False
+    assert session_pnl == 0.0  # yesterday's realized loss does not carry over
+
+
+def test_session_rollover_with_open_position_halts():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, _rest = _entered_broker(price=100.0)
+    bar = _bar()
+    broker.process_bar_open(bar, _session(bar))
+    broker.note_bar_processed(bar, _session(bar))
+    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQ",
+                         open=100.0, high=100.0, low=100.0, close=100.0, volume=1.0)
+
+    with pytest.raises(TradovateStateError, match="session rollover"):
+        broker.process_bar_open(next_day, _session(next_day))

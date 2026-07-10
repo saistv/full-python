@@ -113,8 +113,53 @@ class TradovateBroker:
     # -- per-bar hooks (LiveLoop sequence) --------------------------------
 
     def process_bar_open(self, bar: MarketBar, session: SessionInfo) -> float:
-        # STUB until Task 6: session P&L / DLL wiring lands there.
-        return 0.0
+        self._handle_session_rollover(session)
+        self._fill_ledger.mark_bar(high=bar.high, low=bar.low)
+        session_pnl = self._session_pnl(bar, session)
+        if not self._daily_limit_hit and is_daily_loss_breached(
+            session_pnl, self._config.daily_loss_limit
+        ):
+            self._daily_limit_hit = True
+            if self._position is not None:
+                if not self._config.flatten_enabled:
+                    raise TradovateStateError(
+                        "daily loss limit breached with flatten_enabled=False"
+                    )
+                self.flatten(bar, "daily_limit")
+        return session_pnl
+
+    def _handle_session_rollover(self, session: SessionInfo) -> None:
+        previous = self._previous_session
+        if previous is None or session.session_date == previous.session_date:
+            return
+        if self._position is not None or self._has_working_orders():
+            raise TradovateStateError(
+                "session rollover with an open position or working orders -- "
+                "the 15:59 backstop should have flattened; halting for review"
+            )
+        self._daily_limit_hit = False
+
+    def _has_working_orders(self) -> bool:
+        return any(order.status == "working" for order in self._orders.values())
+
+    def _session_pnl(self, bar: MarketBar, session: SessionInfo) -> float:
+        # Same equity formula as the sim: realized NET since session start
+        # plus GROSS unrealized at the bar close (Pine's strategy.equity --
+        # openprofit excludes the open trade's commission).
+        realized = self._fill_ledger.realized_session_pnl(
+            session.session_date.isoformat()
+        )
+        unrealized = 0.0
+        position = self._position
+        if position is not None:
+            direction = 1 if position.side == "long" else -1
+            unrealized = (
+                (bar.close - position.entry_price)
+                * direction
+                * float(self._config.dollar_point_value)
+                * position.quantity
+            )
+        return realized + unrealized
 
     def apply_strategy_result(
         self, bar: MarketBar, session: SessionInfo, result: StrategyResult
@@ -428,8 +473,7 @@ class TradovateBroker:
 
     @property
     def trades(self) -> list[Trade]:
-        # STUB (gap #3) until Task 6 exposes the fill ledger's trades.
-        return []
+        return self._fill_ledger.trades
 
     @property
     def daily_limit_hit(self) -> bool:
