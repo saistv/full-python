@@ -565,3 +565,39 @@ def test_session_rollover_with_open_position_halts():
 
     with pytest.raises(TradovateStateError, match="session rollover"):
         broker.process_bar_open(next_day, _session(next_day))
+
+
+def test_position_snapshot_with_position_while_fill_derived_flat_raises():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    with pytest.raises(TradovateStateError, match="contradicts"):
+        broker.ingest_raw_event(TradovateRawEvent(
+            kind="position", data={"side": "long", "qty": 1, "price": 100.25},
+        ))
+
+
+def test_flat_position_snapshot_while_fill_derived_open_raises():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, _rest = _entered_broker()
+
+    with pytest.raises(TradovateStateError, match="contradicts"):
+        broker.ingest_raw_event(TradovateRawEvent(
+            kind="position", data={"side": "flat", "qty": 0},
+        ))
+
+
+def test_rest_position_snapshot_disagreement_raises():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, _rest = _entered_broker()   # fill-derived: long 1
+
+    broker.reconcile_rest_positions([{"netPos": 1, "netPrice": 100.5}])  # match: ok
+
+    with pytest.raises(TradovateStateError, match="REST position"):
+        broker.reconcile_rest_positions([{"netPos": -2, "netPrice": 100.5}])
+
+    with pytest.raises(TradovateStateError, match="REST position"):
+        broker.reconcile_rest_positions([])  # broker flat, we are long

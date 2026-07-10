@@ -242,3 +242,12 @@ def test_feed_vendor_bar_is_consumed_by_live_bar_source() -> None:
         100.25,
         9.0,
     )
+
+
+def test_malformed_chart_bar_raises_value_error() -> None:
+    import pytest
+
+    bad_bar = {"timestamp": "2025-11-03T14:31:00.000Z", "open": "100.0"}  # missing high/low/close
+
+    with pytest.raises(ValueError, match="Chart bar missing"):
+        chart_bar_to_vendor_bar(symbol="NQZ5", raw=bad_bar)

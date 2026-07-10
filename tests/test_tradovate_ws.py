@@ -211,3 +211,19 @@ def test_response_wait_stops_after_too_many_ignored_frames() -> None:
 
     with pytest.raises(TradovateWebSocketError, match="Too many websocket frames"):
         client.request("md/getChart", {"symbol": "NQZ5"})
+
+
+def test_ws_authorize_failure_status_raises() -> None:
+    transport = FakeWebSocketTransport(['a[{"s":401,"i":0,"d":{}}]'])
+    client = TradovateWebSocketClient(transport)
+
+    with pytest.raises(TradovateWebSocketError, match="401"):
+        client.authorize("bad-token")
+
+
+def test_ws_close_frame_while_waiting_for_response_raises() -> None:
+    transport = FakeWebSocketTransport(["c"])
+    client = TradovateWebSocketClient(transport)
+
+    with pytest.raises(TradovateWebSocketError, match="closed"):
+        client.request("order/placeorder", {"orderQty": 1})

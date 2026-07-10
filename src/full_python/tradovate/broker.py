@@ -465,6 +465,28 @@ class TradovateBroker:
                 f"fill-derived position {self._position!r}"
             )
 
+    def reconcile_rest_positions(self, positions: list) -> None:
+        """Cross-check a REST /position/list snapshot against fill-derived
+        truth (Failure Matrix: REST vs WebSocket disagreement -> halt)."""
+        net = 0
+        price = 0.0
+        for item in positions:
+            net += int(item.get("netPos", 0))
+            if item.get("netPrice") is not None:
+                price = float(item["netPrice"])
+        reported: Optional[BrokerPosition] = None
+        if net != 0:
+            reported = BrokerPosition(
+                side="long" if net > 0 else "short",
+                quantity=abs(net),
+                entry_price=price,
+            )
+        if not _positions_match(reported, self._position):
+            raise TradovateStateError(
+                f"REST position snapshot {reported!r} contradicts "
+                f"fill-derived position {self._position!r}"
+            )
+
     # -- account state -----------------------------------------------------
 
     @property
@@ -497,18 +519,17 @@ def _side_from_action(action: Any) -> str:
     raise TradovateOrderSafetyError("unsupported_order_action")
 
 
-def _position_from_data(data: dict[str, Any]) -> BrokerPosition:
+def _position_from_data(data: dict[str, Any]) -> Optional[BrokerPosition]:
     side = data.get("side")
+    qty = data.get("qty", data.get("netPos"))
+    if side == "flat" or qty == 0:
+        return None
     if side not in {"long", "short"}:
         raise TradovateOrderSafetyError("unsupported_position_side")
     price = data.get("price", data.get("entryPrice"))
     if price is None:
         raise TradovateOrderSafetyError("position_price_required")
-    return BrokerPosition(
-        side=side,
-        quantity=int(data["qty"]),
-        entry_price=float(price),
-    )
+    return BrokerPosition(side=side, quantity=int(qty), entry_price=float(price))
 
 
 def _positions_match(
