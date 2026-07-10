@@ -3,7 +3,7 @@
 You are picking up an NQ/MNQ futures trading system (Python port of a
 validated TradingView strategy). This document is self-contained: it does
 not assume any particular AI tool, skill set, or external memory. Read it
-fully before touching anything. Last updated 2026-07-06.
+fully before touching anything. Last updated 2026-07-10.
 
 ## 1. What this project is
 
@@ -44,9 +44,13 @@ the cost of the validated core, which no analysis this year has beaten.
 6. **Risk caps are PER-INSTRUMENT.** NQ = $20/pt, MNQ = $2/pt. A live NQ
    daily-loss cap must sit ABOVE the strategy's $1,000 DLL (~$1,500-2,000).
    $150/day is the MNQ pilot number — never set it on NQ.
-7. **NO LIVE BROKER ADAPTER EXISTS YET.** Everything is offline/paper. The
-   system physically cannot place a real order until sub-project 3 (the
-   Tradovate adapter) is built and gated. Do not claim otherwise.
+7. **NOTHING TRADES LIVE YET.** The Tradovate adapter now exists
+   (sub-project 3) but is offline-only: all tests run on fake transports,
+   no credentials are wired anywhere, and `order_enabled` /
+   `flatten_enabled` default False. Enabling them against a funded account
+   is forbidden until the sub-project 4 gates (demo observe → demo order
+   test → pilot checklist) are passed. Do not claim otherwise in either
+   direction.
 
 ## 3. The working method (follow it; it is why the results are trustworthy)
 
@@ -67,12 +71,12 @@ Do not skip the review step, and do not merge red tests.
 - **`docs/superpowers/plans/`** — implementation plans (complete code +
   tests) per feature.
 - **The test suite IS the executable spec.** `python3 -m pytest -q` →
-  currently ~190 passed, 3 skipped. The 3 skips are real-data tests gated
+  currently ~294 passed, 3 skipped. The 3 skips are real-data tests gated
   on `FULL_PYTHON_BASELINE_DATA` (the operator's local 9-month CSV); with
-  it set, all pass (~193/0) and prove the live path reproduces the
-  backtester trade-for-trade.
+  it set, all pass and prove the live path reproduces the backtester
+  trade-for-trade.
 
-## 5. Current state (2026-07-06)
+## 5. Current state (2026-07-10)
 
 - **Baseline frozen & TV-reconciled** — Python engine matches TradingView
   106/106 trades at $0.00 entry-price delta on the 9-month anchor.
@@ -88,37 +92,51 @@ Do not skip the review step, and do not merge red tests.
 - **Live-engine sub-project 1 (execution core) — DONE, merged, real-data
   identity proven.** Broker-agnostic `LiveLoop`, `PositionEngine` shared
   by sim and live, `PaperBroker`, `RiskSupervisor`, order state machine.
-- **Live-engine sub-project 2 (live data feed) — DONE, in PR #11.**
+- **Live-engine sub-project 2 (live data feed) — DONE, merged.**
   Vendor-agnostic `LiveBarSource`, contract authority, session-armed
   outage detection (halt+flatten). The trading window is config-driven
   and MALLEABLE (see §7).
+- **Entry-window sweep — CLOSED, config unchanged** (2026-07-06). The
+  9:30 open start is essential and irreplaceable; every later start is
+  catastrophically worse. See
+  `docs/decisions/2026-07-06-entry-window-sweep-closed.md`.
+- **MR variant 2 (opening-range fade) run 1 — REJECTED** (2026-07-07,
+  PF 0.692, t=-3.74). MR track paused per its research contract; run 2
+  needs a new pre-filed mechanism, not parameter tuning. See
+  `docs/research/2026-07-07-mr-orfade-run1-verdict.md`.
+- **Sub-project 3 — Tradovate adapter — offline-COMPLETE** (2026-07-10).
+  Foundation (auth/HTTP/WS/feed/broker skeleton, Tasks 1-6) plus the
+  gap-closure pass: all six tracked `TradovateBroker` safety gaps closed
+  (fill-derived trade ledger, live DLL, broker-held frozen protective
+  stop, cancel-then-close exit path, submitted-order map with
+  halt-on-unknown/duplicate, position reconciliation). Broker Failure
+  Matrix 28/28 (27 tested + 1 OCO row N/A-by-design). Specs:
+  `docs/superpowers/specs/2026-07-07-tradovate-adapter-design.md` and
+  `2026-07-10-tradovate-gap-closure-design.md`. Still offline-only —
+  see guardrail 7.
 
 Branch note: `claude/m4-regime` is the active integration branch; `main`
-lags it. Check open PRs before assuming what is merged.
+lags it. PR #13 consolidates it into `main`. Check open PRs before
+assuming what is merged.
 
 ## 6. Open tasks (ranked)
 
-1. **Merge PR #11** (live data feed) into `claude/m4-regime`.
-2. **Sub-project 3 — Tradovate adapter.** Implements the `MarketDataFeed`
-   and `Broker` seams against the real API (auth, market-data
-   subscription, order routing, reconnect, the Broker Failure Test
-   Matrix). **This is the first point a live order becomes physically
-   possible and the first that needs real credentials + real broker
-   decisions.** Also where `PartialFilled` (currently modeled-but-fatal)
-   gets real semantics. Treat as a hard gate.
-3. **Sub-project 4 — Gate 5/6/7 operational tooling:** paper →
-   reconciliation → a tiny MNQ live pilot ($150/day, $500 total, 30
-   sessions). Includes dashboards; note that data_outage and
-   invariant_violation halts share `transition="execution_halt"` and
-   differ by the `reason` field — consumers must read `reason`.
-4. **Entry-window sweep (new research axis).** The trading window
-   (`entry_start_minutes_et` / `entry_end_minutes_et`, default 9:30-10:00)
-   is a FIXED ASSUMPTION that Gate 1 never swept. It is fully config-
-   driven, so it can be swept with the existing harness
-   (`src/full_python/research/sweep.py`) under the pre-registered
-   protocol. A legitimate open axis.
-5. **Mean-reversion sleeve** — VWAP reversion v0.2 exists in code under its
-   own research contract; separate track for the smoother-equity goal.
+1. **Merge PR #13** (`claude/m4-regime` → `main`: MR run-1 record + full
+   Tradovate adapter incl. gap closure).
+2. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
+   demo order test → paper → reconciliation → a tiny MNQ live pilot
+   ($150/day, $500 total, 30 sessions). First point real credentials and
+   broker decisions are needed. Includes dashboards; note that
+   data_outage and invariant_violation halts share
+   `transition="execution_halt"` and differ by the `reason` field —
+   consumers must read `reason`.
+3. **Resolve the account-level DLL open question** (see the Open
+   Operational Decisions list in the adapter spec): does Tradovate/the
+   prop firm enforce an account-level daily-loss limit, and does it
+   force-flatten or only block new orders? Feeds sub-project 4's pilot
+   checklist; the client-side DLL stays regardless.
+4. **Mean-reversion sleeve — PAUSED** under its research contract after
+   the run-1 rejection; resume only with a new pre-filed mechanism.
 
 ## 7. Key facts a new agent will need
 
