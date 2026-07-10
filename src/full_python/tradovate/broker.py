@@ -240,7 +240,77 @@ class TradovateBroker:
             stop_price=order.stop_price if order.stop_price is not None else 0.0,
             session_date=session_date,
         )
-        # Protective stop submission lands in Task 4.
+        self._submit_protective_stop(fill, order)
+
+    def _submit_protective_stop(self, fill: Filled, entry_order: SubmittedOrder) -> None:
+        action = "Sell" if fill.side == "buy" else "Buy"
+        body = {
+            "accountSpec": self._config.account_spec,
+            "accountId": self._config.account_id,
+            "action": action,
+            "symbol": entry_order.symbol,
+            "orderQty": fill.quantity,
+            "orderType": "Stop",
+            "stopPrice": entry_order.stop_price,
+            "isAutomated": True,
+        }
+        try:
+            response = self._rest_client.order_place(body)
+        except TradovateError as exc:
+            self._emergency_flatten(entry_order.symbol)
+            raise TradovateStateError(
+                "protective stop submission failed; emergency flatten requested"
+            ) from exc
+        stop_id = str(response["orderId"])
+        self._orders[stop_id] = SubmittedOrder(
+            order_id=stop_id,
+            role=ROLE_PROTECTIVE_STOP,
+            side=action.lower(),
+            quantity=fill.quantity,
+            symbol=entry_order.symbol,
+            stop_price=entry_order.stop_price,
+            reason="stop",
+        )
+        self._working_stop_id = stop_id
+        self._events.append(Acked(order_id=stop_id))
+
+    def _emergency_flatten(self, symbol: str) -> None:
+        # Entry-capable configs are flatten-capable by construction (__init__),
+        # so no flag check here. Best-effort: the TradovateStateError raised at
+        # the call site halts the loop regardless; a cancel/liquidate failure
+        # leaves the account to the operator, which is exactly what halt means.
+        self._cancel_working_orders_best_effort()
+        try:
+            response = self._rest_client.order_liquidate_position({
+                "accountSpec": self._config.account_spec,
+                "accountId": self._config.account_id,
+                "symbol": symbol,
+                "admin": False,
+            })
+        except TradovateError:
+            return
+        order_id = str(response["orderId"])
+        position = self._position
+        self._orders[order_id] = SubmittedOrder(
+            order_id=order_id,
+            role=ROLE_EXIT,
+            side="sell" if position is not None and position.side == "long" else "buy",
+            quantity=position.quantity if position is not None else 0,
+            symbol=symbol,
+            reason="emergency_flatten",
+        )
+
+    def _cancel_working_orders_best_effort(self) -> None:
+        # Emergency path only: a cancel failure must not stop the liquidation.
+        # Any later fill from a missed cancel is a known-id fill against an
+        # impossible position state and halts through the normal guards.
+        for order in list(self._orders.values()):
+            if order.status != "working":
+                continue
+            try:
+                self._rest_client.order_cancel({"orderId": int(order.order_id)})
+            except TradovateError:
+                continue
 
     def _on_exit_fill(self, fill: Filled, order: SubmittedOrder) -> None:
         position = self._position
@@ -273,7 +343,13 @@ class TradovateBroker:
         self._events.append(
             Rejected(order_id=order.order_id, reason=str(data.get("reason", "")))
         )
-        # Protective-stop rejection handling (flatten + fatal) lands in Task 4.
+        if order.role == ROLE_PROTECTIVE_STOP:
+            if order.order_id == self._working_stop_id:
+                self._working_stop_id = None
+            self._emergency_flatten(order.symbol)
+            raise TradovateStateError(
+                f"protective stop {order.order_id} rejected; emergency flatten requested"
+            )
 
     def _ingest_cancel(self, data: dict[str, Any]) -> None:
         order = self._known_order(str(data["orderId"]))

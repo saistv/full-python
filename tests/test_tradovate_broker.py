@@ -172,7 +172,7 @@ def test_partial_fill_raw_event_maps_to_partial_filled():
     broker.ingest_raw_event(TradovateRawEvent(
         kind="partial_fill",
         data={
-            "orderId": 101,
+            "orderId": 102,
             "action": "Sell",
             "qty": 1,
             "remaining": 2,
@@ -183,7 +183,7 @@ def test_partial_fill_raw_event_maps_to_partial_filled():
 
     partials = [e for e in broker.poll_events() if isinstance(e, PartialFilled)]
     assert partials == [PartialFilled(
-        order_id="101",
+        order_id="102",
         side="sell",
         quantity=1,
         remaining=2,
@@ -232,7 +232,7 @@ def test_partial_fill_event_from_broker_is_fatal_for_order_state_machine():
     broker.ingest_raw_event(TradovateRawEvent(
         kind="partial_fill",
         data={
-            "orderId": 101,
+            "orderId": 102,
             "action": "Sell",
             "qty": 1,
             "remaining": 1,
@@ -300,3 +300,65 @@ def test_broker_requires_dollar_point_value_and_live_pairing():
 
     with pytest.raises(TradovateConfigError, match="flatten_enabled"):
         TradovateBroker(_cfg(order_enabled=True, flatten_enabled=False), FakeRestClient())
+
+
+def test_entry_fill_submits_protective_stop_at_frozen_price():
+    broker, rest = _entered_broker()
+
+    stop_bodies = [b for b in rest.placed if b.get("orderType") == "Stop"]
+    assert stop_bodies == [{
+        "accountSpec": "DEMO123",
+        "accountId": 456,
+        "action": "Sell",           # opposite of the long entry
+        "symbol": "NQ",
+        "orderQty": 1,
+        "orderType": "Stop",
+        "stopPrice": 95.0,          # frozen at the entry intent's stop_price
+        "isAutomated": True,
+    }]
+    acks = [e for e in broker.poll_events() if isinstance(e, Acked)]
+    assert [a.order_id for a in acks] == ["101", "102"]  # entry, then stop
+
+
+def test_protective_stop_rest_failure_flattens_and_raises():
+    from full_python.tradovate.errors import TradovateRequestError, TradovateStateError
+
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+    rest.order_place_error = TradovateRequestError("boom")
+
+    with pytest.raises(TradovateStateError, match="protective stop"):
+        broker.ingest_raw_event(_fill_event(101))
+
+    assert rest.liquidations != []   # emergency flatten was requested
+
+
+def test_protective_stop_rejection_flattens_and_raises():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, rest = _entered_broker()   # stop order 102 is working
+
+    with pytest.raises(TradovateStateError, match="protective stop"):
+        broker.ingest_raw_event(TradovateRawEvent(
+            kind="reject", data={"orderId": 102, "reason": "risk_rules"},
+        ))
+
+    assert rest.liquidations != []
+
+
+def test_reject_event_for_known_entry_emits_rejected():
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+
+    broker.ingest_raw_event(TradovateRawEvent(
+        kind="reject", data={"orderId": 101, "reason": "outside_market_hours"},
+    ))
+
+    rejects = [e for e in broker.poll_events() if isinstance(e, Rejected)]
+    assert rejects == [Rejected(order_id="101", reason="outside_market_hours")]
+    assert broker.position is None
+    assert rest.liquidations == []   # entry rejection needs no flatten
