@@ -117,3 +117,36 @@ def test_credentials_from_env_rejects_non_integer_client_id(monkeypatch: pytest.
 
     with pytest.raises(TradovateConfigError, match="TRADOVATE_CLIENT_ID"):
         credentials_from_env()
+
+
+def test_state_error_is_an_execution_invariant() -> None:
+    from full_python.execution.state_machine import ExecutionInvariantError
+    from full_python.tradovate.errors import TradovateError, TradovateStateError
+
+    assert issubclass(TradovateStateError, TradovateError)
+    assert issubclass(TradovateStateError, ExecutionInvariantError)
+
+
+def test_adapter_config_risk_fields_default_unset() -> None:
+    cfg = TradovateAdapterConfig(environment=DEMO_ENVIRONMENT, account_spec="SIM123", account_id=456)
+    assert cfg.dollar_point_value is None
+    assert cfg.commission_per_contract_round_trip == 0.0
+    assert cfg.daily_loss_limit is None
+
+
+def test_adapter_config_rejects_non_positive_risk_values() -> None:
+    from full_python.tradovate.errors import TradovateConfigError
+
+    with pytest.raises(TradovateConfigError, match="dollar_point_value"):
+        TradovateAdapterConfig(
+            environment=DEMO_ENVIRONMENT, account_spec="S", account_id=1, dollar_point_value=0.0
+        )
+    with pytest.raises(TradovateConfigError, match="commission"):
+        TradovateAdapterConfig(
+            environment=DEMO_ENVIRONMENT, account_spec="S", account_id=1,
+            commission_per_contract_round_trip=-0.01,
+        )
+    with pytest.raises(TradovateConfigError, match="daily_loss_limit"):
+        TradovateAdapterConfig(
+            environment=DEMO_ENVIRONMENT, account_spec="S", account_id=1, daily_loss_limit=0.0
+        )

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from full_python.execution.state_machine import ExecutionInvariantError
+
 
 class TradovateError(Exception):
     pass
@@ -46,3 +48,12 @@ class TradovateOrderDisabledError(TradovateError):
 
 class TradovateOrderSafetyError(TradovateError):
     pass
+
+
+class TradovateStateError(TradovateError, ExecutionInvariantError):
+    """Broker/account state can no longer be proven.
+
+    Subclasses ExecutionInvariantError so LiveLoop's existing
+    invariant-halt path catches it: halt WITHOUT flatten (position truth
+    unknown). Never catch-and-continue this in adapter code.
+    """

@@ -49,6 +49,22 @@ class TradovateAdapterConfig:
     order_enabled: bool = False
     flatten_enabled: bool = False
     token_renewal_lead_seconds: int = 15 * 60
+    # Risk/cost model, mirroring SimulationConfig semantics. PER-INSTRUMENT:
+    # NQ = 20.0 $/pt, MNQ = 2.0 $/pt -- no default, so a value can never
+    # silently cross instruments. TradovateBroker refuses to construct
+    # without dollar_point_value (and, when order_enabled, without
+    # daily_loss_limit + flatten_enabled).
+    dollar_point_value: Optional[float] = None
+    commission_per_contract_round_trip: float = 0.0
+    daily_loss_limit: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.dollar_point_value is not None and self.dollar_point_value <= 0:
+            raise TradovateConfigError("dollar_point_value must be positive when set")
+        if self.commission_per_contract_round_trip < 0:
+            raise TradovateConfigError("commission_per_contract_round_trip must be >= 0")
+        if self.daily_loss_limit is not None and self.daily_loss_limit <= 0:
+            raise TradovateConfigError("daily_loss_limit must be positive when set")
 
 
 def credentials_from_env(env: Optional[Mapping[str, str]] = None) -> TradovateCredentials:
