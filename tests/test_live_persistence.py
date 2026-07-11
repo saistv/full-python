@@ -25,3 +25,18 @@ def test_behaves_as_a_normal_event_ledger_in_memory(tmp_path) -> None:
     assert ledger.records == [record]
     assert record.event_id == "evt-00000001"
     ledger.close()
+
+
+def test_refuses_to_reopen_an_existing_ledger_file(tmp_path) -> None:
+    import pytest
+
+    path = tmp_path / "events.jsonl"
+    first = PersistentEventLedger(path)
+    first.append(EventType.BAR, timestamp_utc="2026-07-11T13:31:00Z")
+    first.close()
+
+    with pytest.raises(FileExistsError, match="fresh file"):
+        PersistentEventLedger(path)
+
+    # the original record is untouched
+    assert len(EventLedger.read_jsonl(path).records) == 1
