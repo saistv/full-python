@@ -148,12 +148,13 @@ divergence so a wrapper script can notice.
 ### 5. `src/full_python/live/risk_probe.py` — account risk snapshot
 
 Read-only REST GETs at startup — `account/list`,
-`cashBalance/getcashbalancesnapshot`, `userAccountAutoLiq/list` (the
+`cashBalance/list`, `userAccountAutoLiq/list` (the
 account-level auto-liquidation settings, the direct evidence for the
 DLL question), and `marginSnapshot/list`; endpoints that 404/403 on
 demo are recorded as such rather than failing the run — dumped
 verbatim to `runs/live/<session-date>/account_risk.json`. **GET only;
-the probe never POSTs.** Purpose: empirical input to the open
+the probe never POSTs.** (Amended at plan time: the snapshot endpoint
+is a POST; the GET-only rule outranks the endpoint list.) Purpose: empirical input to the open
 operational decision "does Tradovate/the prop firm enforce an
 account-level daily-loss limit, and does it force-flatten or only block
 new orders" (parent spec, Open Operational Decisions). The probe

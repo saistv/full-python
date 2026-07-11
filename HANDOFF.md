@@ -125,9 +125,10 @@ assuming what is merged.
    Tradovate adapter incl. gap closure).
 2. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
    demo order test → paper → reconciliation → a tiny MNQ live pilot
-   ($150/day, $500 total, 30 sessions). First point real credentials and
-   broker decisions are needed. Includes dashboards; note that
-   data_outage and invariant_violation halts share
+   ($150/day, $500 total, 30 sessions). Slice 1 (Gate 5 observe runner)
+   is BUILT — see `docs/live-observe-runbook.md`; next action is running
+   the 3 observe sessions, then the demo-order-test spec. Includes
+   dashboards; note that data_outage and invariant_violation halts share
    `transition="execution_halt"` and differ by the `reason` field —
    consumers must read `reason`.
 3. **Resolve the account-level DLL open question** (see the Open
@@ -166,9 +167,11 @@ the project history.
 `position_engine.py`, the shared fill lifecycle), `strategy/`
 (`adaptive_trend.py` + config), `execution/` (live loop, paper broker,
 supervisor, state machine), `livedata/` (feed, contract authority, live
-bar source), `risk/`, `data/` (loaders, sessions, databento continuous
-builder), `research/sweep.py` (the Gate 1 sweep harness), `regime.py`
-(measurement only — never gates entries).
+bar source), `live/` (observe-mode session runner, shadow report, risk
+probe), `tradovate/transport.py` (real RFC 6455 client), `risk/`,
+`data/` (loaders, sessions, databento continuous builder),
+`research/sweep.py` (the Gate 1 sweep harness), `regime.py` (measurement
+only — never gates entries).
 
 ## 8. How to actually do the handoff
 
