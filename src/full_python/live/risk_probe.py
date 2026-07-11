@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from full_python.tradovate.errors import TradovateError
 from full_python.tradovate.http import _redact

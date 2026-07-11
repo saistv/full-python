@@ -124,8 +124,18 @@ def _esc(value: Any) -> str:
 def _write_html(
     path: Path, *, bars, live, replay, divergences, halts, sim_trades, sim_error=None
 ) -> None:
-    verdict = "PARITY" if not divergences else "DIVERGENCE"
-    color = "#0a7d33" if not divergences else "#b00020"
+    if not bars:
+        # Zero recorded BAR events (e.g. a startup crash) is not evidence of
+        # parity -- it's an empty session. Render a distinct amber/gray
+        # banner so this can never be mistaken for the green PARITY verdict.
+        verdict = "NO-DATA"
+        color = "#8a6d00"
+    elif not divergences:
+        verdict = "PARITY"
+        color = "#0a7d33"
+    else:
+        verdict = "DIVERGENCE"
+        color = "#b00020"
     rows = "".join(
         f"<tr><td>{_esc(s['minute'])}</td><td>{_esc(s['kind'])}</td>"
         f"<td>{_esc(s.get('side', s.get('reason', '')))}</td>"
@@ -197,7 +207,12 @@ def run_report(events_path, html_path) -> int:
         logger.error("DIVERGENCE %s", line)
     for record in halts:
         logger.warning("HALT %s %s", record.timestamp_utc, record.payload)
+    if not bars:
+        verdict = "NO-DATA"
+    elif divergences:
+        verdict = "DIVERGENCE"
+    else:
+        verdict = "PARITY"
     logger.info("verdict: %s (%d bars, %d live signals) -> %s",
-                "PARITY" if not divergences else "DIVERGENCE",
-                len(bars), len(live), html_path)
-    return 1 if divergences else 0
+                verdict, len(bars), len(live), html_path)
+    return 1 if (not bars or divergences) else 0

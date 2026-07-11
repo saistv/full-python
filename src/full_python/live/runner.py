@@ -100,6 +100,15 @@ def bars_until(
             return
 
 
+def _report_path_for_events(events_path: Path) -> Path:
+    """events.jsonl -> report.html, events-2.jsonl -> report-2.html: derive
+    the report filename from the events stem so a second --report-only run
+    doesn't clobber the first run's report."""
+    stem = events_path.stem
+    report_stem = "report" + stem[len("events"):] if stem.startswith("events") else f"report-{stem}"
+    return events_path.with_name(report_stem + ".html")
+
+
 def _fresh_run_paths(session_dir: Path) -> "tuple[Path, Path]":
     """One ledger file per run: events.jsonl, then events-2.jsonl, ...
     (PersistentEventLedger refuses to reopen an existing file)."""
@@ -176,6 +185,12 @@ def run_observe_session(session: ObserveSession) -> int:
         halted = result.halted_reason
     except KeyboardInterrupt:
         logger.info("operator interrupt (Ctrl+C); ending session")
+    except Exception as exc:  # noqa: BLE001 -- top-level catch-all per spec:
+        # any uncaught error (e.g. TradovateWebSocketError on a TCP drop,
+        # ValueError on a malformed chart bar) must still yield a report on
+        # whatever was recorded and a nonzero exit, not a raw traceback.
+        halted = f"unhandled: {exc}"
+        logger.error("FATAL: %s", exc)
     finally:
         for closer in (session.feed.cancel, session.ws.close, session.ledger.close):
             try:
@@ -210,7 +225,7 @@ def main(argv: Optional[list] = None) -> int:
 
     if args.report_only is not None:
         events_path = Path(args.report_only)
-        return run_report(events_path, events_path.with_name("report.html"))
+        return run_report(events_path, _report_path_for_events(events_path))
 
     hours, minutes = args.end_et.split(":")
     end_minutes_et = int(hours) * 60 + int(minutes)

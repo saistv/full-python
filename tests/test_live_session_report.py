@@ -56,6 +56,20 @@ def test_quiet_session_is_parity(tmp_path) -> None:
     assert "DIVERGENCE" not in text
 
 
+def test_empty_ledger_is_no_data_not_vacuous_parity(tmp_path) -> None:
+    ledger = EventLedger()  # zero BAR events, e.g. a startup crash
+    events = tmp_path / "events.jsonl"
+    ledger.write_jsonl(events)
+    html = tmp_path / "report.html"
+
+    exit_code = run_report(events, html)
+
+    assert exit_code == 1
+    text = html.read_text(encoding="utf-8")
+    assert "NO-DATA" in text
+    assert "PARITY" not in text
+
+
 def test_bogus_recorded_signal_is_divergence(tmp_path) -> None:
     ledger = _ledger_with_bars(5)
     ledger.append(

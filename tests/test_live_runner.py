@@ -12,7 +12,7 @@ from full_python.live.runner import (
     run_observe_session,
 )
 from full_python.models import MarketBar
-from full_python.tradovate.errors import TradovateOrderSafetyError
+from full_python.tradovate.errors import TradovateOrderSafetyError, TradovateWebSocketError
 
 
 class FakeClock:
@@ -152,6 +152,45 @@ def test_report_only_mode_runs_offline(tmp_path) -> None:
 
     assert main(["--report-only", str(events)]) == 0
     assert (tmp_path / "report.html").exists()
+
+
+def test_ws_failure_mid_session_still_produces_report(tmp_path) -> None:
+    """A TCP drop / server-close mid-session raises TradovateWebSocketError,
+    which is not a LiveDataError and therefore propagates out of
+    LiveLoop.run(). The runner's top-level catch-all must still deliver a
+    report and a nonzero exit -- no raw traceback, no lost session."""
+
+    class DroppingWs(FakeChartWs):
+        def receive_event(self, timeout_seconds):
+            raise TradovateWebSocketError("dropped")
+
+    clock = FakeClock(datetime(2026, 7, 10, 18, 31, 30, tzinfo=timezone.utc))
+    session = build_observe_session(
+        ws_client=DroppingWs([]), clock=clock, account_spec="D", account_id=1,
+        data_dir=tmp_path, bars_back=10, end_minutes_et=14 * 60 + 33,
+    )
+
+    exit_code = run_observe_session(session)
+
+    assert exit_code == 2
+    assert session.report_path.exists()
+
+
+def test_report_only_names_html_from_events_stem(tmp_path) -> None:
+    """--report-only on events-2.jsonl must write report-2.html, not clobber
+    a first run's report.html."""
+    from full_python.events import EventLedger, EventType
+
+    ledger = EventLedger()
+    ledger.append(EventType.BAR, timestamp_utc="2026-07-10T18:31:00Z",
+                  payload={"symbol": "NQU6", "open": 1.0, "high": 1.0,
+                           "low": 1.0, "close": 1.0, "volume": 1.0})
+    events = tmp_path / "events-2.jsonl"
+    ledger.write_jsonl(events)
+
+    assert main(["--report-only", str(events)]) == 0
+    assert (tmp_path / "report-2.html").exists()
+    assert not (tmp_path / "report.html").exists()
 
 
 def test_second_same_day_run_gets_a_fresh_ledger_file(tmp_path) -> None:
