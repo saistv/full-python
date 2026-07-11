@@ -344,3 +344,18 @@ def test_receive_rejects_oversized_control_frame_payload() -> None:
     conn = WebSocketConnection(FakeSocket([bad_ping]))
     with pytest.raises(TradovateWebSocketError, match="control"):
         conn.receive(5.0)
+
+
+def test_mid_frame_timeout_closes_the_connection() -> None:
+    # One header byte arrives, then a timeout occurs mid-frame.
+    # The connection must be marked closed so a subsequent receive() raises
+    # the "closed" error, not attempting to reparse leftover bytes.
+    conn = WebSocketConnection(FakeSocket([b"\x81", socket_module.timeout("slow")]))
+
+    # First receive() hits the timeout after consuming one byte of the frame header
+    with pytest.raises(TradovateWebSocketError, match="mid-frame"):
+        conn.receive(5.0)
+
+    # Second receive() should find the connection already closed
+    with pytest.raises(TradovateWebSocketError, match="closed"):
+        conn.receive(5.0)

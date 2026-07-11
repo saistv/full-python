@@ -155,6 +155,7 @@ class WebSocketConnection:
             remaining = deadline - self._monotonic()
             if remaining <= 0:
                 if fragments:
+                    self._closed = True
                     raise TradovateWebSocketError("timeout inside fragmented websocket message")
                 return None
             self._sock.settimeout(max(remaining, 0.001))
@@ -166,6 +167,7 @@ class WebSocketConnection:
                 )
             except socket.timeout:
                 if progress.consumed or fragments:
+                    self._closed = True
                     raise TradovateWebSocketError("timeout mid-frame on websocket")
                 return None
             if opcode in (OPCODE_CLOSE, OPCODE_PING, OPCODE_PONG) and (
