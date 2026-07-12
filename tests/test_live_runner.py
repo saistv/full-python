@@ -61,6 +61,16 @@ def _bar(ts: str, price: float = 100.0) -> MarketBar:
                      low=price, close=price, volume=1.0)
 
 
+def _reference_csv(path, rows) -> str:
+    lines = ["timestamp,symbol,open,high,low,close,volume"]
+    lines.extend(
+        f"{ts},NQU6,{price},{price},{price},{price},1.0"
+        for ts, price in rows
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
+
+
 def test_observe_adapter_config_pins_orders_off() -> None:
     config = observe_adapter_config("DEMO123", 456)
     assert config.order_enabled is False
@@ -117,7 +127,11 @@ def test_build_and_run_observe_session_end_to_end(tmp_path) -> None:
     subscribe = [r for r in ws.requests if r[0] == "md/getChart"]
     assert subscribe and subscribe[0][1]["symbol"] == "NQU6"
 
-    exit_code = run_observe_session(session)
+    reference = _reference_csv(tmp_path / "reference.csv", [
+        ("2026-07-10T18:31:00Z", 100.0),
+        ("2026-07-10T18:32:00Z", 101.0),
+    ])
+    exit_code = run_observe_session(session, reference_bars_path=reference)
 
     assert exit_code == 0  # clean session, PARITY
     assert ws.closed
@@ -150,7 +164,10 @@ def test_report_only_mode_runs_offline(tmp_path) -> None:
     events = tmp_path / "events.jsonl"
     ledger.write_jsonl(events)
 
-    assert main(["--report-only", str(events)]) == 0
+    reference = _reference_csv(
+        tmp_path / "reference.csv", [("2026-07-10T18:31:00Z", 1.0)]
+    )
+    assert main(["--report-only", str(events), "--reference-bars", reference]) == 0
     assert (tmp_path / "report.html").exists()
 
 
@@ -188,7 +205,10 @@ def test_report_only_names_html_from_events_stem(tmp_path) -> None:
     events = tmp_path / "events-2.jsonl"
     ledger.write_jsonl(events)
 
-    assert main(["--report-only", str(events)]) == 0
+    reference = _reference_csv(
+        tmp_path / "reference.csv", [("2026-07-10T18:31:00Z", 1.0)]
+    )
+    assert main(["--report-only", str(events), "--reference-bars", reference]) == 0
     assert (tmp_path / "report-2.html").exists()
     assert not (tmp_path / "report.html").exists()
 

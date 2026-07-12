@@ -16,6 +16,7 @@ STRUCTURAL_ISSUE_KINDS = (
     "non_positive_price",
     "negative_volume",
     "symbol_mix",
+    "rth_gap",
 )
 
 
@@ -71,11 +72,11 @@ def validate_bars(
 ) -> DataQualityReport:
     """Validate canonical bars before any simulation touches them.
 
-    Structural issues (ordering, duplicates, malformed OHLC, mixed symbols)
-    make a dataset unfit for simulation. Intra-session gaps are informational:
-    they are counted and surfaced, never silently ignored, but they do not
-    block a run because real data has halts and low-volume minutes.
-    Session boundaries (overnight, weekend) are not gaps.
+    Structural issues make a dataset unfit for simulation. All intra-session
+    gaps are counted; a gap touching RTH is additionally structural because it
+    can alter indicators, skip a stop, or erase an eligible setup. Overnight
+    gaps remain informational because valid maintenance/illiquidity breaks are
+    data-source dependent. Session boundaries are not gaps.
     """
     issues: list[DataQualityIssue] = []
     counts: dict[str, int] = {}
@@ -100,7 +101,8 @@ def validate_bars(
 
         try:
             current_dt = parse_timestamp_utc(bar.timestamp_utc)
-            current_session = classify_timestamp(bar.timestamp_utc).session_date
+            current_info = classify_timestamp(bar.timestamp_utc)
+            current_session = current_info.session_date
         except ValueError as error:
             record(index, bar.timestamp_utc, "unparseable_timestamp", str(error))
             previous_dt = None
@@ -122,6 +124,14 @@ def validate_bars(
                 if delta_minutes > expected_interval_minutes:
                     gap_count += 1
                     max_gap_minutes = max(max_gap_minutes, delta_minutes)
+                    previous_info = classify_timestamp(previous_dt.isoformat())
+                    if previous_info.is_rth or current_info.is_rth:
+                        record(
+                            index,
+                            bar.timestamp_utc,
+                            "rth_gap",
+                            f"{delta_minutes:g} minutes from {previous_dt.isoformat()}",
+                        )
 
         prices = (bar.open, bar.high, bar.low, bar.close)
         if any(price <= 0 for price in prices):

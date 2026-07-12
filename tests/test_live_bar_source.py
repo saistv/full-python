@@ -154,3 +154,23 @@ def test_window_is_malleable_not_hardcoded():
     assert next(it_b).timestamp_utc == seed
     with pytest.raises(DataOutageError):
         next(it_b)  # same gap, but armed by the wider window
+
+
+def test_holiday_gap_is_not_armed_by_wall_clock_window_when_flat():
+    # Thanksgiving 2025 at 09:35 ET falls inside the numeric window but the
+    # exchange calendar marks RTH closed, so a flat observer does not alarm.
+    holiday_auth = ContractAuthority(root="NQ")
+    holiday_symbol = holiday_auth.front_contract(date(2025, 11, 27))
+    src = LiveBarSource(
+        ScriptedFeed([
+            _vbar("2025-11-27T14:35:00Z", symbol=holiday_symbol),
+            _vbar("2025-11-27T14:40:00Z", symbol=holiday_symbol),
+        ]),
+        FakeClock(CLOCK.now()),
+        holiday_auth,
+        ActiveWindow(start_minutes_et=9 * 60 + 30, end_minutes_et=10 * 60),
+        FLAT,
+    )
+    it = iter(src)
+    assert next(it).timestamp_utc == "2025-11-27T14:35:00Z"
+    assert next(it).timestamp_utc == "2025-11-27T14:40:00Z"

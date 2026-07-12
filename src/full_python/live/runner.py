@@ -31,6 +31,7 @@ from full_python.livedata.clock import Clock, SystemClock
 from full_python.livedata.contract_authority import ContractAuthority
 from full_python.livedata.live_bar_source import ActiveWindow, LiveBarSource
 from full_python.models import MarketBar
+from full_python.instruments import instrument_spec
 from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
 from full_python.strategy.adaptive_trend_config import production_am_config
 from full_python.tradovate.auth import TradovateAuthClient
@@ -48,14 +49,12 @@ from full_python.tradovate.ws import TradovateWebSocketClient
 
 logger = logging.getLogger("full_python.live")
 
-NQ_DOLLAR_POINT_VALUE = 20.0
-
-
 def observe_adapter_config(
     account_spec: str, account_id: int, root_symbol: str = "NQ"
 ) -> TradovateAdapterConfig:
     # The ONLY adapter config this runner can produce. Observe literals,
     # pinned by tests/test_live_runner.py; changing them is a spec change.
+    spec = instrument_spec(root_symbol)
     return TradovateAdapterConfig(
         environment=DEMO_ENVIRONMENT,
         account_spec=account_spec,
@@ -63,7 +62,7 @@ def observe_adapter_config(
         root_symbol=root_symbol,
         order_enabled=False,
         flatten_enabled=False,
-        dollar_point_value=NQ_DOLLAR_POINT_VALUE,
+        dollar_point_value=spec.dollar_point_value,
     )
 
 
@@ -169,8 +168,15 @@ def build_observe_session(
         feed, clock, authority, window,
         position_provider=lambda: broker.position is not None,
     )
-    bar_stream = bars_until(source, clock, end_minutes_et, maintenance)
-    supervisor = RiskSupervisor(RiskSupervisorConfig(point_value=NQ_DOLLAR_POINT_VALUE))
+    calendar_end = (
+        end_minutes_et
+        if session_info.rth_close_minutes_et is None
+        else min(end_minutes_et, session_info.rth_close_minutes_et + 5)
+    )
+    bar_stream = bars_until(source, clock, calendar_end, maintenance)
+    supervisor = RiskSupervisor(
+        RiskSupervisorConfig(point_value=instrument_spec(symbol_root).dollar_point_value)
+    )
     loop = LiveLoop(bar_stream, strategy, broker, supervisor, ledger)
     return ObserveSession(
         loop=loop, broker=broker, ledger=ledger, events_path=events_path,
@@ -178,7 +184,7 @@ def build_observe_session(
     )
 
 
-def run_observe_session(session: ObserveSession) -> int:
+def run_observe_session(session: ObserveSession, *, reference_bars_path=None) -> int:
     halted: Optional[str] = None
     try:
         result = session.loop.run()
@@ -200,7 +206,11 @@ def run_observe_session(session: ObserveSession) -> int:
     if halted is not None:
         logger.error("HALT: %s", halted)
     logger.info("events: %s", session.events_path)
-    report_exit = run_report(session.events_path, session.report_path)
+    report_exit = run_report(
+        session.events_path,
+        session.report_path,
+        reference_bars_path=reference_bars_path,
+    )
     return report_exit if halted is None else 2
 
 
@@ -220,12 +230,21 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--symbol-root", default="NQ")
     parser.add_argument("--report-only", metavar="EVENTS_JSONL", default=None,
                         help="skip the session; rebuild the report from a JSONL")
+    parser.add_argument(
+        "--reference-bars",
+        default=None,
+        help="independent canonical CSV used to verify captured OHLCV bars",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.report_only is not None:
         events_path = Path(args.report_only)
-        return run_report(events_path, _report_path_for_events(events_path))
+        return run_report(
+            events_path,
+            _report_path_for_events(events_path),
+            reference_bars_path=args.reference_bars,
+        )
 
     hours, minutes = args.end_et.split(":")
     end_minutes_et = int(hours) * 60 + int(minutes)
@@ -267,4 +286,4 @@ def main(argv: Optional[list] = None) -> int:
         end_minutes_et=end_minutes_et, symbol_root=args.symbol_root,
         maintenance=maintenance,
     )
-    return run_observe_session(session)
+    return run_observe_session(session, reference_bars_path=args.reference_bars)

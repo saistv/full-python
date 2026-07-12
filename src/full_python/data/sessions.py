@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from full_python.data.exchange_calendar import rth_close_minutes_et
+
 EASTERN = ZoneInfo("America/New_York")
 RTH_START = time(9, 30)
 RTH_END = time(16, 0)
@@ -34,6 +36,7 @@ class SessionInfo:
     is_rth: bool
     is_rth_open_window: bool
     minutes_from_midnight_et: int
+    rth_close_minutes_et: int | None
 
 
 def classify_timestamp(raw_timestamp_utc: str) -> SessionInfo:
@@ -54,8 +57,13 @@ def classify_timestamp(raw_timestamp_utc: str) -> SessionInfo:
     else:
         session_date = calendar_date_et
 
-    is_weekday = timestamp_et.weekday() < 5
-    is_rth = is_weekday and RTH_START <= local_time < RTH_END
+    close_minutes = rth_close_minutes_et(session_date)
+    minutes = timestamp_et.hour * 60 + timestamp_et.minute
+    is_rth = (
+        close_minutes is not None
+        and minutes >= minutes_of(RTH_START)
+        and minutes < close_minutes
+    )
     rth_open_end = time(RTH_START.hour, RTH_START.minute + RTH_OPEN_WINDOW_MINUTES)
     is_rth_open_window = is_rth and local_time < rth_open_end
 
@@ -65,7 +73,8 @@ def classify_timestamp(raw_timestamp_utc: str) -> SessionInfo:
         session_date=session_date,
         is_rth=is_rth,
         is_rth_open_window=is_rth_open_window,
-        minutes_from_midnight_et=timestamp_et.hour * 60 + timestamp_et.minute,
+        minutes_from_midnight_et=minutes,
+        rth_close_minutes_et=close_minutes,
     )
 
 

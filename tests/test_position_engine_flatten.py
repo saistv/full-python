@@ -73,3 +73,33 @@ def test_flatten_now_cancels_pending_entry_and_is_noop_when_flat():
     bar2 = _bar("2025-10-01T14:32:00Z", 101.0)
     engine.process_pre_strategy(bar2, classify_timestamp(bar2.timestamp_utc))
     assert engine.position is None
+
+
+def test_early_close_uses_1259_backstop_in_simulation():
+    ledger = EventLedger()
+    config = SimulationConfig(
+        point_value=2.0,
+        commission_per_contract_round_trip=0.0,
+        entry_slippage_points=0.0,
+        exit_slippage_points=0.0,
+        rth_open_extra_entry_slippage_points=0.0,
+    )
+    engine = PositionEngine(config, _NullStrategy(), ledger)
+    signal = _bar("2025-11-28T17:57:00Z", 100.0)  # 12:57 ET, early close
+    fill = _bar("2025-11-28T17:58:00Z", 101.0)
+    backstop = _bar("2025-11-28T17:59:00Z", 103.0)
+
+    s1 = classify_timestamp(signal.timestamp_utc)
+    engine.process_pre_strategy(signal, s1)
+    engine.apply_strategy_result(signal, s1, _buy_result(signal))
+    engine.note_bar_processed(signal, s1)
+    s2 = classify_timestamp(fill.timestamp_utc)
+    engine.process_pre_strategy(fill, s2)
+    engine.note_bar_processed(fill, s2)
+    assert engine.position is not None
+
+    engine.process_pre_strategy(backstop, classify_timestamp(backstop.timestamp_utc))
+
+    assert engine.position is None
+    assert engine.trades[-1].exit_reason == "session_flatten"
+    assert engine.trades[-1].exit_timestamp_utc == backstop.timestamp_utc

@@ -111,7 +111,7 @@ def test_subscribe_requests_minute_chart_and_stores_subscription_ids() -> None:
     assert feed.realtime_id == 202
 
 
-def test_next_bar_queues_unique_matching_chart_bars_before_reading_more_events() -> None:
+def test_next_bar_replaces_forming_bar_and_emits_it_when_next_timestamp_arrives() -> None:
     first = _raw_bar("2026-07-07T14:31:00.000Z", close=100.5)
     duplicate = _raw_bar("2026-07-07T14:31:00Z", close=101.5)
     second = _raw_bar("2026-07-07T14:32:00.000Z", close=102.5)
@@ -125,18 +125,46 @@ def test_next_bar_queues_unique_matching_chart_bars_before_reading_more_events()
     feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
     feed.subscribe(closest_timestamp="2026-07-07T14:31Z", bars_back=5)
 
-    assert feed.next_bar(timeout_seconds=2.5).timestamp_utc == "2026-07-07T14:31:00Z"
+    finalized = feed.next_bar(timeout_seconds=2.5)
+    assert finalized.timestamp_utc == "2026-07-07T14:31:00Z"
+    assert finalized.close == 101.5
     assert len(ws.received_timeouts) == 3
     assert all(0.0 < value <= 2.5 for value in ws.received_timeouts)
 
-    next_bar = feed.next_bar(timeout_seconds=9.0)
-    assert next_bar.timestamp_utc == "2026-07-07T14:32:00Z"
-    assert next_bar.close == 102.5
-    assert len(ws.received_timeouts) == 3
-
+    # 14:32 is still forming. It must not be emitted until a newer timestamp
+    # proves that the minute is complete.
     assert feed.next_bar(timeout_seconds=1.0) is None
     assert len(ws.received_timeouts) == 4
     assert 0.0 < ws.received_timeouts[-1] <= 1.0
+
+
+def test_historical_batch_emits_every_bar_except_latest_forming_minute() -> None:
+    bars = [
+        _raw_bar("2026-07-07T14:30:00Z", close=100.0),
+        _raw_bar("2026-07-07T14:31:00Z", close=101.0),
+        _raw_bar("2026-07-07T14:32:00Z", close=102.0),
+    ]
+    ws = FakeChartWebSocket([_chart_event(101, bars)])
+    feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
+    feed.subscribe(closest_timestamp="2026-07-07T14:32Z", bars_back=3)
+
+    assert feed.next_bar(1.0).timestamp_utc == "2026-07-07T14:30:00Z"
+    assert feed.next_bar(1.0).timestamp_utc == "2026-07-07T14:31:00Z"
+    assert feed.next_bar(0.1) is None
+
+
+def test_later_snapshot_replaces_pending_forming_bar_across_events() -> None:
+    ws = FakeChartWebSocket([
+        _chart_event(101, [_raw_bar("2026-07-07T14:31:00Z", close=100.5)]),
+        _chart_event(202, [_raw_bar("2026-07-07T14:31:00Z", close=101.5)]),
+        _chart_event(202, [_raw_bar("2026-07-07T14:32:00Z", close=102.5)]),
+    ])
+    feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
+    feed.subscribe(closest_timestamp="2026-07-07T14:31Z", bars_back=1)
+
+    bar = feed.next_bar(2.0)
+    assert bar.timestamp_utc == "2026-07-07T14:31:00Z"
+    assert bar.close == 101.5
 
 
 def test_next_bar_stops_after_too_many_ignored_events() -> None:
@@ -173,7 +201,12 @@ def test_next_bar_uses_remaining_timeout_budget_for_ignored_events() -> None:
 
 
 def test_next_bar_matches_realtime_subscription_id() -> None:
-    ws = FakeChartWebSocket([_chart_event(202, [_raw_bar("2026-07-07T14:33:00Z")])])
+    ws = FakeChartWebSocket([
+        _chart_event(202, [
+            _raw_bar("2026-07-07T14:33:00Z"),
+            _raw_bar("2026-07-07T14:34:00Z"),
+        ])
+    ])
     feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
     feed.subscribe(closest_timestamp="2026-07-07T14:31Z", bars_back=5)
 
@@ -216,7 +249,15 @@ def test_feed_vendor_bar_is_consumed_by_live_bar_source() -> None:
                         "low": 99,
                         "close": 100.25,
                         "volume": 9,
-                    }
+                    },
+                    {
+                        "timestamp": "2025-11-03T14:32:00.000Z",
+                        "open": 100.25,
+                        "high": 101.25,
+                        "low": 100,
+                        "close": 101,
+                        "volume": 8,
+                    },
                 ],
             )
         ]

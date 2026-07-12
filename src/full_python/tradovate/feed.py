@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 import time
-from typing import Any, Deque, Dict, Optional, Protocol, Set
+from typing import Any, Deque, Dict, Optional, Protocol
 
 from full_python.livedata.feed import MarketDataFeed, VendorBar
 from full_python.tradovate.errors import TradovateFeedError
@@ -80,7 +80,8 @@ class TradovateMarketDataFeed(MarketDataFeed):
         self.historical_id: Optional[int] = None
         self.realtime_id: Optional[int] = None
         self._queue: Deque[VendorBar] = deque()
-        self._seen_timestamps: Set[str] = set()
+        self._forming_bar: Optional[VendorBar] = None
+        self._last_finalized_timestamp: Optional[str] = None
 
     def subscribe(self, closest_timestamp: str, bars_back: int) -> None:
         response = self.ws.request(
@@ -145,10 +146,36 @@ class TradovateMarketDataFeed(MarketDataFeed):
                 if not isinstance(raw, dict):
                     continue
                 bar = chart_bar_to_vendor_bar(symbol=self.symbol, raw=raw)
-                if bar.timestamp_utc in self._seen_timestamps:
-                    continue
-                self._seen_timestamps.add(bar.timestamp_utc)
-                self._queue.append(bar)
+                self._accept_snapshot(bar)
+
+    def _accept_snapshot(self, bar: VendorBar) -> None:
+        """Replace the forming minute; finalize only when time advances.
+
+        Tradovate chart messages are cumulative snapshots of the latest bar.
+        Repeated timestamps replace the previous snapshot. A timestamp is
+        complete only after a newer timestamp arrives.
+        """
+        forming = self._forming_bar
+        if forming is None:
+            if (
+                self._last_finalized_timestamp is not None
+                and bar.timestamp_utc <= self._last_finalized_timestamp
+            ):
+                return
+            self._forming_bar = bar
+            return
+
+        if bar.timestamp_utc == forming.timestamp_utc:
+            self._forming_bar = bar
+            return
+        if bar.timestamp_utc < forming.timestamp_utc:
+            # Historical and realtime subscriptions can overlap. Older bars
+            # have already been finalized and must not rewrite history.
+            return
+
+        self._queue.append(forming)
+        self._last_finalized_timestamp = forming.timestamp_utc
+        self._forming_bar = bar
 
     def _matches_subscription(self, chart: Dict[str, Any]) -> bool:
         chart_id = self._chart_id(chart)

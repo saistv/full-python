@@ -108,7 +108,7 @@ def test_intrabar_stop_fills_at_stop_with_exit_slippage() -> None:
     assert trade.exit_reason == "stop"
     assert trade.exit_price == 94.5  # stop 95 - 0.5 slippage
     assert not trade.ambiguous_exit
-    assert trade.mae_points >= 8.0
+    assert trade.mae_points == 7.0  # entry 102 to stop 95; low after stop is excluded
 
 
 def test_gap_through_stop_fills_at_open_not_stop() -> None:
@@ -200,6 +200,24 @@ def test_ambiguous_bar_stop_wins_and_is_flagged() -> None:
     assert trade.exit_reason == "stop"
     assert trade.ambiguous_exit
     assert trade.exit_price == 94.5
+
+
+def test_stop_bar_favorable_extreme_is_not_reported_as_confirmed_mfe() -> None:
+    bars = [
+        _bar("2026-06-30T13:46:00Z", 100.0, 100.0, 100.0, 100.0),
+        _bar("2026-06-30T13:47:00Z", 100.0, 100.0, 100.0, 100.0),
+        _bar("2026-06-30T13:48:00Z", 100.0, 120.0, 94.0, 110.0),
+    ]
+    strategy = ScriptedStrategy(
+        {0: lambda bar: _buy_intent(bar, stop_price=95.0)}
+    )
+
+    trade = SimulationEngine(CONFIG).run(bars, strategy).trades[0]
+
+    assert trade.exit_reason == "stop"
+    assert trade.mfe_points == 0.0  # confirmed lower bound; OHLC upper bound is 20
+    assert trade.mae_points == 6.0  # slipped entry 101 to raw stop 95
+    assert trade.ambiguous_exit
 
 
 def test_clean_target_hit_exits_at_target() -> None:

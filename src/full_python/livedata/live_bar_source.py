@@ -98,7 +98,7 @@ class LiveBarSource:
         if moment is None:
             return False
         session = classify_timestamp(_to_iso_z(moment))
-        return self._window.contains(session.minutes_from_midnight_et)
+        return session.is_rth and self._window.contains(session.minutes_from_midnight_et)
 
     def _normalize(self, vbar: VendorBar) -> MarketBar:
         session = classify_timestamp(vbar.timestamp_utc)

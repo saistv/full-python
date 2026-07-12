@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
 from full_python.tradovate.errors import TradovateConfigError
+from full_python.instruments import instrument_spec
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,15 @@ class TradovateAdapterConfig:
             raise TradovateConfigError("commission_per_contract_round_trip must be >= 0")
         if self.daily_loss_limit is not None and self.daily_loss_limit <= 0:
             raise TradovateConfigError("daily_loss_limit must be positive when set")
+        if self.dollar_point_value is not None:
+            try:
+                expected = instrument_spec(self.root_symbol).dollar_point_value
+            except ValueError as exc:
+                raise TradovateConfigError(str(exc)) from exc
+            if self.dollar_point_value != expected:
+                raise TradovateConfigError(
+                    f"{self.root_symbol} requires dollar_point_value={expected}"
+                )
 
 
 def credentials_from_env(env: Optional[Mapping[str, str]] = None) -> TradovateCredentials:

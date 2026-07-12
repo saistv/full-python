@@ -14,9 +14,10 @@ surface, offline-first (all tests run on fake transports). Safety model:
   applied, matching PositionEngine). If the stop cannot be confirmed the
   adapter flattens and raises. No OCO: the production strategy emits no
   target_price (N/A-by-design in the Failure Matrix).
-- Exits: result.exits cancel the working stop, then market-close. A stop
-  cancel failure halts WITHOUT submitting the close (two live closing
-  orders must never coexist). flatten() cancels working orders
+- Exits: result.exits request cancellation of the working stop and wait for
+  the asynchronous Canceled event before market-closing. A stop fill wins the
+  race and suppresses the close. A cancel failure halts without submitting a
+  second closing order. flatten() cancels working orders
   best-effort, liquidates, and registers the liquidation order so its
   fill is a known id.
 - Accounting is broker truth: FillPairingLedger pairs real fills into
@@ -31,11 +32,14 @@ surface, offline-first (all tests run on fake transports). Safety model:
 The six 2026-07-10 tracked gaps are CLOSED as of the 2026-07-10 gap-
 closure spec (docs/superpowers/specs/2026-07-10-tradovate-gap-closure-
 design.md); each is pinned by the Failure Matrix tests listed there.
-Partial fills remain fatal by design (OrderStateMachine raises).
+Multi-contract live orders are prohibited until partial-fill recovery is
+modeled. Any partial-fill event is therefore an invariant breach that requires
+broker reconciliation before proceeding.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional
 
 from full_python.data.sessions import SessionInfo, classify_timestamp
@@ -71,6 +75,13 @@ ROLE_PROTECTIVE_STOP = "protective_stop"
 ROLE_EXIT = "exit"
 
 
+class BrokerExecutionState(str, Enum):
+    NORMAL = "normal"
+    EXIT_PENDING_CANCEL = "exit_pending_cancel"
+    EXIT_PENDING_FILL = "exit_pending_fill"
+    RECOVERY_REQUIRED = "recovery_required"
+
+
 @dataclass
 class SubmittedOrder:
     order_id: str
@@ -81,6 +92,15 @@ class SubmittedOrder:
     stop_price: Optional[float] = None
     reason: str = ""
     status: str = "working"  # "working" | "filled" | "canceled" | "rejected"
+
+
+@dataclass(frozen=True)
+class PendingExit:
+    symbol: str
+    action: str
+    quantity: int
+    reason: str
+    stop_order_id: str
 
 
 class TradovateBroker:
@@ -108,6 +128,10 @@ class TradovateBroker:
         )
         self._position: Optional[BrokerPosition] = None
         self._working_stop_id: Optional[str] = None
+        self._pending_exit: Optional[PendingExit] = None
+        self._requested_cancel_ids: set[str] = set()
+        self._recovery_required = False
+        self._execution_state = BrokerExecutionState.NORMAL
         self._previous_session: Optional[SessionInfo] = None
         self._daily_limit_hit = False
 
@@ -174,34 +198,32 @@ class TradovateBroker:
             if not self._config.order_enabled:
                 self._events.append(Rejected(order_id="", reason="order_disabled"))
                 continue
-            self._cancel_working_stop_or_halt()
-            action = "Sell" if self._position.side == "long" else "Buy"
-            body = {
-                "accountSpec": self._config.account_spec,
-                "accountId": self._config.account_id,
-                "action": action,
-                "symbol": bar.symbol,
-                "orderQty": self._position.quantity,
-                "orderType": "Market",
-                "isAutomated": True,
-            }
-            response = self._rest_client.order_place(body)
-            order_id = str(response["orderId"])
-            self._orders[order_id] = SubmittedOrder(
-                order_id=order_id,
-                role=ROLE_EXIT,
-                side=action.lower(),
-                quantity=self._position.quantity,
+            if self._pending_exit is not None:
+                continue
+            stop_id = self._working_stop_id
+            if stop_id is None:
+                raise TradovateStateError(
+                    "strategy exit requested for an unprotected open position"
+                )
+            self._pending_exit = PendingExit(
                 symbol=bar.symbol,
+                action="Sell" if self._position.side == "long" else "Buy",
+                quantity=self._position.quantity,
                 reason=exit_decision.reason,
+                stop_order_id=stop_id,
             )
-            self._events.append(Acked(order_id=order_id))
+            self._execution_state = BrokerExecutionState.EXIT_PENDING_CANCEL
+            self._request_cancel_or_halt(stop_id)
         for intent in result.order_intents:
             if not self._config.order_enabled:
                 self._events.append(Rejected(order_id="", reason="order_disabled"))
                 continue
             if "stop_price" not in intent.metadata:
                 raise TradovateOrderSafetyError("stop_price metadata required")
+            if intent.quantity != 1:
+                raise TradovateOrderSafetyError(
+                    "live quantity must equal 1 until partial-fill recovery is modeled"
+                )
             body = {
                 "accountSpec": self._config.account_spec,
                 "accountId": self._config.account_id,
@@ -211,8 +233,16 @@ class TradovateBroker:
                 "orderType": "Market",
                 "isAutomated": True,
             }
-            response = self._rest_client.order_place(body)
-            order_id = str(response["orderId"])
+            try:
+                response = self._rest_client.order_place(body)
+            except TradovateError as exc:
+                self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
+                raise TradovateStateError(
+                    "entry submission outcome unknown; broker reconciliation required"
+                ) from exc
+            order_id = self._order_id_or_reject(response, role=ROLE_ENTRY)
+            if order_id is None:
+                continue
             self._orders[order_id] = SubmittedOrder(
                 order_id=order_id,
                 role=ROLE_ENTRY,
@@ -235,17 +265,24 @@ class TradovateBroker:
     def flatten(self, bar: MarketBar, reason: str) -> None:
         if not self._config.flatten_enabled:
             raise TradovateOrderSafetyError("flatten_disabled")
+        self._recovery_required = True
+        self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
+        self._cancel_working_orders_best_effort()
         position = self._position
         if position is None:
             return
-        self._cancel_working_orders_best_effort()
-        response = self._rest_client.order_liquidate_position({
-            "accountSpec": self._config.account_spec,
-            "accountId": self._config.account_id,
-            "symbol": bar.symbol,
-            "admin": False,
-        })
-        order_id = str(response["orderId"])
+        try:
+            response = self._rest_client.order_liquidate_position({
+                "accountSpec": self._config.account_spec,
+                "accountId": self._config.account_id,
+                "symbol": bar.symbol,
+                "admin": False,
+            })
+        except TradovateError as exc:
+            raise TradovateStateError(
+                "liquidation submission outcome unknown; broker reconciliation required"
+            ) from exc
+        order_id = self._required_order_id(response, "liquidation")
         self._orders[order_id] = SubmittedOrder(
             order_id=order_id,
             role=ROLE_EXIT,
@@ -268,9 +305,11 @@ class TradovateBroker:
             self._reconcile_position_event(event.data)
             return
         if event.kind == "partial_fill":
-            self._known_order(str(event.data["orderId"]))
+            order = self._known_order(str(event.data["orderId"]))
             self._events.append(_partial_fill_from_data(event.data))
-            return
+            raise TradovateStateError(
+                f"partial fill for order {order.order_id}; broker reconciliation required"
+            )
         if event.kind == "fill":
             self._ingest_fill(_fill_from_data(event.data))
             return
@@ -326,6 +365,12 @@ class TradovateBroker:
             stop_price=order.stop_price if order.stop_price is not None else 0.0,
             session_date=session_date,
         )
+        if order.order_id in self._requested_cancel_ids and self._recovery_required:
+            self._emergency_flatten(order.symbol)
+            raise TradovateStateError(
+                f"entry order {order.order_id} filled after flatten cancellation; "
+                "emergency flatten requested"
+            )
         self._submit_protective_stop(fill, order)
 
     def _submit_protective_stop(self, fill: Filled, entry_order: SubmittedOrder) -> None:
@@ -347,7 +392,11 @@ class TradovateBroker:
             raise TradovateStateError(
                 "protective stop submission failed; emergency flatten requested"
             ) from exc
-        stop_id = str(response["orderId"])
+        try:
+            stop_id = self._required_order_id(response, "protective stop")
+        except TradovateStateError:
+            self._emergency_flatten(entry_order.symbol)
+            raise
         self._orders[stop_id] = SubmittedOrder(
             order_id=stop_id,
             role=ROLE_PROTECTIVE_STOP,
@@ -365,6 +414,8 @@ class TradovateBroker:
         # so no flag check here. Best-effort: the TradovateStateError raised at
         # the call site halts the loop regardless; a cancel/liquidate failure
         # leaves the account to the operator, which is exactly what halt means.
+        self._recovery_required = True
+        self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
         self._cancel_working_orders_best_effort()
         try:
             response = self._rest_client.order_liquidate_position({
@@ -375,7 +426,10 @@ class TradovateBroker:
             })
         except TradovateError:
             return
-        order_id = str(response["orderId"])
+        try:
+            order_id = self._required_order_id(response, "emergency liquidation")
+        except TradovateStateError:
+            return
         position = self._position
         self._orders[order_id] = SubmittedOrder(
             order_id=order_id,
@@ -395,22 +449,63 @@ class TradovateBroker:
                 continue
             try:
                 self._rest_client.order_cancel({"orderId": int(order.order_id)})
+                self._requested_cancel_ids.add(order.order_id)
             except TradovateError:
                 continue
 
-    def _cancel_working_stop_or_halt(self) -> None:
-        stop_id = self._working_stop_id
-        if stop_id is None:
-            return
+    def _request_cancel_or_halt(self, stop_id: str) -> None:
         try:
             self._rest_client.order_cancel({"orderId": int(stop_id)})
         except TradovateError as exc:
             # Two live closing orders must never coexist. The stop still
             # protects the position; halt for human review instead of
             # submitting the market close.
+            self._pending_exit = None
+            self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
             raise TradovateStateError(
                 f"failed to cancel protective stop {stop_id} before exit"
             ) from exc
+        self._requested_cancel_ids.add(stop_id)
+
+    def _submit_pending_exit(self) -> None:
+        pending = self._pending_exit
+        if pending is None:
+            return
+        body = {
+            "accountSpec": self._config.account_spec,
+            "accountId": self._config.account_id,
+            "action": pending.action,
+            "symbol": pending.symbol,
+            "orderQty": pending.quantity,
+            "orderType": "Market",
+            "isAutomated": True,
+        }
+        try:
+            response = self._rest_client.order_place(body)
+        except TradovateError as exc:
+            self._pending_exit = None
+            self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
+            raise TradovateStateError(
+                "exit submission outcome unknown after stop cancellation; "
+                "broker reconciliation required"
+            ) from exc
+        try:
+            order_id = self._required_order_id(response, "strategy exit")
+        except TradovateStateError:
+            self._pending_exit = None
+            self._emergency_flatten(pending.symbol)
+            raise
+        self._register_order(SubmittedOrder(
+            order_id=order_id,
+            role=ROLE_EXIT,
+            side=pending.action.lower(),
+            quantity=pending.quantity,
+            symbol=pending.symbol,
+            reason=pending.reason,
+        ))
+        self._pending_exit = None
+        self._execution_state = BrokerExecutionState.EXIT_PENDING_FILL
+        self._events.append(Acked(order_id=order_id))
 
     def _on_exit_fill(self, fill: Filled, order: SubmittedOrder) -> None:
         position = self._position
@@ -430,7 +525,16 @@ class TradovateBroker:
             )
         if order.order_id == self._working_stop_id:
             self._working_stop_id = None
+        if (
+            order.role == ROLE_PROTECTIVE_STOP
+            and self._pending_exit is not None
+            and self._pending_exit.stop_order_id == order.order_id
+        ):
+            self._pending_exit = None
+            self._requested_cancel_ids.discard(order.order_id)
         self._position = None
+        if not self._recovery_required:
+            self._execution_state = BrokerExecutionState.NORMAL
         self._fill_ledger.close_leg(
             price=fill.price,
             timestamp_utc=fill.timestamp_utc,
@@ -450,13 +554,58 @@ class TradovateBroker:
             raise TradovateStateError(
                 f"protective stop {order.order_id} rejected; emergency flatten requested"
             )
+        if order.role == ROLE_EXIT:
+            if order.reason != "emergency_flatten":
+                self._emergency_flatten(order.symbol)
+            raise TradovateStateError(
+                f"exit order {order.order_id} rejected; recovery required"
+            )
 
     def _ingest_cancel(self, data: dict[str, Any]) -> None:
         order = self._known_order(str(data["orderId"]))
+        requested = order.order_id in self._requested_cancel_ids
+        self._requested_cancel_ids.discard(order.order_id)
         order.status = "canceled"
         if order.order_id == self._working_stop_id:
             self._working_stop_id = None
         self._events.append(Canceled(order_id=order.order_id))
+        if order.role == ROLE_PROTECTIVE_STOP and self._position is not None:
+            pending = self._pending_exit
+            if requested and pending is not None and pending.stop_order_id == order.order_id:
+                self._submit_pending_exit()
+                return
+            if requested and self._recovery_required:
+                return
+            self._emergency_flatten(order.symbol)
+            raise TradovateStateError(
+                f"protective stop {order.order_id} canceled unexpectedly; "
+                "emergency flatten requested"
+            )
+
+    def _order_id_or_reject(self, response: Any, *, role: str) -> Optional[str]:
+        if isinstance(response, dict) and response.get("orderId") is not None:
+            order_id = str(response["orderId"])
+            if order_id in self._orders:
+                raise TradovateStateError(f"duplicate broker order id {order_id}")
+            return order_id
+        reason = response.get("failureReason") if isinstance(response, dict) else None
+        if role == ROLE_ENTRY and reason:
+            self._events.append(Rejected(order_id="", reason=str(reason)))
+            return None
+        raise TradovateStateError(
+            f"{role} response missing orderId: {response!r}"
+        )
+
+    def _required_order_id(self, response: Any, operation: str) -> str:
+        order_id = self._order_id_or_reject(response, role=operation)
+        if order_id is None:  # only entry responses can return None
+            raise TradovateStateError(f"{operation} response rejected")
+        return order_id
+
+    def _register_order(self, order: SubmittedOrder) -> None:
+        if order.order_id in self._orders:
+            raise TradovateStateError(f"duplicate broker order id {order.order_id}")
+        self._orders[order.order_id] = order
 
     def _reconcile_position_event(self, data: dict[str, Any]) -> None:
         reported = _position_from_data(data)
@@ -515,6 +664,10 @@ class TradovateBroker:
     @property
     def position(self) -> Optional[BrokerPosition]:
         return self._position
+
+    @property
+    def execution_state(self) -> BrokerExecutionState:
+        return self._execution_state
 
     @property
     def trades(self) -> list[Trade]:

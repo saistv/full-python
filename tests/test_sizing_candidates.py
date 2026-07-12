@@ -45,24 +45,14 @@ def test_1nq_vs_1mnq_sizing_comparison_on_the_frozen_window(tmp_path: Path) -> N
     nq_report = json.loads(nq_report_path.read_text(encoding="utf-8"))
     mnq_report = json.loads(mnq_report_path.read_text(encoding="utf-8"))
 
-    # NOTE: trade count is NOT expected to be identical between the two runs.
-    # The original assumption here ("same signal core -> same trade count,
-    # only P&L scales") was wrong for adaptive_trend_am specifically: its
-    # daily-loss-limit guard and projected-risk sizing cap are denominated
-    # in DOLLARS ($1,000), not points, so the same point-distance stop
-    # translates to a different effective dollar-risk budget at NQ's
-    # point_value=20 vs MNQ's point_value=2 -- the guard blocks/allows a
-    # different set of entries at each scale. Confirmed empirically: NQ
-    # took 115 trades, MNQ took 129 (14 more, all previously blocked by the
-    # DLL projected-risk guard at NQ's larger effective dollar risk per
-    # point). This is itself a real, documented finding -- see
-    # docs/decisions/2026-07-04-sizing-research-gate.md -- not a bug to
-    # paper over with a looser assertion.
+    # Dollar-denominated sizing and daily risk are intentionally evaluated
+    # with the execution instrument's point value. NQ and MNQ can therefore
+    # take different quantities and even different trade populations.
+    assert nq_report["strategy"]["dollar_point_value"] == 20.0
+    assert mnq_report["strategy"]["dollar_point_value"] == 2.0
+    assert nq_report["simulation"]["point_value"] == 20.0
+    assert mnq_report["simulation"]["point_value"] == 2.0
+    assert nq_report["execution_instrument"]["root"] == "NQ"
+    assert mnq_report["execution_instrument"]["root"] == "MNQ"
     assert nq_report["survivability"]["trade_count"] > 0
     assert mnq_report["survivability"]["trade_count"] > 0
-    # NQ P&L should be roughly ~10x MNQ P&L (10x point value, 10x commission)
-    # but not exactly, since the two runs don't even share the same trade
-    # population (see above) -- assert a sane band, not an exact 10x.
-    if mnq_report["survivability"]["net_pnl"] != 0:
-        ratio = nq_report["survivability"]["net_pnl"] / mnq_report["survivability"]["net_pnl"]
-        assert 8.0 < ratio < 12.0

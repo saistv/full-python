@@ -4,13 +4,17 @@ from full_python.data.sessions import classify_timestamp
 from full_python.execution.broker_protocol import (
     Acked,
     BrokerPosition,
+    Canceled,
     Filled,
     PartialFilled,
     Rejected,
 )
-from full_python.execution.state_machine import ExecutionInvariantError, OrderStateMachine
 from full_python.models import MarketBar, OrderIntent, StrategyResult
-from full_python.tradovate.broker import TradovateBroker, TradovateRawEvent
+from full_python.tradovate.broker import (
+    BrokerExecutionState,
+    TradovateBroker,
+    TradovateRawEvent,
+)
 from full_python.tradovate.config import DEMO_ENVIRONMENT, TradovateAdapterConfig
 from full_python.tradovate.errors import TradovateOrderSafetyError
 
@@ -79,14 +83,14 @@ def _session(bar=None):
     return classify_timestamp((bar or _bar()).timestamp_utc)
 
 
-def _entry_result(bar=None, side="buy", metadata=None):
+def _entry_result(bar=None, side="buy", metadata=None, quantity=1):
     bar = bar or _bar()
     return StrategyResult(order_intents=(
         OrderIntent.market_entry(
             timestamp_utc=bar.timestamp_utc,
             symbol=bar.symbol,
             side=side,
-            quantity=1,
+            quantity=quantity,
             reason="adaptive_trend",
             metadata={"stop_price": 95.0} if metadata is None else metadata,
         ),
@@ -166,20 +170,23 @@ def test_fill_raw_event_updates_position_and_emits_filled():
     )]
 
 
-def test_partial_fill_raw_event_maps_to_partial_filled():
+def test_partial_fill_event_requires_reconciliation_and_halts():
     broker, _rest = _entered_broker()
 
-    broker.ingest_raw_event(TradovateRawEvent(
-        kind="partial_fill",
-        data={
-            "orderId": 102,
-            "action": "Sell",
-            "qty": 1,
-            "remaining": 2,
-            "price": 100.25,
-            "timestamp": "2026-07-07T14:32:00Z",
-        },
-    ))
+    from full_python.tradovate.errors import TradovateStateError
+
+    with pytest.raises(TradovateStateError, match="partial fill"):
+        broker.ingest_raw_event(TradovateRawEvent(
+            kind="partial_fill",
+            data={
+                "orderId": 102,
+                "action": "Sell",
+                "qty": 1,
+                "remaining": 2,
+                "price": 100.25,
+                "timestamp": "2026-07-07T14:32:00Z",
+            },
+        ))
 
     partials = [e for e in broker.poll_events() if isinstance(e, PartialFilled)]
     assert partials == [PartialFilled(
@@ -227,25 +234,13 @@ def test_flatten_enabled_with_position_calls_liquidate_position():
     }]
 
 
-def test_partial_fill_event_from_broker_is_fatal_for_order_state_machine():
+def test_multi_contract_live_entry_is_forbidden_until_partial_fills_are_modeled():
     broker, _rest = _entered_broker()
-    broker.poll_events()  # drain entry lifecycle events
-    broker.ingest_raw_event(TradovateRawEvent(
-        kind="partial_fill",
-        data={
-            "orderId": 102,
-            "action": "Sell",
-            "qty": 1,
-            "remaining": 1,
-            "price": 100.25,
-            "timestamp": "2026-07-07T14:32:00Z",
-        },
-    ))
 
-    sm = OrderStateMachine()
-    with pytest.raises(ExecutionInvariantError, match="partial fill not modeled"):
-        for event in broker.poll_events():
-            sm.on_event(event)
+    with pytest.raises(TradovateOrderSafetyError, match="quantity must equal 1"):
+        broker.apply_strategy_result(
+            _bar(), _session(), _entry_result(quantity=2)
+        )
 
 
 def test_fill_for_unknown_order_id_raises_state_error():
@@ -380,6 +375,13 @@ def test_strategy_exit_cancels_stop_then_market_closes():
     broker.apply_strategy_result(bar, _session(bar), _exit_result(bar))
 
     assert rest.canceled == [{"orderId": 102}]
+    assert broker.execution_state == BrokerExecutionState.EXIT_PENDING_CANCEL
+    # A REST-accepted cancel is only a request. No close may coexist with the
+    # stop before the asynchronous cancellation event confirms final state.
+    assert [b for b in rest.placed if b["orderType"] == "Market"] == [rest.placed[0]]
+
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+    assert broker.execution_state == BrokerExecutionState.EXIT_PENDING_FILL
     close_bodies = [b for b in rest.placed if b["orderType"] == "Market"][1:]
     assert close_bodies == [{
         "accountSpec": "DEMO123",
@@ -391,10 +393,10 @@ def test_strategy_exit_cancels_stop_then_market_closes():
         "isAutomated": True,
     }]
     # exit fill closes the trade with the strategy's reason
-    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
     broker.ingest_raw_event(_fill_event(103, action="Sell", price=101.25,
                                         ts="2026-07-07T14:33:00Z"))
     assert broker.position is None
+    assert broker.execution_state == BrokerExecutionState.NORMAL
 
 
 def test_strategy_exit_while_flat_is_a_no_op():
@@ -422,6 +424,35 @@ def test_strategy_exit_stop_cancel_failure_halts_without_close_order():
     assert [b for b in rest.placed if b["orderType"] == "Market"] == [rest.placed[0]]
 
 
+def test_stop_fill_wins_cancel_race_and_suppresses_market_exit():
+    broker, rest = _entered_broker()
+    broker.apply_strategy_result(_bar(), _session(), _exit_result())
+
+    broker.ingest_raw_event(_fill_event(
+        102, action="Sell", price=95.0, ts="2026-07-07T14:33:00Z"
+    ))
+
+    assert broker.position is None
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+    assert [b for b in rest.placed if b["orderType"] == "Market"] == [rest.placed[0]]
+
+
+def test_exit_rejection_after_confirmed_stop_cancel_emergency_flattens_and_halts():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, rest = _entered_broker()
+    broker.apply_strategy_result(_bar(), _session(), _exit_result())
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+
+    with pytest.raises(TradovateStateError, match="exit order 103 rejected"):
+        broker.ingest_raw_event(TradovateRawEvent(
+            kind="reject", data={"orderId": 103, "reason": "market_halted"},
+        ))
+
+    assert len(rest.liquidations) == 1
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
 def test_exit_fill_quantity_mismatch_raises_state_error():
     from full_python.tradovate.errors import TradovateStateError
 
@@ -431,15 +462,17 @@ def test_exit_fill_quantity_mismatch_raises_state_error():
         broker.ingest_raw_event(_fill_event(102, action="Sell", qty=3))
 
 
-def test_cancel_event_for_known_order_emits_canceled():
-    from full_python.execution.broker_protocol import Canceled
+def test_unsolicited_protective_stop_cancel_flattens_and_halts():
+    from full_python.tradovate.errors import TradovateStateError
 
-    broker, _rest = _entered_broker()
+    broker, rest = _entered_broker()
 
-    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+    with pytest.raises(TradovateStateError, match="canceled unexpectedly"):
+        broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
 
     cancels = [e for e in broker.poll_events() if isinstance(e, Canceled)]
     assert cancels == [Canceled(order_id="102")]
+    assert len(rest.liquidations) == 1
 
 
 def test_flatten_while_flat_is_a_no_op():
@@ -449,6 +482,45 @@ def test_flatten_while_flat_is_a_no_op():
     broker.flatten(_bar(), "supervisor_halt")
 
     assert rest.liquidations == []
+
+
+def test_flatten_while_flat_cancels_working_entry_and_late_fill_recovers():
+    from full_python.tradovate.errors import TradovateStateError
+
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    broker.flatten(_bar(), "supervisor_halt")
+    assert rest.canceled == [{"orderId": 101}]
+    assert rest.liquidations == []
+
+    with pytest.raises(TradovateStateError, match="filled after flatten cancellation"):
+        broker.ingest_raw_event(_fill_event(101))
+    assert len(rest.liquidations) == 1
+
+
+def test_entry_failure_response_is_rejected_without_key_error():
+    rest = FakeRestClient()
+    rest.order_place_responses = [{"failureReason": "outside_market_hours"}]
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    assert broker.poll_events() == [
+        Rejected(order_id="", reason="outside_market_hours")
+    ]
+
+
+def test_entry_transport_error_maps_to_halting_state_error():
+    from full_python.tradovate.errors import TradovateRequestError, TradovateStateError
+
+    rest = FakeRestClient()
+    rest.order_place_error = TradovateRequestError("timeout")
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+
+    with pytest.raises(TradovateStateError, match="outcome unknown"):
+        broker.apply_strategy_result(_bar(), _session(), _entry_result())
 
 
 def test_flatten_while_short_cancels_stop_then_liquidates():

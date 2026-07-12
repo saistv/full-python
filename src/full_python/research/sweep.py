@@ -20,6 +20,7 @@ in the prior-vol evaluation.
 from __future__ import annotations
 
 import math
+import dataclasses
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional, Sequence
@@ -241,6 +242,10 @@ def run_grid(
     for overrides in overrides_list:
         try:
             config = AdaptiveTrendConfig(**{**base_config.to_dict(), **overrides})
+            if config.dollar_point_value != sim_config.point_value:
+                config = dataclasses.replace(
+                    config, dollar_point_value=sim_config.point_value
+                )
             strategy = AdaptiveTrendStrategy(config)
             outcome = SimulationEngine(sim_config).run(bars, strategy)
             trades = tuple(

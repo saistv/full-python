@@ -9,6 +9,7 @@ from full_python.events import EventLedger, EventRecord, EventType
 from full_python.live.recording import RecordingStrategy
 from full_python.live.session_report import (
     bars_from_ledger,
+    diff_bars,
     diff_signals,
     recorded_signals,
     replay_signals,
@@ -33,6 +34,17 @@ def _ledger_with_bars(count: int = 5) -> EventLedger:
     return ledger
 
 
+def _write_reference(path: Path, ledger: EventLedger) -> Path:
+    bars = bars_from_ledger(ledger)
+    lines = ["timestamp,symbol,open,high,low,close,volume"]
+    lines.extend(
+        f"{b.timestamp_utc},{b.symbol},{b.open},{b.high},{b.low},{b.close},{b.volume}"
+        for b in bars
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def test_bars_roundtrip_from_ledger() -> None:
     ledger = _ledger_with_bars(3)
     bars = bars_from_ledger(ledger)
@@ -48,7 +60,8 @@ def test_quiet_session_is_parity(tmp_path) -> None:
     ledger.write_jsonl(events)
     html = tmp_path / "report.html"
 
-    exit_code = run_report(events, html)
+    reference = _write_reference(tmp_path / "reference.csv", ledger)
+    exit_code = run_report(events, html, reference_bars_path=reference)
 
     assert exit_code == 0
     text = html.read_text(encoding="utf-8")
@@ -62,7 +75,8 @@ def test_empty_ledger_is_no_data_not_vacuous_parity(tmp_path) -> None:
     ledger.write_jsonl(events)
     html = tmp_path / "report.html"
 
-    exit_code = run_report(events, html)
+    reference = _write_reference(tmp_path / "reference.csv", ledger)
+    exit_code = run_report(events, html, reference_bars_path=reference)
 
     assert exit_code == 1
     text = html.read_text(encoding="utf-8")
@@ -97,6 +111,36 @@ def test_diff_reports_index_and_both_sides() -> None:
     assert len(divergences) == 1
     assert "live=" in divergences[0] and "replay=" in divergences[0]
     assert diff_signals([], []) == []
+
+
+def test_report_without_independent_bars_is_unverified(tmp_path) -> None:
+    ledger = _ledger_with_bars(3)
+    events = tmp_path / "events.jsonl"
+    ledger.write_jsonl(events)
+    html = tmp_path / "report.html"
+
+    assert run_report(events, html) == 1
+    assert "BAR-UNVERIFIED" in html.read_text(encoding="utf-8")
+
+
+def test_independent_bar_difference_blocks_parity() -> None:
+    captured = bars_from_ledger(_ledger_with_bars(3))
+    changed = list(captured)
+    bar = changed[1]
+    changed[1] = MarketBar(
+        timestamp_utc=bar.timestamp_utc,
+        symbol=bar.symbol,
+        open=bar.open,
+        high=bar.high,
+        low=bar.low,
+        close=bar.close + 1.0,
+        volume=bar.volume,
+    )
+
+    differences = diff_bars(captured, changed)
+
+    assert len(differences) == 1
+    assert bar.timestamp_utc in differences[0]
 
 
 def test_halts_are_listed_in_the_report(tmp_path) -> None:
@@ -225,7 +269,8 @@ def test_report_on_frozen_anchor_bars_has_real_signals_and_flags_corruption(tmp_
     ledger.write_jsonl(events)
     html = tmp_path / "report.html"
 
-    exit_code = run_report(events, html)
+    reference = _write_reference(tmp_path / "reference.csv", ledger)
+    exit_code = run_report(events, html, reference_bars_path=reference)
 
     assert exit_code == 0
     text = html.read_text(encoding="utf-8")
@@ -252,7 +297,7 @@ def test_report_on_frozen_anchor_bars_has_real_signals_and_flags_corruption(tmp_
     assert flipped, "expected at least one recorded ORDER_INTENT in the anchor slice"
     corrupted.write_jsonl(events)
 
-    exit_code = run_report(events, html)
+    exit_code = run_report(events, html, reference_bars_path=reference)
     assert exit_code == 1
 
 
@@ -269,7 +314,8 @@ def test_sim_section_degrades_gracefully_when_sim_trades_fails(tmp_path, monkeyp
     ledger.write_jsonl(events)
     html = tmp_path / "report.html"
 
-    exit_code = run_report(events, html)
+    reference = _write_reference(tmp_path / "reference.csv", ledger)
+    exit_code = run_report(events, html, reference_bars_path=reference)
 
     assert exit_code == 0
     text = html.read_text(encoding="utf-8")

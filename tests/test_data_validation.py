@@ -55,7 +55,7 @@ def test_malformed_ohlc_is_structural() -> None:
     assert report.issue_counts["non_positive_price"] == 1
 
 
-def test_intra_session_gap_is_informational_not_structural() -> None:
+def test_rth_gap_is_structural() -> None:
     report = validate_bars(
         [
             _bar("2026-06-30T13:30:00Z"),
@@ -63,9 +63,23 @@ def test_intra_session_gap_is_informational_not_structural() -> None:
         ]
     )
 
-    assert report.is_structurally_clean
+    assert not report.is_structurally_clean
+    assert report.issue_counts["rth_gap"] == 1
     assert report.intra_session_gap_count == 1
     assert report.max_intra_session_gap_minutes == 6.0
+
+
+def test_overnight_gap_is_counted_but_not_structural() -> None:
+    report = validate_bars(
+        [
+            _bar("2026-06-30T06:00:00Z"),
+            _bar("2026-06-30T06:06:00Z"),
+        ]
+    )
+
+    assert report.is_structurally_clean
+    assert report.intra_session_gap_count == 1
+    assert "rth_gap" not in report.issue_counts
 
 
 def test_overnight_session_boundary_is_not_a_gap() -> None:
