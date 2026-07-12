@@ -95,7 +95,10 @@ Do not skip the review step, and do not merge red tests.
 - **Phase 2 robust experimentation — IN PROGRESS.** SQLite trial-budget
   registry and anchored fold reporting are built. Baseline walk-forward is
   positive in 5/7 NQ and 4/7 MNQ six-month folds; both halves of 2023 lose.
-  See `2026-07-12-phase2-baseline-walk-forward.md`.
+  The four-level NQ execution-cost axis also passes through 2 points per side
+  ($120,010 net, PF 1.292, -$27,070 DD). See
+  `2026-07-12-phase2-baseline-walk-forward.md` and
+  `2026-07-12-phase2-execution-cost-axis.md`.
 
 - **Baseline frozen & TV-reconciled** — Python engine matches TradingView
   106/106 trades at $0.00 entry-price delta on the 9-month anchor.
