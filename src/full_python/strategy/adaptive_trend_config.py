@@ -7,12 +7,11 @@ import json
 
 @dataclass(frozen=True)
 class AdaptiveTrendConfig:
-    """Validated production calibration ($251K / PF 2.071 / 448 trades).
+    """TradingView-reconciled signal calibration.
 
-    Defaults ARE the production config. Changing production requires
-    >= $275K net AND PF >= 2.071 on the same 3-year TradingView backtest.
-    M2 scope is flat 1-contract parity: anti-martingale and the daily
-    loss limit are not ported yet (M2b).
+    The old $251K / PF 2.071 TradingView headline is a retired historical
+    artifact. Python reports and the pre-registered Gate 1 protocol are the
+    performance and promotion authority.
     """
 
     name: str = "adaptive_trend_v66_flat"

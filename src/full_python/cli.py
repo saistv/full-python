@@ -14,6 +14,7 @@ from full_python.data.validation import validate_bars
 from full_python.events import EventType
 from full_python.instruments import instrument_for_point_value, instrument_spec
 from full_python.reporting.html_report import render_html_report
+from full_python.reporting.bootstrap import build_block_bootstrap_report
 from full_python.reporting.survivability import (
     TradeResult,
     build_daily_metrics,
@@ -257,6 +258,8 @@ def run_baseline(
         ]
     )
     daily_metrics = build_daily_metrics(daily_pnl, list(result.session_dates))
+    daily_series = [daily_pnl.get(day, 0.0) for day in result.session_dates]
+    bootstrap = build_block_bootstrap_report(daily_series)
     monthly = build_monthly_breakdown(daily_pnl)
     exit_reasons: dict[str, int] = {}
     ambiguous_exits = 0
@@ -292,6 +295,7 @@ def run_baseline(
         "daily_pnl_path": str(daily_path),
         "survivability": survivability.to_dict(),
         "daily": daily_metrics.to_dict(),
+        "bootstrap": bootstrap.to_dict(),
         "monthly": monthly,
         "exit_reasons": exit_reasons,
         "ambiguous_exits": ambiguous_exits,

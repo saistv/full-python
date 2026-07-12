@@ -30,3 +30,9 @@ def test_survivability_report_tracks_top_trade_dependency() -> None:
     assert report.pnl_without_best_trade == -50.0
     assert report.long_pnl == 400.0
     assert report.short_pnl == 50.0
+    assert report.win_rate == 2 / 3
+    assert report.expectancy_per_trade == 150.0
+    assert report.profit_factor == 5.5
+    assert report.pnl_without_top_3_trades == -100.0
+    assert report.pnl_without_top_5_trades == -100.0
+    assert report.pnl_without_top_10_trades == -100.0

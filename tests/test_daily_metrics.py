@@ -16,6 +16,11 @@ def test_flat_days_count_in_sharpe_and_day_rates() -> None:
     assert metrics.best_day_pnl == 200.0
     assert metrics.worst_day_pnl == -100.0
     assert metrics.best_day_share == 2.0  # 200 best day on 100 net
+    assert metrics.pnl_without_top_1_day == -100.0
+    assert metrics.pnl_without_top_3_days == -100.0
+    assert metrics.pnl_without_top_5_days == -100.0
+    assert metrics.pnl_without_top_10_days == -100.0
+    assert metrics.top_5_day_share == 2.0
     assert metrics.sharpe_annualized != 0.0
 
 

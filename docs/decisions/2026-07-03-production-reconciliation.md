@@ -1,5 +1,9 @@
 # Production Reconciliation — engine vs v6.7-tp-exec 3-year TV export
 
+> **Historical record, superseded as performance authority.** The `$251K / PF
+> 2.071` figure discussed below was never backed by a reproducible export. It
+> must not be used as a current baseline or promotion threshold.
+
 Target: `v6.7-tp-exec_CME_MINI_NQ1!_2026-05-23_60ce8.csv` (437 trades,
 2023-05-30 → 2026-05-22). Second file `9abf7` is the same entry set
 (434 shared) with lighter sizing — a scaleA variant.

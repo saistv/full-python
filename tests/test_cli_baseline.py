@@ -34,6 +34,9 @@ def test_run_baseline_writes_event_log_and_report(tmp_path: Path) -> None:
     assert report["data"]["column_map"]["timestamp"] == "timestamp"
     assert report["survivability"]["trade_count"] == 0
     assert len(report["strategy"]["parameter_hash"]) == 64
+    assert report["bootstrap"]["draws"] == 2000
+    assert report["bootstrap"]["block_length_sessions"] == 1
+    assert "profit_factor" in report["survivability"]
 
 
 def test_adaptive_strategy_uses_execution_instrument_point_value(tmp_path: Path) -> None:

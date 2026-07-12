@@ -1,5 +1,11 @@
 # Capital Allocation / Sizing Gate — 5-Year Re-Run (2026-07-06)
 
+> **SUPERSEDED 2026-07-12.** The MNQ strategy used `$20/point` for projected
+> risk while simulation accounting used `$2/point`. Its trade permissions,
+> quantities, P&L, drawdown, and NQ/MNQ efficiency conclusion are invalid.
+> See `2026-07-12-phase0-correctness-remediation.md`. This file remains only
+> as an audit trail.
+
 Re-runs the 1 NQ vs MNQ sizing comparison that
 `docs/decisions/2026-07-04-sizing-research-gate.md` explicitly deferred
 ("Re-run this exact comparison once a multi-year dataset exists" — the

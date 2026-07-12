@@ -20,9 +20,11 @@ the cost of the validated core, which no analysis this year has beaten.
 
 ## 2. Non-negotiable guardrails (violating these loses money or wastes weeks)
 
-1. **No config change ships without ≥ $275,000 net P&L AND PF ≥ 2.071 on
-   the same 3-year TradingView backtest.** No exceptions. The locked
-   config sits at ~$251K / PF 2.071. Nothing has cleared the bar.
+1. **Python is the performance authority.** The historical
+   `$251K / PF 2.071 / 448 trades` TradingView claim is unreproducible and
+   must not be used as a baseline or promotion threshold. Candidate changes
+   use the pre-registered Gate 1 conjunction against the corrected Python
+   control on identical data and execution assumptions.
 2. **Pre-registered evaluation only (Gate 1 protocol).** Lock the success
    criteria BEFORE running a sweep
    (`docs/decisions/2026-07-05-gate1-phase0-protocol.md`). If a result
@@ -166,13 +168,13 @@ Check open PRs before assuming what is merged.
 | Squeeze | momentum + release + accelerating, all ON |
 | Trend filters | ATF sens 4.5 (len 12/22), MA50 + MA200 ON |
 
-**Realistic earnings (1 NQ, backtest, pessimistic cost model):** mean
-month ~$2,500 but **median month ~$830**, ~45% of months negative,
-lumpy/tail-driven. Judge annually (~$30K/yr per NQ over 5 years), not
-monthly. On a capped prop account the realized take is lower (~$760/mo
-net EV on the Select→Flex path) because daily caps clip the tail. Details:
-`docs/decisions/2026-07-06-sizing-gate-5yr.md` and the monthly analysis in
-the project history.
+**Current planning evidence (corrected five-year 1 NQ backtest):** 813
+trades, $160,125 net, PF 1.420, 22.1% wins, and observed max drawdown
+-$18,570. A deterministic 10-session moving-block bootstrap gives annualized
+net 95% CI of approximately $8.5K-$51.1K and max-drawdown median / p95 / p99
+of about -$24.5K / -$42.5K / -$54.6K. Use the adverse distribution for
+capital planning, not observed drawdown. No current prop-account monthly EV
+is authoritative; it must be recomputed from explicit, current account rules.
 
 **Repo orientation:** `src/full_python/` — `simulation/` (engine +
 `position_engine.py`, the shared fill lifecycle), `strategy/`

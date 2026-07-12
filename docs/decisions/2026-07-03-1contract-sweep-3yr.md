@@ -1,5 +1,8 @@
 # 1-Contract Sensitivity Sweep — flat AT engine, 3-year data
 
+> **Historical record.** References below to `$275K / PF 2.071` predate the
+> Python evidence migration and are not current promotion authority.
+
 Trustworthy per the production reconciliation (engine reproduces TV 1-ct
 P&L within 3%). Baseline: flat `adaptive_trend`, 566 trades, +$93,920,
 PF 1.368, DD −$14,995. Single-axis; interaction effects not captured
