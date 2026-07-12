@@ -88,6 +88,14 @@ Do not skip the review step, and do not merge red tests.
   closed; dirty source changes run identity; stop-bar MFE/MAE is bounded and
   flagged. See
   `docs/decisions/2026-07-12-phase0-correctness-remediation.md`.
+- **Phase 1 evidence migration — COMPLETE.** Standard reports now include
+  deterministic session-block bootstrap bands and top-trade/day dependency.
+  The old TradingView headline, old MNQ sizing verdict, and unsupported prop
+  EV are retired. See `2026-07-12-phase1-evidence-migration.md`.
+- **Phase 2 robust experimentation — IN PROGRESS.** SQLite trial-budget
+  registry and anchored fold reporting are built. Baseline walk-forward is
+  positive in 5/7 NQ and 4/7 MNQ six-month folds; both halves of 2023 lose.
+  See `2026-07-12-phase2-baseline-walk-forward.md`.
 
 - **Baseline frozen & TV-reconciled** — Python engine matches TradingView
   106/106 trades at $0.00 entry-price delta on the 9-month anchor.
