@@ -82,6 +82,69 @@ def test_entry_fills_next_bar_open_with_slippage_and_end_of_data_close() -> None
     assert len(_events_of(result, EventType.TRADE_CLOSED)) == 1
 
 
+def test_additional_entry_delay_fills_on_later_bar_open() -> None:
+    config = SimulationConfig(
+        point_value=2.0,
+        commission_per_contract_round_trip=1.0,
+        entry_slippage_points=0.0,
+        exit_slippage_points=0.0,
+        rth_open_extra_entry_slippage_points=0.0,
+        entry_delay_bars=1,
+    )
+    bars = [
+        _bar("2026-06-30T13:46:00Z", 100.0, 101.0, 99.0, 100.0),
+        _bar("2026-06-30T13:47:00Z", 101.0, 102.0, 100.0, 101.0),
+        _bar("2026-06-30T13:48:00Z", 105.0, 106.0, 104.0, 105.0),
+        _bar("2026-06-30T13:49:00Z", 106.0, 107.0, 105.0, 106.0),
+    ]
+
+    result = SimulationEngine(config).run(
+        bars, ScriptedStrategy({0: lambda bar: _buy_intent(bar, stop_price=70.0)})
+    )
+
+    assert result.trades[0].entry_timestamp_utc == "2026-06-30T13:48:00Z"
+    assert result.trades[0].entry_price == 105.0
+
+
+def test_zero_entry_fill_rate_records_miss_and_never_opens() -> None:
+    config = SimulationConfig(
+        point_value=2.0,
+        commission_per_contract_round_trip=1.0,
+        entry_slippage_points=0.0,
+        exit_slippage_points=0.0,
+        rth_open_extra_entry_slippage_points=0.0,
+        entry_fill_rate=0.0,
+        entry_fill_seed=17,
+    )
+    bars = [
+        _bar("2026-06-30T13:46:00Z", 100.0, 101.0, 99.0, 100.0),
+        _bar("2026-06-30T13:47:00Z", 101.0, 102.0, 100.0, 101.0),
+    ]
+
+    result = SimulationEngine(config).run(
+        bars, ScriptedStrategy({0: lambda bar: _buy_intent(bar, stop_price=70.0)})
+    )
+
+    assert result.trades == ()
+    misses = [
+        event for event in result.ledger.records
+        if event.event_type == EventType.STATE_TRANSITION
+        and event.payload.get("transition") == "entry_missed"
+    ]
+    assert len(misses) == 1
+
+
+def test_entry_timing_controls_validate_fail_closed() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="entry_delay_bars"):
+        SimulationConfig(entry_delay_bars=-1)
+    with pytest.raises(ValueError, match="entry_fill_rate"):
+        SimulationConfig(entry_fill_rate=1.1)
+    with pytest.raises(ValueError, match="next_bar_open"):
+        SimulationConfig(fill_timing="signal_bar_close", entry_delay_bars=1)
+
+
 def test_rth_open_window_adds_extra_entry_slippage() -> None:
     bars = [
         _bar("2026-06-30T13:30:00Z", 100.0, 101.0, 99.0, 100.5),
