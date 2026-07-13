@@ -12,6 +12,7 @@ from full_python.events import EventType
 from full_python.reporting.survivability import TradeResult, build_survivability_report
 from full_python.research.execution_timing import EXECUTION_TIMING_SCENARIOS
 from full_python.research.registry import ExperimentRegistry, ExperimentSpec, TrialRecord
+from full_python.research.walk_forward import build_anchored_folds, summarize_walk_forward
 from full_python.simulation import SimulationConfig, SimulationEngine
 from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
 from full_python.strategy.adaptive_trend_config import production_am_config
@@ -25,6 +26,12 @@ def run(*, data_path: Path, registry_path: Path, output_path: Path) -> Path:
         low="low", close="close", volume="volume",
     ))
     strategy_config = production_am_config()
+    folds = build_anchored_folds(
+        data_start="2021-03-16",
+        initial_validation_start="2023-01-01",
+        data_end="2026-06-27",
+        validation_months=6,
+    )
     reference_sim = SimulationConfig(
         point_value=20.0,
         commission_per_contract_round_trip=10.0,
@@ -82,7 +89,15 @@ def run(*, data_path: Path, registry_path: Path, output_path: Path) -> Path:
                 and record.payload.get("transition") == "entry_missed"
                 for record in result.ledger.records
             )
-            metrics = {**survivability.to_dict(), "missed_entries": missed}
+            fold_results = summarize_walk_forward(result.trades, folds)
+            metrics = {
+                **survivability.to_dict(),
+                "missed_entries": missed,
+                "positive_forward_folds": sum(
+                    fold.net_pnl > 0 for fold in fold_results
+                ),
+                "forward_folds": [fold.to_dict() for fold in fold_results],
+            }
             row = {
                 "scenario": scenario.name,
                 "description": scenario.description,
