@@ -75,7 +75,7 @@ def test_flatten_now_cancels_pending_entry_and_is_noop_when_flat():
     assert engine.position is None
 
 
-def test_early_close_uses_1259_backstop_in_simulation():
+def _run_backstop_case(signal_ts, fill_ts, backstop_ts):
     ledger = EventLedger()
     config = SimulationConfig(
         point_value=2.0,
@@ -85,9 +85,9 @@ def test_early_close_uses_1259_backstop_in_simulation():
         rth_open_extra_entry_slippage_points=0.0,
     )
     engine = PositionEngine(config, _NullStrategy(), ledger)
-    signal = _bar("2025-11-28T17:57:00Z", 100.0)  # 12:57 ET, early close
-    fill = _bar("2025-11-28T17:58:00Z", 101.0)
-    backstop = _bar("2025-11-28T17:59:00Z", 103.0)
+    signal = _bar(signal_ts, 100.0)
+    fill = _bar(fill_ts, 101.0)
+    backstop = _bar(backstop_ts, 103.0)
 
     s1 = classify_timestamp(signal.timestamp_utc)
     engine.process_pre_strategy(signal, s1)
@@ -99,7 +99,28 @@ def test_early_close_uses_1259_backstop_in_simulation():
     assert engine.position is not None
 
     engine.process_pre_strategy(backstop, classify_timestamp(backstop.timestamp_utc))
+    return engine, backstop
 
+
+def test_scheduled_early_close_backstops_at_1314_in_simulation():
+    # Day after Thanksgiving 2025 closes at 13:15 ET, so the backstop is 13:14.
+    engine, backstop = _run_backstop_case(
+        "2025-11-28T18:12:00Z",  # 13:12 ET
+        "2025-11-28T18:13:00Z",  # 13:13 ET
+        "2025-11-28T18:14:00Z",  # 13:14 ET -- one minute before the close
+    )
+    assert engine.position is None
+    assert engine.trades[-1].exit_reason == "session_flatten"
+    assert engine.trades[-1].exit_timestamp_utc == backstop.timestamp_utc
+
+
+def test_abbreviated_holiday_session_backstops_at_1259_in_simulation():
+    # Thanksgiving 2025 trades 09:30-13:00 ET, so the backstop is 12:59.
+    engine, backstop = _run_backstop_case(
+        "2025-11-27T17:57:00Z",  # 12:57 ET
+        "2025-11-27T17:58:00Z",  # 12:58 ET
+        "2025-11-27T17:59:00Z",  # 12:59 ET -- one minute before the close
+    )
     assert engine.position is None
     assert engine.trades[-1].exit_reason == "session_flatten"
     assert engine.trades[-1].exit_timestamp_utc == backstop.timestamp_utc

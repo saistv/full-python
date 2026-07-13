@@ -156,15 +156,36 @@ def test_window_is_malleable_not_hardcoded():
         next(it_b)  # same gap, but armed by the wider window
 
 
-def test_holiday_gap_is_not_armed_by_wall_clock_window_when_flat():
-    # Thanksgiving 2025 at 09:35 ET falls inside the numeric window but the
-    # exchange calendar marks RTH closed, so a flat observer does not alarm.
+def test_full_closure_gap_is_not_armed_by_wall_clock_window_when_flat():
+    # Good Friday is a genuine full closure: no RTH session exists, so a gap
+    # inside the numeric 09:30-10:00 window must not alarm a flat observer.
+    closed_auth = ContractAuthority(root="NQ")
+    closed_symbol = closed_auth.front_contract(date(2026, 4, 3))
+    src = LiveBarSource(
+        ScriptedFeed([
+            _vbar("2026-04-03T13:35:00Z", symbol=closed_symbol),
+            _vbar("2026-04-03T13:40:00Z", symbol=closed_symbol),
+        ]),
+        FakeClock(CLOCK.now()),
+        closed_auth,
+        ActiveWindow(start_minutes_et=9 * 60 + 30, end_minutes_et=10 * 60),
+        FLAT,
+    )
+    it = iter(src)
+    assert next(it).timestamp_utc == "2026-04-03T13:35:00Z"
+    assert next(it).timestamp_utc == "2026-04-03T13:40:00Z"
+
+
+def test_abbreviated_holiday_session_IS_armed_inside_the_entry_window():
+    # Thanksgiving trades 09:30-13:00 ET and the strategy trades it, so a gap in
+    # the entry window is a real data outage and must halt -- the previous
+    # cash-equity calendar silently disarmed the guard on exactly these days.
     holiday_auth = ContractAuthority(root="NQ")
     holiday_symbol = holiday_auth.front_contract(date(2025, 11, 27))
     src = LiveBarSource(
         ScriptedFeed([
             _vbar("2025-11-27T14:35:00Z", symbol=holiday_symbol),
-            _vbar("2025-11-27T14:40:00Z", symbol=holiday_symbol),
+            _vbar("2025-11-27T14:40:00Z", symbol=holiday_symbol),  # 5-minute hole
         ]),
         FakeClock(CLOCK.now()),
         holiday_auth,
@@ -173,4 +194,5 @@ def test_holiday_gap_is_not_armed_by_wall_clock_window_when_flat():
     )
     it = iter(src)
     assert next(it).timestamp_utc == "2025-11-27T14:35:00Z"
-    assert next(it).timestamp_utc == "2025-11-27T14:40:00Z"
+    with pytest.raises(DataOutageError):
+        next(it)
