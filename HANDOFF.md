@@ -98,7 +98,10 @@ Do not skip the review step, and do not merge red tests.
   The four-level NQ execution-cost axis also passes through 2 points per side
   ($120,010 net, PF 1.292, -$27,070 DD). See
   `2026-07-12-phase2-baseline-walk-forward.md` and
-  `2026-07-12-phase2-execution-cost-axis.md`.
+  `2026-07-12-phase2-execution-cost-axis.md`. The execution-timing axis also
+  survives one-minute latency and 10% missed signals, but latency reduces
+  positive forward folds from 5/7 to 3/7 despite slightly higher aggregate
+  net. See `2026-07-13-phase2-execution-timing-axis.md`.
 
 - **Baseline frozen & TV-reconciled** — Python engine matches TradingView
   106/106 trades at $0.00 entry-price delta on the 9-month anchor.
