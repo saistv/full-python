@@ -30,6 +30,12 @@ class AdaptiveTrendConfig:
     sqz_bb_mult: float = 2.0
     sqz_kc_length: int = 20
     sqz_kc_mult: float = 1.5
+    # Explicit component switches exist for registered diagnostic ablations.
+    # Production keeps every switch ON; they are not optimization parameters.
+    enable_squeeze_momentum_gate: bool = True
+    enable_squeeze_release_gate: bool = True
+    enable_wings_gate: bool = True
+    enable_prove_it_hold: bool = True
     ma_50_length: int = 50
     ma_200_length: int = 200
     sr_stop_buffer: float = 5.0

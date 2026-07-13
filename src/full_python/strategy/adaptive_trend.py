@@ -152,16 +152,8 @@ class AdaptiveTrendStrategy:
 
         resistance_broken, support_broken = self._detect_breaks()
         self._update_prove_it(resistance_broken, support_broken, bar.close, pivot_high, pivot_low)
-        resistance_confirmed = (
-            config.prove_it_bars
-            <= self._res_hold_count
-            <= config.prove_it_bars + config.signal_valid_bars
-        )
-        support_confirmed = (
-            config.prove_it_bars
-            <= self._sup_hold_count
-            <= config.prove_it_bars + config.signal_valid_bars
-        )
+        resistance_confirmed = self._is_hold_confirmed(self._res_hold_count)
+        support_confirmed = self._is_hold_confirmed(self._sup_hold_count)
 
         self._advance_cooldowns()
 
@@ -336,6 +328,15 @@ class AdaptiveTrendStrategy:
     # S/R break detection + prove-it (Pine-exact)
     # ------------------------------------------------------------------
 
+    def _confirmation_minimum(self) -> int:
+        # The ablation removes only the additional hold requirement. A count
+        # of one is the initial S/R break bar, so S/R remains mandatory.
+        return self.config.prove_it_bars if self.config.enable_prove_it_hold else 1
+
+    def _is_hold_confirmed(self, hold_count: int) -> bool:
+        minimum = self._confirmation_minimum()
+        return minimum <= hold_count <= minimum + self.config.signal_valid_bars
+
     def _detect_breaks(self) -> Tuple[bool, bool]:
         config = self.config
         lookback = config.sr_break_lookback
@@ -433,11 +434,11 @@ class AdaptiveTrendStrategy:
             return "below_trend_mas"
         if not resistance_confirmed:
             return "sr_not_confirmed"
-        if not squeeze.momentum_green:
+        if self.config.enable_squeeze_momentum_gate and not squeeze.momentum_green:
             return "squeeze_momentum_not_green"
-        if not squeeze.released:
+        if self.config.enable_squeeze_release_gate and not squeeze.released:
             return "squeeze_not_released"
-        if not wings_long:
+        if self.config.enable_wings_gate and not wings_long:
             return "wings_fail"
         if not cooldown_ok:
             return "cooldown"
@@ -454,11 +455,11 @@ class AdaptiveTrendStrategy:
             return "above_trend_mas"
         if not support_confirmed:
             return "sr_not_confirmed"
-        if not squeeze.momentum_red:
+        if self.config.enable_squeeze_momentum_gate and not squeeze.momentum_red:
             return "squeeze_momentum_not_red"
-        if not squeeze.released:
+        if self.config.enable_squeeze_release_gate and not squeeze.released:
             return "squeeze_not_released"
-        if not wings_short:
+        if self.config.enable_wings_gate and not wings_short:
             return "wings_fail"
         if not cooldown_ok:
             return "cooldown"
