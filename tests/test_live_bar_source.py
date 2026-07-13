@@ -73,6 +73,18 @@ def test_wrong_contract_symbol_raises_integrity():
         next(iter(src))
 
 
+@pytest.mark.parametrize(
+    "bar",
+    [
+        _vbar("2025-11-03T14:31:00Z", h=float("inf")),
+        _vbar("2025-11-03T14:31:00Z", v=float("nan")),
+    ],
+)
+def test_nonfinite_vendor_bar_raises_integrity(bar):
+    with pytest.raises(DataIntegrityError, match="non_finite"):
+        next(iter(_source([bar])))
+
+
 def test_non_monotonic_timestamp_raises_integrity():
     src = _source([_vbar("2025-11-03T14:32:00Z"), _vbar("2025-11-03T14:32:00Z")])
     it = iter(src)

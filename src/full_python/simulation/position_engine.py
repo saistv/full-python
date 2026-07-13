@@ -525,6 +525,26 @@ class PositionEngine:
             slippage += self.config.rth_open_extra_entry_slippage_points
         fill_price = raw_price + direction * slippage
 
+        stop_is_protective = (
+            stop_price < fill_price if side == "long" else stop_price > fill_price
+        )
+        if not stop_is_protective:
+            self._ledger.append(
+                EventType.STATE_TRANSITION,
+                timestamp_utc=timestamp_utc,
+                payload={
+                    "transition": "entry_invalidated_at_fill",
+                    "reason": "stop_not_protective_at_fill",
+                    "symbol": intent.symbol,
+                    "side": side,
+                    "intent_timestamp_utc": intent.timestamp_utc,
+                    "raw_price": raw_price,
+                    "fill_price": fill_price,
+                    "stop_price": stop_price,
+                },
+            )
+            return
+
         fill = Fill(
             timestamp_utc=timestamp_utc,
             symbol=intent.symbol,
