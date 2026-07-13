@@ -73,12 +73,12 @@ Do not skip the review step, and do not merge red tests.
 - **`docs/superpowers/plans/`** — implementation plans (complete code +
   tests) per feature.
 - **The test suite IS the executable spec.** `python3 -m pytest -q` →
-   currently 371 passed, 4 skipped. The skips are operator-data tests gated
+   currently 397 passed, 4 skipped. The skips are operator-data tests gated
   on `FULL_PYTHON_BASELINE_DATA` (the operator's local 9-month CSV); with
   it set, all pass and prove the live path reproduces the backtester
   trade-for-trade.
 
-## 5. Current state (2026-07-12)
+## 5. Current state (2026-07-13)
 
 - **Adversarial Phase 0 correctness remediation — COMPLETE.** Tradovate
   progressive bars now finalize correctly; shadow parity requires an
@@ -117,10 +117,13 @@ Do not skip the review step, and do not merge red tests.
   rejected (holdout sign reversal); MA-length and S/R-interaction sweeps
   both closed (no cell cleared the bar). The locked config survived its
   full Python-era parameter audit unchanged.
-- **Old sizing verdict RETIRED.** Its MNQ strategy used NQ's $20/point for
-  projected risk while the simulator used $2/point. Corrected five-year MNQ is
-  859 trades, $25,931.50 net, and -$2,865.50 max drawdown. Re-derive sizing in
-  the next research phase; do not quote the old NQ-vs-MNQ efficiency verdict.
+- **MNQ-first pilot sizing re-derived.** The old verdict is retired because it
+  projected MNQ risk at NQ's $20/point while the simulator used $2/point. The
+  flat-one-MNQ pilot candidate survives reference and doubled-slippage costs,
+  but a 30-session funded pilot fails the `$500` cumulative-loss gate. The only
+  retained funded path is at most 10 sessions after every operational gate;
+  keep at least 30 sessions in paper/shadow. See
+  `docs/decisions/2026-07-13-mnq-pilot-sizing.md`.
 - **Live-engine sub-project 1 (execution core) — DONE, merged, real-data
   identity proven.** Broker-agnostic `LiveLoop`, `PositionEngine` shared
   by sim and live, `PaperBroker`, `RiskSupervisor`, order state machine.
@@ -147,35 +150,35 @@ Do not skip the review step, and do not merge red tests.
   `2026-07-10-tradovate-gap-closure-design.md`. Still offline-only —
   see guardrail 7.
 
-Branch note: the Phase 0 through execution-timing stack is in draft PR #15 on
-`codex/phase-2-execution-timing`. Component ablation continues on the stacked
-`codex/phase-2-component-ablation` branch. Check open PRs before assuming what
-is merged.
+Repository checkpoint: PRs #15, #16, #17, and #18 were reviewed and merged in
+dependency order. `main` is current through merge commit `4de6b98` (MNQ pilot
+sizing); the local checkout and `origin/main` matched at that commit after the
+merge. Start new work from `main` on a fresh feature branch.
 
 ## 6. Open tasks (ranked)
 
-1. **Review the Phase 0-2 PR stack:** PR #15, then PR #16, then the intrabar
-   bounds branch. Do not squash evidence boundaries together before review.
-2. **MNQ-first sizing is re-derived; execute the operational gates, not more
+1. **MNQ-first sizing is re-derived; execute the operational gates, not more
    sizing research.** A 30-session funded pilot fails the `$500` risk gate
    (23-27% budget-breach probability). The approved research conclusion is at
    most a 10-session flat-1-MNQ funded operational pilot after demo observe,
    demo order, paper, and reconciliation pass; keep a 30-session paper/shadow
    record. See `2026-07-13-mnq-pilot-sizing.md`.
-3. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
+2. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
    demo order test → paper → reconciliation → a tiny MNQ live pilot
-   ($150/day, $500 total, 30 sessions). Slice 1 (Gate 5 observe runner)
-   is BUILT — see `docs/live-observe-runbook.md`; next action is running
-   the 3 observe sessions, then the demo-order-test spec. Includes
+   ($150/day, $500 total, at most 10 funded sessions). Slice 1 (Gate 5 observe
+   runner) is BUILT — see `docs/live-observe-runbook.md`; next action is
+   running the 3 observe sessions, then the demo-order-test spec. This step
+   requires the operator's Tradovate demo credentials and network access;
+   credentials must remain local and must never be committed. Includes
    dashboards; note that data_outage and invariant_violation halts share
    `transition="execution_halt"` and differ by the `reason` field —
    consumers must read `reason`.
-4. **Resolve the account-level DLL open question** (see the Open
+3. **Resolve the account-level DLL open question** (see the Open
    Operational Decisions list in the adapter spec): does Tradovate/the
    prop firm enforce an account-level daily-loss limit, and does it
    force-flatten or only block new orders? Feeds sub-project 4's pilot
    checklist; the client-side DLL stays regardless.
-5. **Mean-reversion sleeve — PAUSED** under its research contract after
+4. **Mean-reversion sleeve — PAUSED** under its research contract after
    the run-1 rejection; resume only with a new pre-filed mechanism.
 
 ## 7. Key facts a new agent will need
@@ -216,7 +219,8 @@ only — never gates entries).
 
 1. Give the new agent access to the repo (`saistv/full-python`) and point
    it at THIS file first, then `docs/decisions/` newest-first.
-2. Tell it the branch: `claude/m4-regime` is active; check open PRs.
+2. Start from current `main` (`4de6b98` at this handoff checkpoint), fetch the
+   remote, check for newer merged work, and create a fresh feature branch.
 3. Have it run `python3 -m pytest -q` to confirm a green baseline before
    changing anything (set `FULL_PYTHON_BASELINE_DATA` to the local 9-month
    CSV to run the real-data identity/golden tests).
