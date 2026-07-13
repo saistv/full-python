@@ -92,7 +92,7 @@ Do not skip the review step, and do not merge red tests.
   deterministic session-block bootstrap bands and top-trade/day dependency.
   The old TradingView headline, old MNQ sizing verdict, and unsupported prop
   EV are retired. See `2026-07-12-phase1-evidence-migration.md`.
-- **Phase 2 robust experimentation — IN PROGRESS.** SQLite trial-budget
+- **Phase 2 robust experimentation — COMPLETE.** SQLite trial-budget
   registry and anchored fold reporting are built. Baseline walk-forward is
   positive in 5/7 NQ and 4/7 MNQ six-month folds; both halves of 2023 lose.
   The four-level NQ execution-cost axis also passes through 2 points per side
@@ -105,7 +105,10 @@ Do not skip the review step, and do not merge red tests.
   strongly defensive, squeeze release is directionally useful, and the small
   aggregate gain without squeeze momentum is below the materiality bar. See
   `2026-07-13-phase2-execution-timing-axis.md` and
-  `2026-07-13-phase2-component-ablation.md`.
+  `2026-07-13-phase2-component-ablation.md`. Intrabar bounds identify 65
+  entry-minute stops and 59 path-ambiguous stop exits. Their P&L is fixed under
+  the no-target stop-first model, but exact 5-20 point MFE-gate claims require
+  sequence data. See `2026-07-13-phase2-intrabar-bounds.md`.
 
 - **Baseline frozen & TV-reconciled** — Python engine matches TradingView
   106/106 trades at $0.00 entry-price delta on the 9-month anchor.
@@ -151,11 +154,11 @@ is merged.
 
 ## 6. Open tasks (ranked)
 
-1. **Finish Phase 2 robust experimentation:** component ablation is complete;
-   next bound same-minute entry/stop ambiguity using tick or lower-timeframe
-   evidence. Do not optimize against the ablation results.
-2. **Review draft PR #15 and the stacked component-ablation branch.** Ordinary
-   suite is green; run the operator-data identity suite before merge.
+1. **Review the Phase 0-2 PR stack:** PR #15, then PR #16, then the intrabar
+   bounds branch. Do not squash evidence boundaries together before review.
+2. **Re-derive MNQ-first pilot sizing from corrected evidence.** Use bootstrap
+   p95/p99 drawdown, current Tradovate/prop rules, and explicit $150/day and
+   $500 pilot loss budgets; do not optimize strategy parameters.
 3. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
    demo order test → paper → reconciliation → a tiny MNQ live pilot
    ($150/day, $500 total, 30 sessions). Slice 1 (Gate 5 observe runner)
