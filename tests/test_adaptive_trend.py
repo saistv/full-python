@@ -2,6 +2,7 @@ import math
 import pytest
 import statistics
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from full_python.events import EventType
 from full_python.models import MarketBar, Trade
@@ -21,12 +22,74 @@ def test_config_defaults_are_production_values() -> None:
     assert config.prove_it_bars == 2
     assert config.wings_body_atr_frac == 0.40
     assert config.wings_close_frac == 0.65
+    assert config.enable_squeeze_momentum_gate is True
+    assert config.enable_squeeze_release_gate is True
+    assert config.enable_wings_gate is True
+    assert config.enable_prove_it_hold is True
     assert config.sr_min_stop_distance == 15.0
     assert config.max_stop_distance == 31.0
     assert config.entry_start_minutes_et == 570
     assert config.entry_end_minutes_et == 600
     assert config.contracts == 1
     assert len(config.parameter_hash()) == 64
+
+
+def test_component_switches_remove_only_the_requested_long_gate() -> None:
+    bar = SimpleNamespace(close=110.0)
+    squeeze = SimpleNamespace(momentum_green=False, released=False)
+
+    baseline = AdaptiveTrendStrategy(AdaptiveTrendConfig())
+    assert baseline._first_failing_long_gate(
+        bar, 100.0, 90.0, 105.0, True, squeeze, False, True
+    ) == "squeeze_momentum_not_green"
+
+    no_momentum = AdaptiveTrendStrategy(AdaptiveTrendConfig(
+        enable_squeeze_momentum_gate=False,
+    ))
+    assert no_momentum._first_failing_long_gate(
+        bar, 100.0, 90.0, 105.0, True, squeeze, False, True
+    ) == "squeeze_not_released"
+
+    no_squeeze = AdaptiveTrendStrategy(AdaptiveTrendConfig(
+        enable_squeeze_momentum_gate=False,
+        enable_squeeze_release_gate=False,
+    ))
+    assert no_squeeze._first_failing_long_gate(
+        bar, 100.0, 90.0, 105.0, True, squeeze, False, True
+    ) == "wings_fail"
+
+    no_squeeze_or_wings = AdaptiveTrendStrategy(AdaptiveTrendConfig(
+        enable_squeeze_momentum_gate=False,
+        enable_squeeze_release_gate=False,
+        enable_wings_gate=False,
+    ))
+    assert no_squeeze_or_wings._first_failing_long_gate(
+        bar, 100.0, 90.0, 105.0, True, squeeze, False, True
+    ) is None
+
+
+def test_disabled_prove_it_hold_still_requires_initial_sr_break() -> None:
+    strategy = AdaptiveTrendStrategy(AdaptiveTrendConfig(enable_prove_it_hold=False))
+
+    assert strategy._confirmation_minimum() == 1
+    strategy._res_hold_count = 0
+    assert not strategy._is_hold_confirmed(strategy._res_hold_count)
+    strategy._res_hold_count = 1
+    assert strategy._is_hold_confirmed(strategy._res_hold_count)
+
+
+def test_component_switches_apply_symmetrically_to_short_gate() -> None:
+    strategy = AdaptiveTrendStrategy(AdaptiveTrendConfig(
+        enable_squeeze_momentum_gate=False,
+        enable_squeeze_release_gate=False,
+        enable_wings_gate=False,
+    ))
+    bar = SimpleNamespace(close=90.0)
+    squeeze = SimpleNamespace(momentum_red=False, released=False)
+
+    assert strategy._first_failing_short_gate(
+        bar, 100.0, 110.0, 95.0, True, squeeze, False, True
+    ) is None
 
 
 def test_config_defaults_include_disabled_prior_vol_gate() -> None:

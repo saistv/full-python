@@ -3,7 +3,7 @@
 You are picking up an NQ/MNQ futures trading system (Python port of a
 validated TradingView strategy). This document is self-contained: it does
 not assume any particular AI tool, skill set, or external memory. Read it
-fully before touching anything. Last updated 2026-07-12.
+fully before touching anything. Last updated 2026-07-13.
 
 ## 1. What this project is
 
@@ -101,7 +101,11 @@ Do not skip the review step, and do not merge red tests.
   `2026-07-12-phase2-execution-cost-axis.md`. The execution-timing axis also
   survives one-minute latency and 10% missed signals, but latency reduces
   positive forward folds from 5/7 to 3/7 despite slightly higher aggregate
-  net. See `2026-07-13-phase2-execution-timing-axis.md`.
+  net. Component ablation retained the frozen stack: wings and prove-it are
+  strongly defensive, squeeze release is directionally useful, and the small
+  aggregate gain without squeeze momentum is below the materiality bar. See
+  `2026-07-13-phase2-execution-timing-axis.md` and
+  `2026-07-13-phase2-component-ablation.md`.
 
 - **Baseline frozen & TV-reconciled** — Python engine matches TradingView
   106/106 trades at $0.00 entry-price delta on the 9-month anchor.
@@ -140,16 +144,18 @@ Do not skip the review step, and do not merge red tests.
   `2026-07-10-tradovate-gap-closure-design.md`. Still offline-only —
   see guardrail 7.
 
-Branch note: Phase 0 work is on `codex/phase-0-remediation`, based on `main`.
-Check open PRs before assuming what is merged.
+Branch note: the Phase 0 through execution-timing stack is in draft PR #15 on
+`codex/phase-2-execution-timing`. Component ablation continues on the stacked
+`codex/phase-2-component-ablation` branch. Check open PRs before assuming what
+is merged.
 
 ## 6. Open tasks (ranked)
 
-1. **Review and merge Phase 0.** Both the ordinary and operator-data suites
-   must be green, and the corrected anchor fixture must reproduce exactly.
-2. **Phase 1 evidence migration:** retire invalid MNQ sizing claims, add the
-   corrected bootstrap/robustness outputs to standard reports, and re-derive
-   MNQ-first capital sizing without re-optimizing strategy parameters.
+1. **Finish Phase 2 robust experimentation:** component ablation is complete;
+   next bound same-minute entry/stop ambiguity using tick or lower-timeframe
+   evidence. Do not optimize against the ablation results.
+2. **Review draft PR #15 and the stacked component-ablation branch.** Ordinary
+   suite is green; run the operator-data identity suite before merge.
 3. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
    demo order test → paper → reconciliation → a tiny MNQ live pilot
    ($150/day, $500 total, 30 sessions). Slice 1 (Gate 5 observe runner)
