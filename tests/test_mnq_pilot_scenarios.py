@@ -1,4 +1,8 @@
-from full_python.research.mnq_pilot import MNQ_PILOT_SCENARIOS, mnq_pilot_config
+from full_python.research.mnq_pilot import (
+    MNQ_PILOT_RISK_HORIZONS,
+    MNQ_PILOT_SCENARIOS,
+    mnq_pilot_config,
+)
 
 
 def test_mnq_pilot_candidate_is_flat_one_contract_with_150_dll() -> None:
@@ -21,3 +25,4 @@ def test_mnq_pilot_cost_axis_is_locked() -> None:
         0.75,
         1.5,
     ]
+    assert MNQ_PILOT_RISK_HORIZONS == (5, 10, 15, 20, 30)

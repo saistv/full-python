@@ -14,7 +14,11 @@ from full_python.reporting.survivability import (
     build_daily_metrics,
     build_survivability_report,
 )
-from full_python.research.mnq_pilot import MNQ_PILOT_SCENARIOS, mnq_pilot_config
+from full_python.research.mnq_pilot import (
+    MNQ_PILOT_RISK_HORIZONS,
+    MNQ_PILOT_SCENARIOS,
+    mnq_pilot_config,
+)
 from full_python.research.pilot_risk import build_pilot_path_report
 from full_python.research.registry import ExperimentRegistry, ExperimentSpec, TrialRecord
 from full_python.research.walk_forward import build_anchored_folds, summarize_walk_forward
@@ -102,6 +106,16 @@ def run(*, data_path: Path, registry_path: Path, output_path: Path) -> Path:
                 for t in result.trades
             ])
             fold_results = summarize_walk_forward(result.trades, folds)
+            risk_by_horizon = {
+                str(horizon): build_pilot_path_report(
+                    daily_series,
+                    horizon_sessions=horizon,
+                    loss_budget=500.0,
+                    income_target=5000.0,
+                    seed=20260713 + horizon,
+                ).to_dict()
+                for horizon in MNQ_PILOT_RISK_HORIZONS
+            }
             metrics = {
                 "survivability": survivability.to_dict(),
                 "daily": build_daily_metrics(
@@ -123,6 +137,7 @@ def run(*, data_path: Path, registry_path: Path, output_path: Path) -> Path:
                     income_target=5000.0,
                     seed=20260714,
                 ).to_dict(),
+                "loss_budget_by_horizon": risk_by_horizon,
                 "positive_forward_folds": sum(f.net_pnl > 0 for f in fold_results),
                 "forward_folds": [f.to_dict() for f in fold_results],
             }

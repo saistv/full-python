@@ -24,6 +24,8 @@ MNQ_PILOT_SCENARIOS = (
     ),
 )
 
+MNQ_PILOT_RISK_HORIZONS = (5, 10, 15, 20, 30)
+
 
 def mnq_pilot_config() -> AdaptiveTrendConfig:
     return replace(

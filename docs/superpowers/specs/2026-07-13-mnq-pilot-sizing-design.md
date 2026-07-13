@@ -36,5 +36,6 @@ cannot be used to increase size during the pilot.
 
 For each cost scenario, report survivability, daily metrics, anchored folds,
 full-history block bootstrap, and 30-session pilot-path risk. A separate
-21-session path report measures income-target feasibility.
-
+21-session path report measures income-target feasibility. A fixed
+5/10/15/20/30-session ladder shows whether the `$500` budget supports a shorter
+paid pilot when it cannot support the full validation horizon.
