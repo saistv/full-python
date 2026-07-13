@@ -23,6 +23,13 @@ class SimulationConfig:
     entry_slippage_points: float = 1.0
     exit_slippage_points: float = 0.5
     rth_open_extra_entry_slippage_points: float = 1.0
+    # Additional completed one-minute bars beyond the normal next-bar-open
+    # fill. Zero preserves the production reference behavior.
+    entry_delay_bars: int = 0
+    # Deterministic infrastructure/missed-signal stress. This is not a market
+    # order fill probability model; the intent identity and seed select misses.
+    entry_fill_rate: float = 1.0
+    entry_fill_seed: int = 0
     fill_timing: str = FILL_TIMING_NEXT_BAR_OPEN
     rth_entries_only: bool = True
     flatten_hour_et: int = 15
@@ -40,6 +47,17 @@ class SimulationConfig:
             raise ValueError(f"Unsupported fill_timing: {self.fill_timing}")
         if self.point_value <= 0:
             raise ValueError("point_value must be positive")
+        if self.entry_delay_bars < 0:
+            raise ValueError("entry_delay_bars must be nonnegative")
+        if not 0.0 <= self.entry_fill_rate <= 1.0:
+            raise ValueError("entry_fill_rate must be between 0 and 1")
+        if (
+            self.fill_timing != FILL_TIMING_NEXT_BAR_OPEN
+            and (self.entry_delay_bars != 0 or self.entry_fill_rate != 1.0)
+        ):
+            raise ValueError(
+                "entry timing controls require fill_timing='next_bar_open'"
+            )
         if self.max_contracts < 1:
             raise ValueError("max_contracts must be at least 1")
         if self.daily_loss_limit is not None and self.daily_loss_limit <= 0:

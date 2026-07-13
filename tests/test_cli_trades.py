@@ -119,19 +119,35 @@ def test_run_id_includes_a_code_version_component(tmp_path: Path) -> None:
     assert len(run_id_parts) == 4
     assert all(len(part) == 8 for part in run_id_parts)
     assert "code_version" in report
-    assert len(report["code_version"]) == 40
+    assert len(report["code_version"]) == 64
+    assert report["source_provenance"]["source_tree_sha256"] == report["code_version"]
+    assert len(report["source_provenance"]["git_commit"]) == 40
+    assert isinstance(report["source_provenance"]["dirty"], bool)
 
 
-def test_code_version_fallback_uses_null_sha(tmp_path: Path, monkeypatch) -> None:
-    """Test that _code_version_hash() fallback returns a 40-char string for consistent run_id segments."""
+def test_git_commit_fallback_uses_null_sha(monkeypatch) -> None:
     from full_python import cli
 
     def mock_subprocess_run(*args, **kwargs):
         raise FileNotFoundError("git not found")
 
     monkeypatch.setattr("full_python.cli.subprocess.run", mock_subprocess_run)
-    code_version = cli._code_version_hash()
+    git_commit = cli._git_commit()
 
-    assert code_version == "0" * 40
-    assert len(code_version) == 40
-    assert code_version[:8] == "00000000"
+    assert git_commit == "0" * 40
+
+
+def test_code_version_changes_when_uncommitted_source_bytes_change(tmp_path: Path) -> None:
+    from full_python import cli
+
+    source = tmp_path / "src" / "full_python"
+    source.mkdir(parents=True)
+    module = source / "example.py"
+    module.write_text("VALUE = 1\n", encoding="utf-8")
+    first = cli._code_version_hash(tmp_path)
+
+    module.write_text("VALUE = 2\n", encoding="utf-8")
+    second = cli._code_version_hash(tmp_path)
+
+    assert len(first) == 64
+    assert first != second

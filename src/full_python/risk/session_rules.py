@@ -10,7 +10,10 @@ from full_python.data.sessions import SessionInfo
 
 
 def check_after_flatten(session: SessionInfo, flatten_minutes_et: int) -> Optional[str]:
-    if session.minutes_from_midnight_et >= flatten_minutes_et:
+    if session.rth_close_minutes_et is None:
+        return "market_closed"
+    effective_flatten = min(flatten_minutes_et, session.rth_close_minutes_et - 1)
+    if session.minutes_from_midnight_et >= effective_flatten:
         return "after_flatten"
     return None
 

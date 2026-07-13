@@ -19,12 +19,18 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
 from full_python.events import EventLedger, EventType
 from full_python.models import MarketBar
 from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
 from full_python.strategy.adaptive_trend_config import production_am_config
 
 logger = logging.getLogger("full_python.live")
+
+REFERENCE_COLUMN_MAP = CsvBarColumnMap(
+    timestamp="timestamp", symbol="symbol", open="open", high="high",
+    low="low", close="close", volume="volume",
+)
 
 
 def bars_from_ledger(ledger: EventLedger) -> list:
@@ -99,6 +105,38 @@ def diff_signals(live: list, replay: list) -> list:
     return divergences
 
 
+def diff_bars(recorded: list[MarketBar], reference: list[MarketBar]) -> list[str]:
+    """Compare captured bars with an independent source over captured coverage."""
+    if not recorded:
+        return ["no recorded bars"]
+    start = recorded[0].timestamp_utc
+    end = recorded[-1].timestamp_utc
+    recorded_by = {bar.timestamp_utc: bar for bar in recorded}
+    reference_by = {
+        bar.timestamp_utc: bar
+        for bar in reference
+        if start <= bar.timestamp_utc <= end
+    }
+    differences: list[str] = []
+    for timestamp in sorted(set(recorded_by) | set(reference_by)):
+        lhs = recorded_by.get(timestamp)
+        rhs = reference_by.get(timestamp)
+        if lhs is None:
+            differences.append(f"bar {timestamp}: missing from capture")
+            continue
+        if rhs is None:
+            differences.append(f"bar {timestamp}: missing from independent reference")
+            continue
+        lhs_values = (lhs.open, lhs.high, lhs.low, lhs.close, lhs.volume)
+        rhs_values = (rhs.open, rhs.high, rhs.low, rhs.close, rhs.volume)
+        if lhs.symbol != rhs.symbol or lhs_values != rhs_values:
+            differences.append(
+                f"bar {timestamp}: captured={(lhs.symbol, *lhs_values)!r} "
+                f"reference={(rhs.symbol, *rhs_values)!r}"
+            )
+    return differences
+
+
 def _halts(ledger: EventLedger) -> list:
     return [
         record for record in ledger.records
@@ -122,7 +160,8 @@ def _esc(value: Any) -> str:
 
 
 def _write_html(
-    path: Path, *, bars, live, replay, divergences, halts, sim_trades, sim_error=None
+    path: Path, *, bars, live, replay, divergences, bar_differences,
+    bar_check_status, halts, sim_trades, sim_error=None
 ) -> None:
     if not bars:
         # Zero recorded BAR events (e.g. a startup crash) is not evidence of
@@ -130,12 +169,15 @@ def _write_html(
         # banner so this can never be mistaken for the green PARITY verdict.
         verdict = "NO-DATA"
         color = "#8a6d00"
-    elif not divergences:
-        verdict = "PARITY"
-        color = "#0a7d33"
-    else:
+    elif divergences or bar_differences:
         verdict = "DIVERGENCE"
         color = "#b00020"
+    elif bar_check_status != "VERIFIED":
+        verdict = "BAR-UNVERIFIED"
+        color = "#8a6d00"
+    else:
+        verdict = "PARITY"
+        color = "#0a7d33"
     rows = "".join(
         f"<tr><td>{_esc(s['minute'])}</td><td>{_esc(s['kind'])}</td>"
         f"<td>{_esc(s.get('side', s.get('reason', '')))}</td>"
@@ -144,6 +186,7 @@ def _write_html(
         for s in live
     ) or "<tr><td colspan='5'>no signals recorded</td></tr>"
     diff_rows = "".join(f"<li>{_esc(line)}</li>" for line in divergences)
+    bar_diff_rows = "".join(f"<li>{_esc(line)}</li>" for line in bar_differences)
     halt_rows = "".join(
         f"<li>{_esc(r.timestamp_utc)} — {_esc(r.payload.get('reason'))}: "
         f"{_esc(r.payload.get('error', ''))}</li>"
@@ -175,6 +218,8 @@ table {{ border-collapse: collapse; }} td, th {{ border: 1px solid #ccc; padding
 <h1>Observe session shadow report</h1>
 <p><span class="verdict">{verdict}</span></p>
 <p>{len(bars)} bars, {len(live)} live signals, {len(replay)} replay signals.</p>
+<h2>Independent bar check: {_esc(bar_check_status)}</h2>
+<ul>{bar_diff_rows or "<li>none</li>"}</ul>
 <h2>Divergences</h2><ul>{diff_rows or "<li>none</li>"}</ul>
 <h2>Halts</h2><ul>{halt_rows}</ul>
 <h2>Live signals</h2>
@@ -186,12 +231,19 @@ table {{ border-collapse: collapse; }} td, th {{ border: 1px solid #ccc; padding
     path.write_text(body, encoding="utf-8")
 
 
-def run_report(events_path, html_path) -> int:
+def run_report(events_path, html_path, *, reference_bars_path=None) -> int:
     ledger = EventLedger.read_jsonl(events_path)
     bars = bars_from_ledger(ledger)
     live = recorded_signals(ledger)
     replay = replay_signals(bars)
     divergences = diff_signals(live, replay)
+    if reference_bars_path is None:
+        bar_check_status = "NOT RUN"
+        bar_differences: list[str] = []
+    else:
+        reference = load_csv_bars(Path(reference_bars_path), REFERENCE_COLUMN_MAP)
+        bar_differences = diff_bars(bars, reference)
+        bar_check_status = "VERIFIED" if not bar_differences else "FAILED"
     halts = _halts(ledger)
     try:
         sim_trades = _sim_trades(bars)
@@ -201,18 +253,23 @@ def run_report(events_path, html_path) -> int:
         sim_trades = []
         sim_error = str(exc)
     _write_html(Path(html_path), bars=bars, live=live, replay=replay,
-                divergences=divergences, halts=halts, sim_trades=sim_trades,
-                sim_error=sim_error)
+                divergences=divergences, bar_differences=bar_differences,
+                bar_check_status=bar_check_status, halts=halts,
+                sim_trades=sim_trades, sim_error=sim_error)
     for line in divergences:
         logger.error("DIVERGENCE %s", line)
     for record in halts:
         logger.warning("HALT %s %s", record.timestamp_utc, record.payload)
+    for line in bar_differences:
+        logger.error("BAR DIVERGENCE %s", line)
     if not bars:
         verdict = "NO-DATA"
-    elif divergences:
+    elif divergences or bar_differences:
         verdict = "DIVERGENCE"
+    elif bar_check_status != "VERIFIED":
+        verdict = "BAR-UNVERIFIED"
     else:
         verdict = "PARITY"
     logger.info("verdict: %s (%d bars, %d live signals) -> %s",
                 verdict, len(bars), len(live), html_path)
-    return 1 if (not bars or divergences) else 0
+    return 0 if verdict == "PARITY" else 1

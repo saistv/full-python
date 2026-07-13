@@ -3,7 +3,7 @@
 You are picking up an NQ/MNQ futures trading system (Python port of a
 validated TradingView strategy). This document is self-contained: it does
 not assume any particular AI tool, skill set, or external memory. Read it
-fully before touching anything. Last updated 2026-07-10.
+fully before touching anything. Last updated 2026-07-12.
 
 ## 1. What this project is
 
@@ -20,9 +20,11 @@ the cost of the validated core, which no analysis this year has beaten.
 
 ## 2. Non-negotiable guardrails (violating these loses money or wastes weeks)
 
-1. **No config change ships without ≥ $275,000 net P&L AND PF ≥ 2.071 on
-   the same 3-year TradingView backtest.** No exceptions. The locked
-   config sits at ~$251K / PF 2.071. Nothing has cleared the bar.
+1. **Python is the performance authority.** The historical
+   `$251K / PF 2.071 / 448 trades` TradingView claim is unreproducible and
+   must not be used as a baseline or promotion threshold. Candidate changes
+   use the pre-registered Gate 1 conjunction against the corrected Python
+   control on identical data and execution assumptions.
 2. **Pre-registered evaluation only (Gate 1 protocol).** Lock the success
    criteria BEFORE running a sweep
    (`docs/decisions/2026-07-05-gate1-phase0-protocol.md`). If a result
@@ -71,12 +73,35 @@ Do not skip the review step, and do not merge red tests.
 - **`docs/superpowers/plans/`** — implementation plans (complete code +
   tests) per feature.
 - **The test suite IS the executable spec.** `python3 -m pytest -q` →
-  currently ~294 passed, 3 skipped. The 3 skips are real-data tests gated
+   currently 371 passed, 4 skipped. The skips are operator-data tests gated
   on `FULL_PYTHON_BASELINE_DATA` (the operator's local 9-month CSV); with
   it set, all pass and prove the live path reproduces the backtester
   trade-for-trade.
 
-## 5. Current state (2026-07-10)
+## 5. Current state (2026-07-12)
+
+- **Adversarial Phase 0 correctness remediation — COMPLETE.** Tradovate
+  progressive bars now finalize correctly; shadow parity requires an
+  independent bar CSV; exits wait for confirmed stop cancellation; reject and
+  unsolicited-cancel paths enter explicit recovery; holiday/early-close logic
+  is shared by sim/live; NQ/MNQ point value has one authority; RTH gaps fail
+  closed; dirty source changes run identity; stop-bar MFE/MAE is bounded and
+  flagged. See
+  `docs/decisions/2026-07-12-phase0-correctness-remediation.md`.
+- **Phase 1 evidence migration — COMPLETE.** Standard reports now include
+  deterministic session-block bootstrap bands and top-trade/day dependency.
+  The old TradingView headline, old MNQ sizing verdict, and unsupported prop
+  EV are retired. See `2026-07-12-phase1-evidence-migration.md`.
+- **Phase 2 robust experimentation — IN PROGRESS.** SQLite trial-budget
+  registry and anchored fold reporting are built. Baseline walk-forward is
+  positive in 5/7 NQ and 4/7 MNQ six-month folds; both halves of 2023 lose.
+  The four-level NQ execution-cost axis also passes through 2 points per side
+  ($120,010 net, PF 1.292, -$27,070 DD). See
+  `2026-07-12-phase2-baseline-walk-forward.md` and
+  `2026-07-12-phase2-execution-cost-axis.md`. The execution-timing axis also
+  survives one-minute latency and 10% missed signals, but latency reduces
+  positive forward folds from 5/7 to 3/7 despite slightly higher aggregate
+  net. See `2026-07-13-phase2-execution-timing-axis.md`.
 
 - **Baseline frozen & TV-reconciled** — Python engine matches TradingView
   106/106 trades at $0.00 entry-price delta on the 9-month anchor.
@@ -85,10 +110,10 @@ Do not skip the review step, and do not merge red tests.
   rejected (holdout sign reversal); MA-length and S/R-interaction sweeps
   both closed (no cell cleared the bar). The locked config survived its
   full Python-era parameter audit unchanged.
-- **Sizing settled (5-year):** trade **1 NQ** if the account absorbs
-  ~$20K drawdown (best risk efficiency; the $1K DLL engages); use an MNQ
-  stack only to fit a smaller account's DD budget, at ~18-22% worse
-  Return/DD. See `docs/decisions/2026-07-06-sizing-gate-5yr.md`.
+- **Old sizing verdict RETIRED.** Its MNQ strategy used NQ's $20/point for
+  projected risk while the simulator used $2/point. Corrected five-year MNQ is
+  859 trades, $25,931.50 net, and -$2,865.50 max drawdown. Re-derive sizing in
+  the next research phase; do not quote the old NQ-vs-MNQ efficiency verdict.
 - **Live-engine sub-project 1 (execution core) — DONE, merged, real-data
   identity proven.** Broker-agnostic `LiveLoop`, `PositionEngine` shared
   by sim and live, `PaperBroker`, `RiskSupervisor`, order state machine.
@@ -106,24 +131,26 @@ Do not skip the review step, and do not merge red tests.
   `docs/research/2026-07-07-mr-orfade-run1-verdict.md`.
 - **Sub-project 3 — Tradovate adapter — offline-COMPLETE** (2026-07-10).
   Foundation (auth/HTTP/WS/feed/broker skeleton, Tasks 1-6) plus the
-  gap-closure pass: all six tracked `TradovateBroker` safety gaps closed
+  gap-closure pass plus the 2026-07-12 adversarial remediation
   (fill-derived trade ledger, live DLL, broker-held frozen protective
   stop, cancel-then-close exit path, submitted-order map with
   halt-on-unknown/duplicate, position reconciliation). Broker Failure
-  Matrix 28/28 (27 tested + 1 OCO row N/A-by-design). Specs:
+  Matrix V2 is recorded in the Phase 0 decision. Specs:
   `docs/superpowers/specs/2026-07-07-tradovate-adapter-design.md` and
   `2026-07-10-tradovate-gap-closure-design.md`. Still offline-only —
   see guardrail 7.
 
-Branch note: `claude/m4-regime` is the active integration branch; `main`
-lags it. PR #13 consolidates it into `main`. Check open PRs before
-assuming what is merged.
+Branch note: Phase 0 work is on `codex/phase-0-remediation`, based on `main`.
+Check open PRs before assuming what is merged.
 
 ## 6. Open tasks (ranked)
 
-1. **Merge PR #13** (`claude/m4-regime` → `main`: MR run-1 record + full
-   Tradovate adapter incl. gap closure).
-2. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
+1. **Review and merge Phase 0.** Both the ordinary and operator-data suites
+   must be green, and the corrected anchor fixture must reproduce exactly.
+2. **Phase 1 evidence migration:** retire invalid MNQ sizing claims, add the
+   corrected bootstrap/robustness outputs to standard reports, and re-derive
+   MNQ-first capital sizing without re-optimizing strategy parameters.
+3. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
    demo order test → paper → reconciliation → a tiny MNQ live pilot
    ($150/day, $500 total, 30 sessions). Slice 1 (Gate 5 observe runner)
    is BUILT — see `docs/live-observe-runbook.md`; next action is running
@@ -131,12 +158,12 @@ assuming what is merged.
    dashboards; note that data_outage and invariant_violation halts share
    `transition="execution_halt"` and differ by the `reason` field —
    consumers must read `reason`.
-3. **Resolve the account-level DLL open question** (see the Open
+4. **Resolve the account-level DLL open question** (see the Open
    Operational Decisions list in the adapter spec): does Tradovate/the
    prop firm enforce an account-level daily-loss limit, and does it
    force-flatten or only block new orders? Feeds sub-project 4's pilot
    checklist; the client-side DLL stays regardless.
-4. **Mean-reversion sleeve — PAUSED** under its research contract after
+5. **Mean-reversion sleeve — PAUSED** under its research contract after
    the run-1 rejection; resume only with a new pre-filed mechanism.
 
 ## 7. Key facts a new agent will need
@@ -155,13 +182,13 @@ assuming what is merged.
 | Squeeze | momentum + release + accelerating, all ON |
 | Trend filters | ATF sens 4.5 (len 12/22), MA50 + MA200 ON |
 
-**Realistic earnings (1 NQ, backtest, pessimistic cost model):** mean
-month ~$2,500 but **median month ~$830**, ~45% of months negative,
-lumpy/tail-driven. Judge annually (~$30K/yr per NQ over 5 years), not
-monthly. On a capped prop account the realized take is lower (~$760/mo
-net EV on the Select→Flex path) because daily caps clip the tail. Details:
-`docs/decisions/2026-07-06-sizing-gate-5yr.md` and the monthly analysis in
-the project history.
+**Current planning evidence (corrected five-year 1 NQ backtest):** 813
+trades, $160,125 net, PF 1.420, 22.1% wins, and observed max drawdown
+-$18,570. A deterministic 10-session moving-block bootstrap gives annualized
+net 95% CI of approximately $8.5K-$51.1K and max-drawdown median / p95 / p99
+of about -$24.5K / -$42.5K / -$54.6K. Use the adverse distribution for
+capital planning, not observed drawdown. No current prop-account monthly EV
+is authoritative; it must be recomputed from explicit, current account rules.
 
 **Repo orientation:** `src/full_python/` — `simulation/` (engine +
 `position_engine.py`, the shared fill lifecycle), `strategy/`

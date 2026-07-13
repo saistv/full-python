@@ -7,6 +7,7 @@ suite. See docs/superpowers/specs/2026-07-05-execution-core-design.md.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Optional
 
 from full_python.data.sessions import SessionInfo
@@ -47,6 +48,7 @@ class _PendingEntry:
     intent: OrderIntent
     stop_price: float
     target_price: Optional[float]
+    remaining_delay_bars: int = 0
 
 
 @dataclass
@@ -57,6 +59,15 @@ class _PendingExit:
 
 class PositionEngine:
     def __init__(self, config: SimulationConfig, strategy: Strategy, ledger: EventLedger) -> None:
+        strategy_config = getattr(strategy, "config", None)
+        if (
+            getattr(strategy_config, "enable_daily_loss_limit", False)
+            and getattr(strategy_config, "dollar_point_value", config.point_value)
+            != config.point_value
+        ):
+            raise ValueError(
+                "strategy dollar_point_value must match simulation point_value"
+            )
         self.config = config
         self._strategy = strategy
         self._ledger = ledger
@@ -106,8 +117,8 @@ class PositionEngine:
         self._process_open_gap_stop(bar)
         self._process_pending_entry(bar, session)
         self._process_pending_exit(bar)
-        self._update_excursions(bar)
         self._process_intrabar_stop_and_target(bar)
+        self._update_excursions(bar)
         self._process_backstop_flatten(bar, session)
         return self._check_daily_loss_limit(bar)
 
@@ -171,7 +182,24 @@ class PositionEngine:
         pending = self._pending_entry
         if pending is None:
             return
+        if pending.remaining_delay_bars > 0:
+            pending.remaining_delay_bars -= 1
+            return
         self._pending_entry = None
+        if not self._entry_fill_selected(pending.intent):
+            self._ledger.append(
+                EventType.STATE_TRANSITION,
+                timestamp_utc=bar.timestamp_utc,
+                payload={
+                    "transition": "entry_missed",
+                    "symbol": pending.intent.symbol,
+                    "side": pending.intent.side,
+                    "intent_timestamp_utc": pending.intent.timestamp_utc,
+                    "entry_fill_rate": self.config.entry_fill_rate,
+                    "entry_fill_seed": self.config.entry_fill_seed,
+                },
+            )
+            return
         self._open_position(
             intent=pending.intent,
             stop_price=pending.stop_price,
@@ -180,6 +208,23 @@ class PositionEngine:
             timestamp_utc=bar.timestamp_utc,
             session=session,
         )
+
+    def _entry_fill_selected(self, intent: OrderIntent) -> bool:
+        if self.config.entry_fill_rate >= 1.0:
+            return True
+        if self.config.entry_fill_rate <= 0.0:
+            return False
+        identity = "|".join((
+            str(self.config.entry_fill_seed),
+            intent.timestamp_utc,
+            intent.symbol,
+            intent.side,
+            str(intent.quantity),
+        ))
+        value = int.from_bytes(
+            hashlib.sha256(identity.encode("utf-8")).digest()[:8], "big"
+        ) / float(1 << 64)
+        return value < self.config.entry_fill_rate
 
     def _process_pending_exit(self, bar: MarketBar) -> None:
         pending = self._pending_exit
@@ -220,15 +265,34 @@ class PositionEngine:
             )
 
         if stop_hit:
-            # Worst case wins: when both levels sit inside one bar, the stop
-            # fills and the trade is flagged ambiguous.
+            # Under the engine's stop-first policy, the stop-bar's favorable
+            # extreme is not counted as achieved. It is only an OHLC upper
+            # bound and may have occurred after the trade closed. Preserve the
+            # previously confirmed MFE, clamp MAE to the stop, and flag the
+            # trade whenever that discarded extreme could change MFE.
+            if position.side == "long":
+                favorable_upper = bar.high - position.entry_price
+            else:
+                favorable_upper = position.entry_price - bar.low
+            path_ambiguous = favorable_upper > position.mfe_points
+            position.mae_points = max(
+                position.mae_points,
+                abs(position.entry_price - position.stop_price),
+            )
             self._close_position(
                 raw_price=position.stop_price,
                 timestamp_utc=bar.timestamp_utc,
                 reason="stop",
-                ambiguous=bool(target_hit),
+                ambiguous=bool(target_hit or path_ambiguous),
             )
         elif target_hit:
+            # A clean target fill confirms movement only as far as the target;
+            # any farther same-bar high/low happened after the position may
+            # already have closed.
+            position.mfe_points = max(
+                position.mfe_points,
+                abs(float(position.target_price) - position.entry_price),
+            )
             self._close_position(
                 raw_price=position.target_price,
                 timestamp_utc=bar.timestamp_utc,
@@ -236,7 +300,12 @@ class PositionEngine:
             )
 
     def _process_backstop_flatten(self, bar: MarketBar, session: SessionInfo) -> None:
-        if session.minutes_from_midnight_et < self.config.flatten_minutes_et:
+        close_minutes = session.rth_close_minutes_et
+        effective_flatten = (
+            0 if close_minutes is None
+            else min(self.config.flatten_minutes_et, close_minutes - 1)
+        )
+        if session.minutes_from_midnight_et < effective_flatten:
             return
         if session.minutes_from_midnight_et >= 18 * 60:
             return  # new CME session; handled by the session-change flatten
@@ -369,7 +438,10 @@ class PositionEngine:
             target_price = None if raw_target is None else float(raw_target)
             if self.config.fill_timing == FILL_TIMING_NEXT_BAR_OPEN:
                 self._pending_entry = _PendingEntry(
-                    intent=intent, stop_price=stop_price, target_price=target_price
+                    intent=intent,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    remaining_delay_bars=self.config.entry_delay_bars,
                 )
             else:
                 self._open_position(

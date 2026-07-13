@@ -70,5 +70,5 @@ if len(sys.argv) > 2:
     print(f"  trade delta:{sv['n']-sb['n']:+d}  "
           f"(if PF up but net down / trades blocked => Standard 7 trap)")
     print(f"  Welch t (per-trade P&L, variant vs baseline): {welch(base,var):+.2f}")
-    print("  NOTE: |t|<2.0 = not significant. A Python win is NOT a change")
-    print("        authority — production change needs TV >=$275K AND PF>=2.071.")
+    print("  NOTE: |t|<2.0 = not significant. Promotion requires every")
+    print("        pre-registered Gate 1 row against the Python control.")

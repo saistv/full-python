@@ -1,8 +1,8 @@
 """Adaptive Trend — Python port of the validated production signal core.
 
-Ported line-for-line in behavior from the Pine research fork
-(``strategy_RESEARCH.pine``, itself the parity twin of the validated
-$251K / PF 2.071 / 448-trade production config): pivot S/R breakout with
+Ported line-for-line in behavior from the Pine research fork and reconciled
+against TradingView entries. The retired $251K / PF 2.071 headline is not a
+performance authority. The signal core is a pivot S/R breakout with
 prove-it confirmation, squeeze momentum (green/red + released state),
 wings strong-candle gate, MA50 EMA / MA200 SMA trend filters, ATF trend
 alignment, 9:30-10:00 ET entry window, cooldowns 7/1/3, and the Dynamic

@@ -90,6 +90,10 @@ def run_perturbation(
     if not bars:
         raise ValueError(f"No bars loaded from {data_path}")
     base = _base_config(strategy_name)
+    if isinstance(base, AdaptiveTrendConfig):
+        base = dataclasses.replace(
+            base, dollar_point_value=simulation_config.point_value
+        )
 
     def simulate(config) -> dict[str, Any]:
         sim_config = simulation_config

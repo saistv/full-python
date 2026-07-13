@@ -494,6 +494,17 @@ binding above is amended accordingly: `order_enabled=True` /
 the sub-project 4 gates (demo observe → demo order test → pilot
 checklist) are passed — the gap list itself is no longer the blocker.
 
+**Safety amendment (2026-07-12):** the 28/28 statement above is superseded by
+the adversarial Phase 0 Failure Matrix V2 in
+`docs/decisions/2026-07-12-phase0-correctness-remediation.md`. The original
+matrix treated REST cancel acceptance as final cancellation and did not cover
+the stop-fill race, exit rejection after stop cancellation, unsolicited stop
+cancellation, latent entry cancellation while flat, or placement responses
+without `orderId`. Those paths are now test-covered. This still does not
+authorize orders: persistent client IDs, restart reconciliation, account-event
+pumping, and multi-contract partial-fill semantics remain required before the
+demo order phase.
+
 Separately, an open question this spec never poses: **does Tradovate
 enforce a daily-loss limit at the account/platform level** (some prop-
 firm risk add-ons do), and if so, does that supplement or substitute for

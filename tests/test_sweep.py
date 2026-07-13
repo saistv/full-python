@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from full_python.models import Trade
@@ -307,7 +309,11 @@ def test_run_grid_smoke_baseline_identity_and_override_divergence():
     assert len(results) == 2
     assert all(r.error is None for r in results)
     assert all(r.trades == () for r in results)
-    assert results[0].config_hash == production_am_config().parameter_hash()
+    expected = replace(
+        production_am_config(),
+        dollar_point_value=SimulationConfig().point_value,
+    )
+    assert results[0].config_hash == expected.parameter_hash()
     assert results[1].config_hash is not None
     assert results[1].config_hash != results[0].config_hash
 

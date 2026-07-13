@@ -34,6 +34,31 @@ def test_run_baseline_writes_event_log_and_report(tmp_path: Path) -> None:
     assert report["data"]["column_map"]["timestamp"] == "timestamp"
     assert report["survivability"]["trade_count"] == 0
     assert len(report["strategy"]["parameter_hash"]) == 64
+    assert report["bootstrap"]["draws"] == 2000
+    assert report["bootstrap"]["block_length_sessions"] == 1
+    assert "profit_factor" in report["survivability"]
+
+
+def test_adaptive_strategy_uses_execution_instrument_point_value(tmp_path: Path) -> None:
+    data_path = tmp_path / "bars.csv"
+    data_path.write_text(
+        "timestamp,symbol,open,high,low,close,volume\n"
+        "2026-06-30T13:30:00Z,NQU2026,100,101,99,100,10\n"
+        "2026-06-30T13:31:00Z,NQU2026,100,102,99,101,10\n",
+        encoding="utf-8",
+    )
+
+    report_path = run_baseline(
+        data_path=data_path,
+        output_dir=tmp_path / "mnq-run",
+        strategy_name="adaptive_trend_am",
+        execution_instrument="MNQ",
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert report["execution_instrument"]["root"] == "MNQ"
+    assert report["simulation"]["point_value"] == 2.0
+    assert report["strategy"]["dollar_point_value"] == 2.0
 
 
 def test_run_baseline_manifest_hash_changes_when_csv_contents_change(tmp_path: Path) -> None:

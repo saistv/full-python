@@ -23,6 +23,12 @@ class SurvivabilityReport:
     pnl_without_best_trade: float
     long_pnl: float
     short_pnl: float
+    win_rate: float
+    expectancy_per_trade: float
+    profit_factor: Optional[float]
+    pnl_without_top_3_trades: float
+    pnl_without_top_5_trades: float
+    pnl_without_top_10_trades: float
 
     def to_dict(self) -> dict[str, float | int]:
         return asdict(self)
@@ -53,6 +59,14 @@ def build_survivability_report(trades: list[TradeResult]) -> SurvivabilityReport
 
     best_trade = max((trade.pnl for trade in trades), default=0.0)
     net_pnl = sum(trade.pnl for trade in trades)
+    wins = [trade.pnl for trade in trades if trade.pnl > 0]
+    losses = [trade.pnl for trade in trades if trade.pnl < 0]
+    ranked_wins = sorted(wins, reverse=True)
+
+    def without_top(count: int) -> float:
+        return net_pnl - sum(ranked_wins[:count])
+
+    gross_loss = -sum(losses)
     return SurvivabilityReport(
         trade_count=len(trades),
         net_pnl=net_pnl,
@@ -61,6 +75,12 @@ def build_survivability_report(trades: list[TradeResult]) -> SurvivabilityReport
         pnl_without_best_trade=net_pnl - best_trade,
         long_pnl=long_pnl,
         short_pnl=short_pnl,
+        win_rate=(len(wins) / len(trades)) if trades else 0.0,
+        expectancy_per_trade=(net_pnl / len(trades)) if trades else 0.0,
+        profit_factor=(sum(wins) / gross_loss) if gross_loss > 0 else None,
+        pnl_without_top_3_trades=without_top(3),
+        pnl_without_top_5_trades=without_top(5),
+        pnl_without_top_10_trades=without_top(10),
     )
 
 
@@ -77,6 +97,11 @@ class DailyMetrics:
     best_day_share: Optional[float]
     sharpe_annualized: float
     max_time_underwater_days: int
+    pnl_without_top_1_day: float
+    pnl_without_top_3_days: float
+    pnl_without_top_5_days: float
+    pnl_without_top_10_days: float
+    top_5_day_share: Optional[float]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -106,6 +131,10 @@ def build_daily_metrics(
     net = sum(series)
     best_day = max(series, default=0.0)
     worst_day = min(series, default=0.0)
+    ranked_positive_days = sorted((value for value in series if value > 0), reverse=True)
+
+    def without_top(count: int) -> float:
+        return net - sum(ranked_positive_days[:count])
 
     if trading_days >= 2 and statistics.stdev(series) > 0:
         sharpe = (
@@ -141,6 +170,11 @@ def build_daily_metrics(
         best_day_share=(best_day / net) if net > 0 else None,
         sharpe_annualized=sharpe,
         max_time_underwater_days=max_underwater,
+        pnl_without_top_1_day=without_top(1),
+        pnl_without_top_3_days=without_top(3),
+        pnl_without_top_5_days=without_top(5),
+        pnl_without_top_10_days=without_top(10),
+        top_5_day_share=(sum(ranked_positive_days[:5]) / net) if net > 0 else None,
     )
 
 

@@ -207,6 +207,9 @@ def render_html_report(
     data = report.get("data", {})
     net = surv.get("net_pnl", 0.0)
     pf = stats["profit_factor"]
+    bootstrap = report.get("bootstrap", {})
+    annualized_ci = bootstrap.get("annualized_net_pnl_95", {})
+    top_5_day_share = daily_metrics.get("top_5_day_share") or 0.0
 
     exit_rows = "".join(
         f"<tr><td>{escape(reason)}</td><td>{count}</td></tr>"
@@ -251,6 +254,27 @@ def render_html_report(
 {_stat("Time underwater", f"{daily_metrics.get('max_time_underwater_days', 0)} days")}
 {_stat("Ambiguous exits", str(report.get('ambiguous_exits', 0)))}
 </div>
+
+<h2>Session-block bootstrap</h2>
+<div class="panel"><table>
+<tr><th>Measure</th><th>Result</th></tr>
+<tr><td>Annualized net P&amp;L 95% interval</td><td>{_fmt_money(annualized_ci.get('lower', 0.0))} to {_fmt_money(annualized_ci.get('upper', 0.0))}</td></tr>
+<tr><td>Median max drawdown</td><td>{_fmt_money(bootstrap.get('max_drawdown_median', 0.0))}</td></tr>
+<tr><td>p95 adverse max drawdown</td><td>{_fmt_money(bootstrap.get('max_drawdown_p95_adverse', 0.0))}</td></tr>
+<tr><td>p99 adverse max drawdown</td><td>{_fmt_money(bootstrap.get('max_drawdown_p99_adverse', 0.0))}</td></tr>
+<tr><td>P(total net &le; 0)</td><td>{bootstrap.get('probability_total_net_nonpositive', 0.0) * 100:.2f}%</td></tr>
+<tr><td>Method</td><td>{bootstrap.get('draws', 0)} draws, {bootstrap.get('block_length_sessions', 0)}-session moving blocks, seed {bootstrap.get('seed', '')}</td></tr>
+</table></div>
+
+<h2>Right-tail dependency</h2>
+<div class="panel"><table>
+<tr><th>Removal</th><th>Remaining net P&amp;L</th></tr>
+<tr><td>Best trade</td><td>{_fmt_money(surv.get('pnl_without_best_trade', 0.0))}</td></tr>
+<tr><td>Top 3 trades</td><td>{_fmt_money(surv.get('pnl_without_top_3_trades', 0.0))}</td></tr>
+<tr><td>Top 5 trades</td><td>{_fmt_money(surv.get('pnl_without_top_5_trades', 0.0))}</td></tr>
+<tr><td>Top 10 trades</td><td>{_fmt_money(surv.get('pnl_without_top_10_trades', 0.0))}</td></tr>
+<tr><td>Top 5 days</td><td>{_fmt_money(daily_metrics.get('pnl_without_top_5_days', 0.0))} remaining ({top_5_day_share * 100:.1f}% of net removed)</td></tr>
+</table></div>
 
 <h2>Equity curve (daily close, drawdown shaded)</h2>
 <div class="panel">{_equity_svg(daily)}</div>

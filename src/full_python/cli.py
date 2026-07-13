@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import asdict
+from dataclasses import asdict, replace
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -11,7 +12,9 @@ from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
 from full_python.data.manifest import DataManifest, file_sha256
 from full_python.data.validation import validate_bars
 from full_python.events import EventType
+from full_python.instruments import instrument_for_point_value, instrument_spec
 from full_python.reporting.html_report import render_html_report
+from full_python.reporting.bootstrap import build_block_bootstrap_report
 from full_python.reporting.survivability import (
     TradeResult,
     build_daily_metrics,
@@ -49,15 +52,19 @@ TRADE_CSV_COLUMNS = [
 ]
 
 
-def build_strategy(strategy_name: str):
+def build_strategy(strategy_name: str, *, dollar_point_value: float | None = None):
     if strategy_name == "baseline":
         config = BaselineMomentumConfig()
         return config, BaselineMomentumStrategy(config)
     if strategy_name == "adaptive_trend":
         config = AdaptiveTrendConfig()
+        if dollar_point_value is not None:
+            config = replace(config, dollar_point_value=dollar_point_value)
         return config, AdaptiveTrendStrategy(config)
     if strategy_name == "adaptive_trend_am":
         config = production_am_config()
+        if dollar_point_value is not None:
+            config = replace(config, dollar_point_value=dollar_point_value)
         return config, AdaptiveTrendStrategy(config)
     if strategy_name == "vwap_reversion":
         config = VwapReversionConfig()
@@ -68,12 +75,15 @@ def build_strategy(strategy_name: str):
     raise ValueError(f"Unknown strategy: {strategy_name}")
 
 
-def _code_version_hash() -> str:
-    """Git SHA of the current checkout; git's null-SHA (all zeros) outside a git repo."""
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _git_commit(repo_root: Path | None = None) -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
+            cwd=repo_root or _repo_root(),
             capture_output=True,
             text=True,
             check=True,
@@ -81,6 +91,46 @@ def _code_version_hash() -> str:
         return result.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return "0" * 40
+
+
+def _source_tree_hash(repo_root: Path | None = None) -> str:
+    """Hash executable source bytes, including dirty and untracked code."""
+    root = repo_root or _repo_root()
+    candidates = [root / "pyproject.toml"]
+    for directory in (root / "src", root / "scripts"):
+        if directory.exists():
+            candidates.extend(directory.rglob("*.py"))
+    digest = hashlib.sha256()
+    for path in sorted((p for p in candidates if p.is_file()), key=lambda p: str(p)):
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _source_is_dirty(repo_root: Path | None = None) -> bool:
+    root = repo_root or _repo_root()
+    try:
+        result = subprocess.run(
+            [
+                "git", "status", "--porcelain", "--untracked-files=all", "--",
+                "src", "scripts", "pyproject.toml",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return bool(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return True
+
+
+def _code_version_hash(repo_root: Path | None = None) -> str:
+    """Content identity of the code that actually executed the run."""
+    return _source_tree_hash(repo_root)
 
 
 def run_baseline(
@@ -91,6 +141,7 @@ def run_baseline(
     allow_dirty_data: bool = False,
     strategy_name: str = "baseline",
     simulation_overrides: dict | None = None,
+    execution_instrument: str | None = None,
 ) -> Path:
     input_path = Path(data_path)
     run_dir = Path(output_dir)
@@ -131,15 +182,36 @@ def run_baseline(
         file_size_bytes=input_path.stat().st_size,
         column_map=asdict(column_map),
     )
-    strategy_config, strategy = build_strategy(strategy_name)
     overrides = dict(simulation_overrides or {})
-    if getattr(strategy_config, "enable_daily_loss_limit", False):
-        overrides.setdefault("daily_loss_limit", strategy_config.daily_loss_limit)
+    if execution_instrument is not None:
+        spec = instrument_spec(execution_instrument)
+        if "point_value" in overrides and overrides["point_value"] != spec.dollar_point_value:
+            raise ValueError("point_value conflicts with execution_instrument")
+        overrides.setdefault("point_value", spec.dollar_point_value)
+        overrides.setdefault(
+            "commission_per_contract_round_trip",
+            spec.commission_per_contract_round_trip,
+        )
+    provisional_config = production_am_config() if strategy_name == "adaptive_trend_am" else None
+    if getattr(provisional_config, "enable_daily_loss_limit", False):
+        overrides.setdefault("daily_loss_limit", provisional_config.daily_loss_limit)
     simulation_config = SimulationConfig(fill_timing=fill_timing, **overrides)
+    execution_spec = (
+        instrument_spec(execution_instrument)
+        if execution_instrument is not None
+        else instrument_for_point_value(simulation_config.point_value)
+    )
+    strategy_config, strategy = build_strategy(
+        strategy_name,
+        dollar_point_value=simulation_config.point_value,
+    )
     result = SimulationEngine(simulation_config).run(bars, strategy)
 
     # Deterministic run identity: same data + same configs + same code => same run id.
-    code_version = _code_version_hash()
+    repo_root = _repo_root()
+    code_version = _code_version_hash(repo_root)
+    git_commit = _git_commit(repo_root)
+    source_dirty = _source_is_dirty(repo_root)
     run_id = "-".join(
         [
             manifest.stable_hash()[:8],
@@ -186,6 +258,8 @@ def run_baseline(
         ]
     )
     daily_metrics = build_daily_metrics(daily_pnl, list(result.session_dates))
+    daily_series = [daily_pnl.get(day, 0.0) for day in result.session_dates]
+    bootstrap = build_block_bootstrap_report(daily_series)
     monthly = build_monthly_breakdown(daily_pnl)
     exit_reasons: dict[str, int] = {}
     ambiguous_exits = 0
@@ -197,6 +271,11 @@ def run_baseline(
     report = {
         "run_id": run_id,
         "code_version": code_version,
+        "source_provenance": {
+            "git_commit": git_commit,
+            "source_tree_sha256": code_version,
+            "dirty": source_dirty,
+        },
         "data": {
             **manifest.to_dict(),
             "manifest_hash": manifest.stable_hash(),
@@ -210,11 +289,13 @@ def run_baseline(
             **simulation_config.to_dict(),
             "parameter_hash": simulation_config.parameter_hash(),
         },
+        "execution_instrument": asdict(execution_spec),
         "events_path": str(events_path),
         "trades_path": str(trades_path),
         "daily_pnl_path": str(daily_path),
         "survivability": survivability.to_dict(),
         "daily": daily_metrics.to_dict(),
+        "bootstrap": bootstrap.to_dict(),
         "monthly": monthly,
         "exit_reasons": exit_reasons,
         "ambiguous_exits": ambiguous_exits,
@@ -257,6 +338,11 @@ def main() -> None:
         help="adaptive_trend = flat parity core; adaptive_trend_am = production sizing; vwap_reversion = MR variant 1 (v0.2); opening_range_fade = MR variant 2 (v1)",
     )
     parser.add_argument("--point-value", type=float, help="Override contract point value (default 2.0 = MNQ)")
+    parser.add_argument(
+        "--instrument",
+        choices=["NQ", "MNQ"],
+        help="Execution/risk instrument; market data may still be NQ-derived",
+    )
     parser.add_argument("--commission-rt", type=float, help="Override round-trip commission per contract")
     parser.add_argument("--entry-slippage-points", type=float, help="Override entry slippage (e.g. 0.75 to mirror a TV run)")
     parser.add_argument("--exit-slippage-points", type=float, help="Override exit slippage")
@@ -280,6 +366,7 @@ def main() -> None:
         allow_dirty_data=args.allow_dirty_data,
         strategy_name=args.strategy,
         simulation_overrides=overrides,
+        execution_instrument=args.instrument,
     )
     print(report_path)
 
