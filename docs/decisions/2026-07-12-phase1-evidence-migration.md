@@ -1,5 +1,12 @@
 # Phase 1 Evidence Migration
 
+> **SUPERSEDED NUMBERS (2026-07-13).** Every figure in this document was computed
+> on a calendar that wrongly treated seven abbreviated CME holiday sessions
+> (09:30-13:00 ET, market open) as full closures. See
+> `docs/decisions/2026-07-13-exchange-calendar-correction.md` for the corrected
+> authority table and TradingView parity restoration. Qualitative conclusions in
+> this document survive the correction; the numbers do not.
+
 **Decision:** Python is the sole performance authority. The historical
 `$251K / PF 2.071 / 448 trades` TradingView headline and the old `$760/month`
 prop-account estimate are retired. They are not baselines, promotion gates, or
