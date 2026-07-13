@@ -1,3 +1,5 @@
+import pytest
+
 from full_python.events import EventType
 from full_python.models import ExitDecision, MarketBar, OrderIntent, StrategyResult
 from full_python.simulation import SimulationConfig, SimulationEngine
@@ -37,6 +39,21 @@ def _buy_intent(bar: MarketBar, stop_price: float, target_price: float = None) -
                 quantity=1,
                 reason="test_entry",
                 metadata=metadata,
+            ),
+        )
+    )
+
+
+def _sell_intent(bar: MarketBar, stop_price: float) -> StrategyResult:
+    return StrategyResult(
+        order_intents=(
+            OrderIntent.market_entry(
+                timestamp_utc=bar.timestamp_utc,
+                symbol=bar.symbol,
+                side="sell",
+                quantity=1,
+                reason="test_entry",
+                metadata={"stop_price": stop_price, "signal_price": bar.close},
             ),
         )
     )
@@ -106,6 +123,56 @@ def test_additional_entry_delay_fills_on_later_bar_open() -> None:
     assert result.trades[0].entry_price == 105.0
 
 
+@pytest.mark.parametrize(
+    ("intent_factory", "delayed_open", "stop_price"),
+    [
+        (_buy_intent, 80.0, 90.0),
+        (_sell_intent, 120.0, 110.0),
+    ],
+)
+def test_delayed_entry_is_invalidated_when_stop_is_not_protective_at_fill(
+    intent_factory, delayed_open: float, stop_price: float
+) -> None:
+    config = SimulationConfig(
+        point_value=2.0,
+        commission_per_contract_round_trip=1.0,
+        entry_slippage_points=0.0,
+        exit_slippage_points=0.0,
+        rth_open_extra_entry_slippage_points=0.0,
+        entry_delay_bars=1,
+    )
+    bars = [
+        _bar("2026-06-30T13:46:00Z", 100.0, 101.0, 99.0, 100.0),
+        _bar("2026-06-30T13:47:00Z", 100.0, 101.0, 99.0, 100.0),
+        _bar(
+            "2026-06-30T13:48:00Z",
+            delayed_open,
+            max(delayed_open, stop_price),
+            min(delayed_open, stop_price),
+            delayed_open,
+        ),
+    ]
+
+    result = SimulationEngine(config).run(
+        bars,
+        ScriptedStrategy(
+            {0: lambda bar: intent_factory(bar, stop_price=stop_price)}
+        ),
+    )
+
+    assert result.trades == ()
+    assert _events_of(result, EventType.FILL) == []
+    invalidations = [
+        event
+        for event in result.ledger.records
+        if event.event_type == EventType.STATE_TRANSITION
+        and event.payload.get("transition") == "entry_invalidated_at_fill"
+    ]
+    assert len(invalidations) == 1
+    assert invalidations[0].payload["fill_price"] == delayed_open
+    assert invalidations[0].payload["stop_price"] == stop_price
+
+
 def test_zero_entry_fill_rate_records_miss_and_never_opens() -> None:
     config = SimulationConfig(
         point_value=2.0,
@@ -135,14 +202,35 @@ def test_zero_entry_fill_rate_records_miss_and_never_opens() -> None:
 
 
 def test_entry_timing_controls_validate_fail_closed() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="entry_delay_bars"):
         SimulationConfig(entry_delay_bars=-1)
     with pytest.raises(ValueError, match="entry_fill_rate"):
         SimulationConfig(entry_fill_rate=1.1)
     with pytest.raises(ValueError, match="next_bar_open"):
         SimulationConfig(fill_timing="signal_bar_close", entry_delay_bars=1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("point_value", float("nan")),
+        ("commission_per_contract_round_trip", -1.0),
+        ("commission_per_contract_round_trip", float("inf")),
+        ("entry_slippage_points", -0.25),
+        ("entry_slippage_points", float("nan")),
+        ("exit_slippage_points", -0.25),
+        ("exit_slippage_points", float("inf")),
+        ("rth_open_extra_entry_slippage_points", -0.25),
+        ("rth_open_extra_entry_slippage_points", float("nan")),
+        ("entry_fill_rate", float("nan")),
+        ("daily_loss_limit", float("inf")),
+    ],
+)
+def test_nonfinite_or_negative_execution_assumptions_fail_closed(
+    field: str, value: float
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        SimulationConfig(**{field: value})
 
 
 def test_rth_open_window_adds_extra_entry_slippage() -> None:

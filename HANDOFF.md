@@ -1,7 +1,8 @@
 # HANDOFF — start here
 
 You are picking up an NQ/MNQ futures trading system (Python port of a
-validated TradingView strategy). This document is self-contained: it does
+historically profitable TradingView strategy). This document is self-contained:
+it does
 not assume any particular AI tool, skill set, or external memory. Read it
 fully before touching anything. Last updated 2026-07-13.
 
@@ -9,14 +10,17 @@ fully before touching anything. Last updated 2026-07-13.
 
 `saistv/full-python` — an event-sourced, deterministic Python backtester
 and (in progress) live-execution engine for the "Adaptive Trend"
-strategy. The strategy is ALREADY VALIDATED and profitable; the work here
-is (a) rigorously re-verifying it with fast Python tooling and (b)
-building the machinery to trade it live. The Pine/TradingView version is
+strategy. Its five-year historical result is reproducible and profitable
+under the current model, but the edge is NOT independently validated: no
+untouched final holdout remains and the complete historical trial family is
+unknown. The work here is (a) prospective re-validation with fast Python
+tooling and (b) building safe live machinery. The Pine/TradingView version is
 legacy reference only.
 
 Goal: detailed reports, regime awareness, a mean-reversion sleeve,
 smoother equity curve, good Sharpe, shorter losing streaks — but NOT at
-the cost of the validated core, which no analysis this year has beaten.
+the cost of the frozen historical candidate, which no analysis this year has
+beaten.
 
 ## 2. Non-negotiable guardrails (violating these loses money or wastes weeks)
 
@@ -72,36 +76,44 @@ Do not skip the review step, and do not merge red tests.
 - **`docs/superpowers/specs/`** — design docs per feature.
 - **`docs/superpowers/plans/`** — implementation plans (complete code +
   tests) per feature.
-- **The test suite IS the executable spec.** `python3 -m pytest -q` →
-   currently 397 passed, 4 skipped. The skips are operator-data tests gated
-  on `FULL_PYTHON_BASELINE_DATA` (the operator's local 9-month CSV); with
-  it set, all pass and prove the live path reproduces the backtester
-  trade-for-trade.
+- **The test suite IS an executable spec, not proof of broker parity.**
+  `python3 -m pytest -q` currently passes, with operator-data tests gated on
+  `FULL_PYTHON_BASELINE_DATA` (the local 9-month CSV). Those tests prove
+  deterministic simulator/PaperBroker identity because both share
+  `PositionEngine`; they do NOT prove the separate Tradovate lifecycle or
+  account reconciliation path.
 
 ## 5. Current state (2026-07-13)
 
-- **Adversarial Phase 0 correctness remediation — COMPLETE.** Tradovate
+- **Historical replay correctness remediation — COMPLETE through the
+  2026-07-13 audit follow-up.** Tradovate
   progressive bars now finalize correctly; shadow parity requires an
   independent bar CSV; exits wait for confirmed stop cancellation; reject and
   unsolicited-cancel paths enter explicit recovery; holiday/early-close logic
   is shared by sim/live; NQ/MNQ point value has one authority; RTH gaps fail
   closed; dirty source changes run identity; stop-bar MFE/MAE is bounded and
-  flagged. See
-  `docs/decisions/2026-07-12-phase0-correctness-remediation.md`.
+  flagged. Fill-time stop placement now fails closed, nonfinite bars and
+  invalid execution costs are rejected, and the contaminated timing axis was
+  rerun. See `docs/decisions/2026-07-12-phase0-correctness-remediation.md`
+  and `2026-07-13-phase0-audit-follow-up.md`. This does NOT close the broker
+  execution P0 findings in the 2026-07-13 principal audit.
 - **Phase 1 evidence migration — COMPLETE.** Standard reports now include
   deterministic session-block bootstrap bands and top-trade/day dependency.
   The old TradingView headline, old MNQ sizing verdict, and unsupported prop
   EV are retired. See `2026-07-12-phase1-evidence-migration.md`.
-- **Phase 2 robust experimentation — COMPLETE.** SQLite trial-budget
+- **Phase 2 historical characterization — IMPLEMENTED, not independent OOS
+  validation.** SQLite trial-budget
   registry and anchored fold reporting are built. Baseline walk-forward is
   positive in 5/7 NQ and 4/7 MNQ six-month folds; both halves of 2023 lose.
   The four-level NQ execution-cost axis also passes through 2 points per side
   ($120,010 net, PF 1.292, -$27,070 DD). See
   `2026-07-12-phase2-baseline-walk-forward.md` and
-  `2026-07-12-phase2-execution-cost-axis.md`. The execution-timing axis also
-  survives one-minute latency and 10% missed signals, but latency reduces
-  positive forward folds from 5/7 to 3/7 despite slightly higher aggregate
-  net. Component ablation retained the frozen stack: wings and prove-it are
+  `2026-07-12-phase2-execution-cost-axis.md`. After correcting fill-time stop
+  invalidation, one-minute latency remains profitable at 804 trades, $159,935
+  net, PF 1.437, -$19,735 DD, and 4/7 positive chronological segments. The
+  combined latency-plus-10%-miss scenario is 733 trades, $142,520 net, PF
+  1.424, -$16,090 DD, and 5/7 segments. Component ablation retained the frozen
+  stack: wings and prove-it are
   strongly defensive, squeeze release is directionally useful, and the small
   aggregate gain without squeeze momentum is below the materiality bar. See
   `2026-07-13-phase2-execution-timing-axis.md` and
@@ -110,8 +122,9 @@ Do not skip the review step, and do not merge red tests.
   the no-target stop-first model, but exact 5-20 point MFE-gate claims require
   sequence data. See `2026-07-13-phase2-intrabar-bounds.md`.
 
-- **Baseline frozen & TV-reconciled** — Python engine matches TradingView
-  106/106 trades at $0.00 entry-price delta on the 9-month anchor.
+- **Baseline frozen & partially TV-reconciled** — Python matches all 106
+  overlapping TradingView entries at $0.00 entry-price delta on the 9-month
+  anchor. This is entry parity, not exact full-trade or broker parity.
 - **5-year dataset assembled** (2021-03-16 → 2026-06-26, 1.87M bars).
 - **Gate 1 config audit COMPLETE — zero changes promoted.** Prior-vol gate
   rejected (holdout sign reversal); MA-length and S/R-interaction sweeps
@@ -124,9 +137,10 @@ Do not skip the review step, and do not merge red tests.
   retained funded path is at most 10 sessions after every operational gate;
   keep at least 30 sessions in paper/shadow. See
   `docs/decisions/2026-07-13-mnq-pilot-sizing.md`.
-- **Live-engine sub-project 1 (execution core) — DONE, merged, real-data
-  identity proven.** Broker-agnostic `LiveLoop`, `PositionEngine` shared
-  by sim and live, `PaperBroker`, `RiskSupervisor`, order state machine.
+- **Live-engine sub-project 1 (simulation/paper orchestration) — DONE.**
+  Broker-agnostic `LiveLoop`, shared simulator/PaperBroker `PositionEngine`,
+  `RiskSupervisor`, and order-state shadow. Shared-code identity is proven;
+  independent Tradovate execution parity is not.
 - **Live-engine sub-project 2 (live data feed) — DONE, merged.**
   Vendor-agnostic `LiveBarSource`, contract authority, session-armed
   outage detection (halt+flatten). The trading window is config-driven
@@ -139,46 +153,54 @@ Do not skip the review step, and do not merge red tests.
   PF 0.692, t=-3.74). MR track paused per its research contract; run 2
   needs a new pre-filed mechanism, not parameter tuning. See
   `docs/research/2026-07-07-mr-orfade-run1-verdict.md`.
-- **Sub-project 3 — Tradovate adapter — offline-COMPLETE** (2026-07-10).
+- **Sub-project 3 — Tradovate adapter skeleton — OFFLINE ONLY** (2026-07-10).
   Foundation (auth/HTTP/WS/feed/broker skeleton, Tasks 1-6) plus the
   gap-closure pass plus the 2026-07-12 adversarial remediation
   (fill-derived trade ledger, live DLL, broker-held frozen protective
   stop, cancel-then-close exit path, submitted-order map with
-  halt-on-unknown/duplicate, position reconciliation). Broker Failure
+  halt-on-unknown/duplicate, position reconciliation). The principal audit
+  found unresolved P0/P1 protocol and recovery defects, so "complete" is not a
+  promotion claim. Broker Failure
   Matrix V2 is recorded in the Phase 0 decision. Specs:
   `docs/superpowers/specs/2026-07-07-tradovate-adapter-design.md` and
   `2026-07-10-tradovate-gap-closure-design.md`. Still offline-only —
   see guardrail 7.
 
-Repository checkpoint: PRs #15, #16, #17, and #18 were reviewed and merged in
-dependency order. `main` is current through merge commit `4de6b98` (MNQ pilot
-sizing); the local checkout and `origin/main` matched at that commit after the
-merge. Start new work from `main` on a fresh feature branch.
+Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
+`dce7988`; always verify current local and `origin/main` hashes rather than
+trusting this prose checkpoint. Start new work from current `main` on a fresh
+feature branch.
 
 ## 6. Open tasks (ranked)
 
-1. **MNQ-first sizing is re-derived; execute the operational gates, not more
-   sizing research.** A 30-session funded pilot fails the `$500` risk gate
-   (23-27% budget-breach probability). The approved research conclusion is at
-   most a 10-session flat-1-MNQ funded operational pilot after demo observe,
-   demo order, paper, and reconciliation pass; keep a 30-session paper/shadow
+1. **Fix the demo-observe cold-start outage before collecting Gate 5
+   evidence.** The observer can wait forever if it starts inside the active
+   window before receiving its first bar. Add the startup deadline and halt
+   report, then run the reconnect/outage drills from principal audit P1-03.
+2. **Redesign the order-capable broker path offline before any demo order.**
+   Required work includes broker-authoritative strategy feedback, duplicate
+   entry prevention, exact account/contract reconciliation, a real 15:59
+   flatten, valid `contractId` liquidation, user-event synchronization,
+   idempotency, and restart recovery. See principal audit P0-02 through P1-02.
+3. **MNQ-first sizing is re-derived; execute operational gates only after the
+   blockers above.** A 30-session funded pilot fails the `$500` risk gate
+   (23-27% budget-breach probability). The research conclusion is at most a
+   10-session flat-1-MNQ funded operational pilot after demo observe, demo
+   order, paper, and reconciliation pass; keep a 30-session paper/shadow
    record. See `2026-07-13-mnq-pilot-sizing.md`.
-2. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
-   demo order test → paper → reconciliation → a tiny MNQ live pilot
-   ($150/day, $500 total, at most 10 funded sessions). Slice 1 (Gate 5 observe
-   runner) is BUILT — see `docs/live-observe-runbook.md`; next action is
-   running the 3 observe sessions, then the demo-order-test spec. This step
-   requires the operator's Tradovate demo credentials and network access;
-   credentials must remain local and must never be committed. Includes
-   dashboards; note that data_outage and invariant_violation halts share
-   `transition="execution_halt"` and differ by the `reason` field —
-   consumers must read `reason`.
-3. **Resolve the account-level DLL open question** (see the Open
+4. **Sub-project 4 - Gate 5/6/7 operational tooling:** demo observe -> demo
+   order test -> paper -> reconciliation -> a tiny MNQ live pilot ($150/day,
+   $500 total, at most 10 funded sessions). The observe runner exists, but the
+   cold-start blocker above must be fixed before the three-session evidence
+   run. Demo credentials and network access remain operator-controlled and
+   must never be committed. Halt consumers must read both
+   `transition="execution_halt"` and its `reason` field.
+5. **Resolve the account-level DLL open question** (see the Open
    Operational Decisions list in the adapter spec): does Tradovate/the
    prop firm enforce an account-level daily-loss limit, and does it
    force-flatten or only block new orders? Feeds sub-project 4's pilot
    checklist; the client-side DLL stays regardless.
-4. **Mean-reversion sleeve — PAUSED** under its research contract after
+6. **Mean-reversion sleeve — PAUSED** under its research contract after
    the run-1 rejection; resume only with a new pre-filed mechanism.
 
 ## 7. Key facts a new agent will need
@@ -219,8 +241,8 @@ only — never gates entries).
 
 1. Give the new agent access to the repo (`saistv/full-python`) and point
    it at THIS file first, then `docs/decisions/` newest-first.
-2. Start from current `main` (`4de6b98` at this handoff checkpoint), fetch the
-   remote, check for newer merged work, and create a fresh feature branch.
+2. Fetch and verify current `main` against `origin/main`, then create a fresh
+   feature branch; do not rely on a commit hash copied from this handoff.
 3. Have it run `python3 -m pytest -q` to confirm a green baseline before
    changing anything (set `FULL_PYTHON_BASELINE_DATA` to the local 9-month
    CSV to run the real-data identity/golden tests).

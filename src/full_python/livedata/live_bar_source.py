@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterator, Optional
 
 from full_python.data.sessions import classify_timestamp
+from full_python.data.validation import market_bar_value_issues
 from full_python.livedata.clock import Clock
 from full_python.livedata.contract_authority import ContractAuthority
 from full_python.livedata.errors import DataIntegrityError, DataOutageError
@@ -108,11 +109,16 @@ class LiveBarSource:
                 f"vendor symbol {vbar.symbol!r} is not the front contract "
                 f"{front!r} for session {session.session_date}"
             )
-        return MarketBar(
+        bar = MarketBar(
             timestamp_utc=vbar.timestamp_utc, symbol=front,
             open=vbar.open, high=vbar.high, low=vbar.low,
             close=vbar.close, volume=vbar.volume,
         )
+        issues = market_bar_value_issues(bar)
+        if issues:
+            kind, detail = issues[0]
+            raise DataIntegrityError(f"{kind}: {detail}")
+        return bar
 
     def _validate_monotonic(self, bar: MarketBar) -> None:
         # Fixed-width ISO-8601 UTC strings sort chronologically.

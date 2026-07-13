@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import math
 from typing import Any
 
 from full_python.data.sessions import classify_timestamp, parse_timestamp_utc
@@ -12,12 +13,38 @@ STRUCTURAL_ISSUE_KINDS = (
     "unparseable_timestamp",
     "non_monotonic_timestamp",
     "duplicate_timestamp",
+    "non_finite_price",
+    "non_finite_volume",
     "invalid_ohlc",
     "non_positive_price",
     "negative_volume",
     "symbol_mix",
     "rth_gap",
 )
+
+
+def market_bar_value_issues(bar: MarketBar) -> tuple[tuple[str, str], ...]:
+    """Return structural OHLCV issues shared by replay and live ingestion."""
+    issues: list[tuple[str, str]] = []
+    prices = (bar.open, bar.high, bar.low, bar.close)
+    if not all(math.isfinite(price) for price in prices):
+        issues.append(("non_finite_price", f"ohlc={prices}"))
+    elif any(price <= 0 for price in prices):
+        issues.append(("non_positive_price", f"ohlc={prices}"))
+    elif not (
+        bar.high >= bar.low
+        and bar.high >= bar.open
+        and bar.high >= bar.close
+        and bar.low <= bar.open
+        and bar.low <= bar.close
+    ):
+        issues.append(("invalid_ohlc", f"ohlc={prices}"))
+
+    if not math.isfinite(bar.volume):
+        issues.append(("non_finite_volume", f"volume={bar.volume}"))
+    elif bar.volume < 0:
+        issues.append(("negative_volume", f"volume={bar.volume}"))
+    return tuple(issues)
 
 
 @dataclass(frozen=True)
@@ -133,19 +160,8 @@ def validate_bars(
                             f"{delta_minutes:g} minutes from {previous_dt.isoformat()}",
                         )
 
-        prices = (bar.open, bar.high, bar.low, bar.close)
-        if any(price <= 0 for price in prices):
-            record(index, bar.timestamp_utc, "non_positive_price", f"ohlc={prices}")
-        elif not (
-            bar.high >= bar.low
-            and bar.high >= bar.open
-            and bar.high >= bar.close
-            and bar.low <= bar.open
-            and bar.low <= bar.close
-        ):
-            record(index, bar.timestamp_utc, "invalid_ohlc", f"ohlc={prices}")
-        if bar.volume < 0:
-            record(index, bar.timestamp_utc, "negative_volume", f"volume={bar.volume}")
+        for kind, detail in market_bar_value_issues(bar):
+            record(index, bar.timestamp_utc, kind, detail)
 
         previous_dt = current_dt
         previous_session = current_session
