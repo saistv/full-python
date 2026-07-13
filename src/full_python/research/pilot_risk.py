@@ -24,9 +24,13 @@ class PilotPathReport:
     max_drawdown_median: float
     max_drawdown_p95_adverse: float
     max_drawdown_p99_adverse: float
+    minimum_equity_median: float
+    minimum_equity_p95_adverse: float
+    minimum_equity_p99_adverse: float
     observed_window_count: int
     observed_window_loss_budget_breach_rate: float
     observed_max_drawdown_worst: float
+    observed_minimum_equity_worst: float
     observed_ending_pnl_min: float
     observed_ending_pnl_max: float
 
@@ -47,17 +51,21 @@ def _quantile(values: Sequence[float], probability: float) -> float:
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
-def _path_metrics(path: Sequence[float], loss_budget: float) -> tuple[float, float, bool]:
+def _path_metrics(
+    path: Sequence[float], loss_budget: float
+) -> tuple[float, float, float, bool]:
     equity = 0.0
     peak = 0.0
     drawdown = 0.0
+    minimum_equity = 0.0
     breached = False
     for pnl in path:
         equity += pnl
         peak = max(peak, equity)
         drawdown = min(drawdown, equity - peak)
+        minimum_equity = min(minimum_equity, equity)
         breached = breached or equity <= -loss_budget
-    return equity, drawdown, breached
+    return equity, drawdown, minimum_equity, breached
 
 
 def _sample_horizon(
@@ -97,6 +105,7 @@ def build_pilot_path_report(
     rng = random.Random(seed)
     endings: list[float] = []
     drawdowns: list[float] = []
+    minimum_equities: list[float] = []
     breaches = 0
     positive = 0
     target_met = 0
@@ -107,9 +116,10 @@ def build_pilot_path_report(
             block_length=block_length_sessions,
             rng=rng,
         )
-        ending, drawdown, breached = _path_metrics(path, loss_budget)
+        ending, drawdown, minimum_equity, breached = _path_metrics(path, loss_budget)
         endings.append(ending)
         drawdowns.append(drawdown)
+        minimum_equities.append(minimum_equity)
         breaches += int(breached)
         positive += int(ending > 0)
         target_met += int(ending >= income_target)
@@ -124,6 +134,7 @@ def build_pilot_path_report(
     observed = [_path_metrics(window, loss_budget) for window in windows]
     observed_endings = [item[0] for item in observed]
     observed_drawdowns = [item[1] for item in observed]
+    observed_minimum_equities = [item[2] for item in observed]
 
     return PilotPathReport(
         horizon_sessions=horizon_sessions,
@@ -143,11 +154,15 @@ def build_pilot_path_report(
         max_drawdown_median=_quantile(drawdowns, 0.5),
         max_drawdown_p95_adverse=_quantile(drawdowns, 0.05),
         max_drawdown_p99_adverse=_quantile(drawdowns, 0.01),
+        minimum_equity_median=_quantile(minimum_equities, 0.5),
+        minimum_equity_p95_adverse=_quantile(minimum_equities, 0.05),
+        minimum_equity_p99_adverse=_quantile(minimum_equities, 0.01),
         observed_window_count=len(windows),
         observed_window_loss_budget_breach_rate=(
-            sum(item[2] for item in observed) / len(observed)
+            sum(item[3] for item in observed) / len(observed)
         ),
         observed_max_drawdown_worst=min(observed_drawdowns),
+        observed_minimum_equity_worst=min(observed_minimum_equities),
         observed_ending_pnl_min=min(observed_endings),
         observed_ending_pnl_max=max(observed_endings),
     )

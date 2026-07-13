@@ -18,6 +18,8 @@ def test_all_loss_paths_exhaust_budget() -> None:
     assert report.probability_positive_end == 0.0
     assert report.probability_income_target_met == 0.0
     assert report.max_drawdown_p95_adverse == -750.0
+    assert report.minimum_equity_p95_adverse == -750.0
+    assert report.observed_minimum_equity_worst == -750.0
     assert report.observed_window_loss_budget_breach_rate == 1.0
 
 
@@ -37,6 +39,7 @@ def test_all_gain_paths_meet_reachable_target_without_drawdown() -> None:
     assert report.probability_positive_end == 1.0
     assert report.probability_income_target_met == 1.0
     assert report.max_drawdown_p95_adverse == 0.0
+    assert report.minimum_equity_p95_adverse == 0.0
     assert report.observed_window_loss_budget_breach_rate == 0.0
 
 
