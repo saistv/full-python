@@ -156,9 +156,12 @@ is merged.
 
 1. **Review the Phase 0-2 PR stack:** PR #15, then PR #16, then the intrabar
    bounds branch. Do not squash evidence boundaries together before review.
-2. **Re-derive MNQ-first pilot sizing from corrected evidence.** Use bootstrap
-   p95/p99 drawdown, current Tradovate/prop rules, and explicit $150/day and
-   $500 pilot loss budgets; do not optimize strategy parameters.
+2. **MNQ-first sizing is re-derived; execute the operational gates, not more
+   sizing research.** A 30-session funded pilot fails the `$500` risk gate
+   (23-27% budget-breach probability). The approved research conclusion is at
+   most a 10-session flat-1-MNQ funded operational pilot after demo observe,
+   demo order, paper, and reconciliation pass; keep a 30-session paper/shadow
+   record. See `2026-07-13-mnq-pilot-sizing.md`.
 3. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
    demo order test → paper → reconciliation → a tiny MNQ live pilot
    ($150/day, $500 total, 30 sessions). Slice 1 (Gate 5 observe runner)
