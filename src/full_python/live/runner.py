@@ -164,14 +164,15 @@ def build_observe_session(
     window = ActiveWindow(
         strategy_config.entry_start_minutes_et, strategy_config.entry_end_minutes_et
     )
-    source = LiveBarSource(
-        feed, clock, authority, window,
-        position_provider=lambda: broker.position is not None,
-    )
     calendar_end = (
         end_minutes_et
         if session_info.rth_close_minutes_et is None
         else min(end_minutes_et, session_info.rth_close_minutes_et + 5)
+    )
+    source = LiveBarSource(
+        feed, clock, authority, window,
+        position_provider=lambda: broker.position is not None,
+        session_end_minutes_et=calendar_end,
     )
     bar_stream = bars_until(source, clock, calendar_end, maintenance)
     supervisor = RiskSupervisor(

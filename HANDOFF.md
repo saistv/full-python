@@ -165,6 +165,12 @@ Do not skip the review step, and do not merge red tests.
   `docs/superpowers/specs/2026-07-07-tradovate-adapter-design.md` and
   `2026-07-10-tradovate-gap-closure-design.md`. Still offline-only —
   see guardrail 7.
+- **Demo-observer cold-start remediation — IMPLEMENTED OFFLINE** (2026-07-13).
+  Startup now arms from the injected clock, late/no first bars inside the
+  active window produce a durable `data_outage` halt report, and flat no-data
+  runs stop at the configured ET end. This closes principal audit P1-03 in
+  code; the attended DEMO outage/reconnect drills and three clean sessions are
+  still missing. See `docs/decisions/2026-07-13-demo-observer-cold-start.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -173,10 +179,12 @@ feature branch.
 
 ## 6. Open tasks (ranked)
 
-1. **Fix the demo-observe cold-start outage before collecting Gate 5
-   evidence.** The observer can wait forever if it starts inside the active
-   window before receiving its first bar. Add the startup deadline and halt
-   report, then run the reconnect/outage drills from principal audit P1-03.
+1. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
+   code blocker is fixed; now execute the outage/disconnect drills in
+   `docs/live-observe-runbook.md`, then preserve three nonconsecutive clean
+   sessions with independent reference bars, exact signal parity, risk probe,
+   and redacted artifacts. A failed drill or unexplained session blocks the
+   gate.
 2. **Redesign the order-capable broker path offline before any demo order.**
    Required work includes broker-authoritative strategy feedback, duplicate
    entry prevention, exact account/contract reconciliation, a real 15:59
@@ -191,10 +199,10 @@ feature branch.
 4. **Sub-project 4 - Gate 5/6/7 operational tooling:** demo observe -> demo
    order test -> paper -> reconciliation -> a tiny MNQ live pilot ($150/day,
    $500 total, at most 10 funded sessions). The observe runner exists, but the
-   cold-start blocker above must be fixed before the three-session evidence
-   run. Demo credentials and network access remain operator-controlled and
-   must never be committed. Halt consumers must read both
-   `transition="execution_halt"` and its `reason` field.
+   cold-start blocker is fixed offline, but its real DEMO drills and the
+   three-session evidence run remain open. Demo credentials and network access
+   remain operator-controlled and must never be committed. Halt consumers must
+   read both `transition="execution_halt"` and its `reason` field.
 5. **Resolve the account-level DLL open question** (see the Open
    Operational Decisions list in the adapter spec): does Tradovate/the
    prop firm enforce an account-level daily-loss limit, and does it
