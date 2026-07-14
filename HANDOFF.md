@@ -178,6 +178,17 @@ Do not skip the review step, and do not merge red tests.
   broker is stably flat. This closes principal-audit P0-02 in code only. See
   `docs/decisions/2026-07-14-broker-authority-foundation.md` and the staged
   lifecycle design in `docs/superpowers/specs/2026-07-14-broker-safe-execution-design.md`.
+- **Broker identity authority (Milestone 2 Slice B) — IMPLEMENTED OFFLINE**
+  (2026-07-14). Every flatten-capable adapter now requires one exact
+  `contract_symbol` and `contract_id`; order decisions and broker position/fill
+  events are account/contract scoped; ambiguous REST snapshots halt; and
+  liquidation requests use exactly `accountId + contractId + admin`. This
+  closes P1-02's unsafe position-netting path and fixes the request-schema
+  prerequisite for P0-04. The full P1-02 remains open until runtime identity
+  resolution and REST working-order reconciliation are wired with startup
+  hydration; P0-04 remains open until flat position and working-order state are
+  confirmed after liquidation. See
+  `docs/decisions/2026-07-14-broker-identity-authority.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -193,12 +204,14 @@ feature branch.
    and redacted artifacts. A failed drill or unexplained session blocks the
    gate.
 2. **Continue the order-capable broker redesign offline before any demo
-   order.** Slice A closed broker feedback and duplicate-entry P0-02. Next is
-   Slice B: exact account/contract identity and schema-valid `contractId`
-   liquidation, followed by durable idempotent intents, user-event
-   synchronization/startup recovery, confirmed 15:59/shutdown flatten, partial
-   quantities, and the complete adversarial failure matrix. See principal audit
-   P0-03 through P1-02 and the 2026-07-14 broker-safe execution design.
+   order.** Slice A closed duplicate-entry/feedback P0-02; Slice B removed
+   unscoped position netting and corrected the liquidation schema. Next is
+   Slice C: durable idempotent intents and unknown-submission recovery, followed
+   by user-event synchronization/startup hydration with runtime identity and
+   REST working-order reconciliation, broker-confirmed 15:59/shutdown flatten,
+   partial quantities, and the complete adversarial failure matrix. P0-04 and
+   the broader P1-02 remain open. See the 2026-07-14 broker-safe execution
+   design.
 3. **MNQ-first sizing is re-derived; execute operational gates only after the
    blockers above.** A 30-session funded pilot fails the `$500` risk gate
    (23-27% budget-breach probability). The research conclusion is at most a
