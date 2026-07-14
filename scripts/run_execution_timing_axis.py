@@ -1,4 +1,4 @@
-"""Run and register the locked NQ latency/missed-signal axis."""
+"""Run the corrected NQ latency/missed-signal axis and register all vetoes."""
 from __future__ import annotations
 
 import argparse
@@ -41,7 +41,7 @@ def run(*, data_path: Path, registry_path: Path, output_path: Path) -> Path:
         daily_loss_limit=strategy_config.daily_loss_limit,
     )
     spec = ExperimentSpec(
-        experiment_id="phase2-nq-execution-timing-axis-v1",
+        experiment_id="phase2-nq-execution-timing-axis-v2-corrected",
         objective="Measure sensitivity to one-minute latency and missed signals",
         hypothesis="Net remains positive in all four timing scenarios",
         data_hash=file_sha256(data_path),
@@ -89,10 +89,16 @@ def run(*, data_path: Path, registry_path: Path, output_path: Path) -> Path:
                 and record.payload.get("transition") == "entry_missed"
                 for record in result.ledger.records
             )
+            invalidated = sum(
+                record.event_type == EventType.STATE_TRANSITION
+                and record.payload.get("transition") == "entry_invalidated_at_fill"
+                for record in result.ledger.records
+            )
             fold_results = summarize_walk_forward(result.trades, folds)
             metrics = {
                 **survivability.to_dict(),
                 "missed_entries": missed,
+                "invalidated_entries": invalidated,
                 "positive_forward_folds": sum(
                     fold.net_pnl > 0 for fold in fold_results
                 ),

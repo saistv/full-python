@@ -1,10 +1,11 @@
-"""Crash-safe event persistence for live sessions.
+"""Immediate best-effort event persistence for live session reporting.
 
 Same JSONL format as EventLedger.write_jsonl, written and flushed on
-every append: a crash or Ctrl+C mid-session loses nothing already
-recorded, which is what makes shutdown handling in the runner trivial.
+every append. It is an observational trace, not financial recovery authority:
+it has no fsync, hash chain, causal order IDs, or torn-tail repair. Broker
+mutations use execution.order_intent_journal.OrderIntentJournal instead.
 
-Crash-safety requirement: one file per run. A restart (after crash or
+File-isolation requirement: one file per run. A restart (after crash or
 shutdown) must use a NEW file with a non-colliding path; the runner is
 responsible for choosing the filename. Attempting to open an existing
 ledger file will raise FileExistsError.

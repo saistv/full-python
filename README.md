@@ -19,7 +19,7 @@ Build the canonical replay and event-ledger foundation:
 - `full_python.indicators`: streaming Pine-semantics primitives (EMA, SMA, population stdev, RMA/ATR, true range, rolling extrema, linreg endpoint, strict pivots with Pine's shift-and-fixnan view) plus the ATF trend state machine and squeeze momentum composites. Streaming by design: replay and future live shadow share the same indicator code path.
 - `full_python.events`: append-only event records, stable event IDs, JSONL persistence.
 - `full_python.models`: immutable domain records for market bars, signal decisions, order intents, risk vetoes, stop updates, exits, fills, and closed trades.
-- `full_python.strategy`: baseline momentum-breakout strategy (entry, breakdown exit signal, frozen stop) and the Adaptive Trend port — the validated production signal core (pivot S/R breakout + prove-it, squeeze momentum, wings candle gate, MA50/MA200, ATF alignment, 9:30-10:00 ET window, cooldowns, Dynamic S/R stop 5/15/31) at flat 1-contract sizing. Anti-martingale and the daily loss limit are deliberately deferred until flat parity is proven.
+- `full_python.strategy`: baseline momentum-breakout strategy and the frozen Adaptive Trend historical candidate (pivot S/R breakout + prove-it, squeeze momentum, wings candle gate, MA50/MA200, ATF alignment, 9:30-10:00 ET window, cooldowns, Dynamic S/R stop 5/15/31, anti-martingale sizing, and daily-loss controls). Its historical arithmetic is reproducible; this is not an independently validated edge or permission to trade.
 - `full_python.reconcile`: trade-by-trade reconciliation against TradingView "List of trades" exports — matched/missing/extra with entry-time and price deltas. This is the authority gate: aggregate agreement is not accepted as evidence.
 - `full_python.replay`: deterministic replay loop that feeds bars to a strategy and records resulting events in a fixed order.
 - `full_python.simulation`: deterministic fill/position engine — next-bar-open fills with adverse slippage, frozen stops with gap-through handling, worst-case intrabar ordering with ambiguity flagging, session risk gate (RTH-only entries, 15:59 ET backstop, session-boundary flatten), and costs always applied. Policy: `docs/decisions/2026-07-03-fill-simulation-policy.md`.
@@ -31,8 +31,8 @@ Build the canonical replay and event-ledger foundation:
 Port concepts, not clutter:
 
 - Port now: ATF, squeeze, S/R breakout, prove-it, wings, MFE/MAE tracking, deterministic replay.
-- Research later: regime classifier, mean reversion, dynamic windows, MNQ sizing.
-- Do not port by default: dead AER, old anti-martingale assumptions, breakeven stop clutter, unvalidated scratch exits.
+- Research separately: regime permissions, mean reversion, dynamic windows, and sizing changes, all under predeclared gates.
+- Do not port by default: dead AER, stale sizing assumptions, breakeven stop clutter, or unvalidated scratch exits.
 
 ## Baseline Replay Command
 

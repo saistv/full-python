@@ -47,6 +47,8 @@ class TradovateAdapterConfig:
     account_spec: str
     account_id: int
     root_symbol: str = "NQ"
+    contract_symbol: Optional[str] = None
+    contract_id: Optional[int] = None
     order_enabled: bool = False
     flatten_enabled: bool = False
     token_renewal_lead_seconds: int = 15 * 60
@@ -60,6 +62,23 @@ class TradovateAdapterConfig:
     daily_loss_limit: Optional[float] = None
 
     def __post_init__(self) -> None:
+        if (self.contract_symbol is None) != (self.contract_id is None):
+            raise TradovateConfigError(
+                "contract_symbol and contract_id must be configured together"
+            )
+        if self.contract_symbol is not None:
+            if not self.contract_symbol.strip():
+                raise TradovateConfigError("contract_symbol must be nonblank")
+            if self.contract_symbol.upper() == self.root_symbol.upper():
+                raise TradovateConfigError(
+                    "contract_symbol must identify an exact dated contract, not root_symbol"
+                )
+            if not self.contract_symbol.upper().startswith(self.root_symbol.upper()):
+                raise TradovateConfigError(
+                    "contract_symbol must match the configured root_symbol"
+                )
+        if self.contract_id is not None and self.contract_id <= 0:
+            raise TradovateConfigError("contract_id must be positive when set")
         if self.dollar_point_value is not None and self.dollar_point_value <= 0:
             raise TradovateConfigError("dollar_point_value must be positive when set")
         if self.commission_per_contract_round_trip < 0:

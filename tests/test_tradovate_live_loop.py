@@ -6,11 +6,13 @@ cross-check -> supervisor -> strategy -> apply_strategy_result.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Iterator, Optional
 
 from full_python.data.sessions import classify_timestamp
 from full_python.events import EventLedger, EventType
 from full_python.execution.live_loop import LiveLoop
+from full_python.execution.order_intent_journal import IntentState
 from full_python.execution.supervisor import RiskSupervisor, RiskSupervisorConfig
 from full_python.models import MarketBar, OrderIntent, StrategyResult
 from full_python.tradovate.broker import TradovateBroker, TradovateRawEvent
@@ -36,13 +38,56 @@ class FakeRestClient:
         return {}
 
     def order_liquidate_position(self, body):
+        assert set(body) == {"accountId", "contractId", "admin"}
         self.liquidations.append(body)
         self._auto_id += 1
         return {"orderId": self._auto_id}
 
 
+class MemoryIntentJournal:
+    def __init__(self):
+        self.records = []
+        self.latest_by_intent = {}
+
+    @property
+    def unresolved_intents(self):
+        unresolved = {
+            IntentState.SUBMISSION_PENDING,
+            IntentState.REQUEST_ACCEPTED,
+            IntentState.SUBMISSION_UNKNOWN,
+        }
+        return {key: value for key, value in self.latest_by_intent.items()
+                if value.state in unresolved}
+
+    @property
+    def has_history(self):
+        return bool(self.records)
+
+    def begin(self, *, role, account_id, contract_id, body):
+        record = SimpleNamespace(
+            intent_id=f"live-test:{len(self.latest_by_intent) + 1}",
+            role=role,
+            state=IntentState.SUBMISSION_PENDING,
+        )
+        self.records.append(record)
+        self.latest_by_intent[record.intent_id] = record
+        return record
+
+    def transition(self, intent_id, state, *, broker_order_id=None, detail=None):
+        prior = self.latest_by_intent[intent_id]
+        record = SimpleNamespace(
+            intent_id=intent_id,
+            role=prior.role,
+            state=state,
+            broker_order_id=broker_order_id,
+            detail=detail,
+        )
+        self.records.append(record)
+        self.latest_by_intent[intent_id] = record
+        return record
+
 def _bar(ts: str, price: float) -> MarketBar:
-    return MarketBar(timestamp_utc=ts, symbol="NQ", open=price, high=price,
+    return MarketBar(timestamp_utc=ts, symbol="NQU6", open=price, high=price,
                      low=price, close=price, volume=1.0)
 
 
@@ -50,6 +95,7 @@ def _fill(order_id: int, action: str, price: float, ts: str) -> TradovateRawEven
     return TradovateRawEvent(kind="fill", data={
         "orderId": order_id, "action": action, "qty": 1,
         "price": price, "timestamp": ts, "reason": "",
+        "accountId": 456, "contractId": 789,
     })
 
 
@@ -84,25 +130,59 @@ class ScriptedStrategy:
         if self._index in self._entry_indices:
             return StrategyResult(order_intents=(
                 OrderIntent.market_entry(
-                    timestamp_utc=bar.timestamp_utc, symbol="NQ", side="buy",
+                    timestamp_utc=bar.timestamp_utc, symbol="NQU6", side="buy",
                     quantity=1, reason="scripted", metadata={"stop_price": bar.close - 30.0},
                 ),
             ))
         return StrategyResult()
 
 
+class FillAwareStrategy:
+    """Keeps requesting entry until broker-authoritative feedback arrives."""
+
+    def __init__(self) -> None:
+        self.position_side = None
+        self.fill_calls = []
+
+    def on_fill(self, fill) -> None:
+        self.fill_calls.append(fill)
+        self.position_side = "long" if fill.side == "buy" else "short"
+
+    def on_trade_closed(self, trade) -> None:
+        self.position_side = None
+
+    def on_bar(self, bar: MarketBar) -> StrategyResult:
+        if self.position_side is not None:
+            return StrategyResult()
+        return StrategyResult(order_intents=(
+            OrderIntent.market_entry(
+                timestamp_utc=bar.timestamp_utc,
+                symbol="NQU6",
+                side="buy",
+                quantity=1,
+                reason="sr_breakout",
+                metadata={"stop_price": bar.close - 30.0},
+            ),
+        ))
+
+
 def _cfg() -> TradovateAdapterConfig:
     return TradovateAdapterConfig(
         environment=DEMO_ENVIRONMENT, account_spec="DEMO123", account_id=456,
-        root_symbol="NQ", order_enabled=True, flatten_enabled=True,
+        root_symbol="NQ", contract_symbol="NQU6", contract_id=789,
+        order_enabled=True, flatten_enabled=True,
         dollar_point_value=20.0, commission_per_contract_round_trip=1.0,
         daily_loss_limit=1000.0,
     )
 
 
+def _broker(rest: FakeRestClient) -> TradovateBroker:
+    return TradovateBroker(_cfg(), rest, intent_journal=MemoryIntentJournal())
+
+
 def test_losing_round_trips_trip_dll_and_supervisor_through_live_loop() -> None:
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(), rest)
+    broker = _broker(rest)
     strategy = ScriptedStrategy(entry_indices=[0, 2])
     ts = ["2026-07-07T14:3%d:00Z" % i for i in range(1, 7)]
     bars = [_bar(ts[0], 100.0), _bar(ts[1], 100.0), _bar(ts[2], 100.0),
@@ -132,7 +212,7 @@ def test_losing_round_trips_trip_dll_and_supervisor_through_live_loop() -> None:
 
 def test_unknown_fill_halts_live_loop_without_flatten() -> None:
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(), rest)
+    broker = _broker(rest)
     strategy = ScriptedStrategy(entry_indices=[])
     bars = [_bar("2026-07-07T14:31:00Z", 100.0), _bar("2026-07-07T14:32:00Z", 100.0)]
     events = {1: [_fill(999, "Buy", 100.0, "2026-07-07T14:31:30Z")]}  # platform/manual fill
@@ -147,3 +227,33 @@ def test_unknown_fill_halts_live_loop_without_flatten() -> None:
     halts = [r for r in ledger.records if r.event_type == EventType.STATE_TRANSITION]
     assert halts[-1].payload["reason"] == "invariant_violation"
     assert rest.liquidations == []   # invariant halt: no flatten, position truth unknown
+
+
+def test_authoritative_fill_reaches_strategy_before_next_bar_decision() -> None:
+    rest = FakeRestClient()
+    broker = _broker(rest)
+    strategy = FillAwareStrategy()
+    bars = [
+        _bar("2026-07-07T14:31:00Z", 100.0),
+        _bar("2026-07-07T14:32:00Z", 101.0),
+    ]
+    source = ScriptedBarSource(
+        broker,
+        bars,
+        {1: [_fill(101, "Buy", 100.5, "2026-07-07T14:31:30Z")]},
+    )
+    loop = LiveLoop(
+        source,
+        strategy,
+        broker,
+        RiskSupervisor(RiskSupervisorConfig(point_value=20.0)),
+        EventLedger(),
+    )
+
+    result = loop.run()
+
+    assert result.halted_reason is None
+    entry_orders = [body for body in rest.placed if body["orderType"] == "Market"]
+    assert len(entry_orders) == 1
+    assert len(strategy.fill_calls) == 1
+    assert strategy.fill_calls[0].reason == "sr_breakout"

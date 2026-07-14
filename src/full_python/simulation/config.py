@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import math
 
 FILL_TIMING_NEXT_BAR_OPEN = "next_bar_open"
 FILL_TIMING_SIGNAL_BAR_CLOSE = "signal_bar_close"
@@ -45,11 +46,23 @@ class SimulationConfig:
     def __post_init__(self) -> None:
         if self.fill_timing not in (FILL_TIMING_NEXT_BAR_OPEN, FILL_TIMING_SIGNAL_BAR_CLOSE):
             raise ValueError(f"Unsupported fill_timing: {self.fill_timing}")
-        if self.point_value <= 0:
+        if not math.isfinite(self.point_value) or self.point_value <= 0:
             raise ValueError("point_value must be positive")
+        for field_name in (
+            "commission_per_contract_round_trip",
+            "entry_slippage_points",
+            "exit_slippage_points",
+            "rth_open_extra_entry_slippage_points",
+        ):
+            value = getattr(self, field_name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{field_name} must be finite and nonnegative")
         if self.entry_delay_bars < 0:
             raise ValueError("entry_delay_bars must be nonnegative")
-        if not 0.0 <= self.entry_fill_rate <= 1.0:
+        if (
+            not math.isfinite(self.entry_fill_rate)
+            or not 0.0 <= self.entry_fill_rate <= 1.0
+        ):
             raise ValueError("entry_fill_rate must be between 0 and 1")
         if (
             self.fill_timing != FILL_TIMING_NEXT_BAR_OPEN
@@ -60,8 +73,10 @@ class SimulationConfig:
             )
         if self.max_contracts < 1:
             raise ValueError("max_contracts must be at least 1")
-        if self.daily_loss_limit is not None and self.daily_loss_limit <= 0:
-            raise ValueError("daily_loss_limit must be positive when set")
+        if self.daily_loss_limit is not None and (
+            not math.isfinite(self.daily_loss_limit) or self.daily_loss_limit <= 0
+        ):
+            raise ValueError("daily_loss_limit must be finite and positive when set")
 
     @property
     def flatten_minutes_et(self) -> int:

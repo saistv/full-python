@@ -87,6 +87,7 @@ class PositionEngine:
         self._cumulative_net_pnl: float = 0.0
         self._session_start_pnl: float = 0.0
         self._daily_limit_hit: bool = False
+        self._strategy_feedback: list[Fill | Trade] = []
 
     # ------------------------------------------------------------------
     # Properties
@@ -107,6 +108,11 @@ class PositionEngine:
     @property
     def previous_bar(self) -> Optional[MarketBar]:
         return self._previous_bar
+
+    def poll_strategy_feedback(self) -> list[Fill | Trade]:
+        feedback = list(self._strategy_feedback)
+        self._strategy_feedback.clear()
+        return feedback
 
     # ------------------------------------------------------------------
     # Per-bar driver hooks
@@ -525,6 +531,26 @@ class PositionEngine:
             slippage += self.config.rth_open_extra_entry_slippage_points
         fill_price = raw_price + direction * slippage
 
+        stop_is_protective = (
+            stop_price < fill_price if side == "long" else stop_price > fill_price
+        )
+        if not stop_is_protective:
+            self._ledger.append(
+                EventType.STATE_TRANSITION,
+                timestamp_utc=timestamp_utc,
+                payload={
+                    "transition": "entry_invalidated_at_fill",
+                    "reason": "stop_not_protective_at_fill",
+                    "symbol": intent.symbol,
+                    "side": side,
+                    "intent_timestamp_utc": intent.timestamp_utc,
+                    "raw_price": raw_price,
+                    "fill_price": fill_price,
+                    "stop_price": stop_price,
+                },
+            )
+            return
+
         fill = Fill(
             timestamp_utc=timestamp_utc,
             symbol=intent.symbol,
@@ -557,11 +583,7 @@ class PositionEngine:
             target_price=target_price,
             session_date=session.session_date.isoformat(),
         )
-        # Strategy feedback hook: fills are how a decision-only strategy
-        # learns its actual entry price (fill anchoring, cooldown state).
-        on_fill = getattr(self._strategy, "on_fill", None)
-        if on_fill is not None:
-            on_fill(fill)
+        self._strategy_feedback.append(fill)
 
     def _close_position(
         self,
@@ -624,9 +646,7 @@ class PositionEngine:
         self._cumulative_net_pnl += trade.net_pnl
         self._position = None
         self._pending_exit = None
-        on_trade_closed = getattr(self._strategy, "on_trade_closed", None)
-        if on_trade_closed is not None:
-            on_trade_closed(trade)
+        self._strategy_feedback.append(trade)
 
     def flatten_now(self, bar: MarketBar, reason: str) -> None:
         """Supervisor-initiated flatten: cancel pendings, close at bar close.

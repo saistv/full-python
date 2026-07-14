@@ -18,6 +18,7 @@ from typing import Iterable, Optional
 
 from full_python.data.sessions import classify_timestamp
 from full_python.events import EventLedger, EventType
+from full_python.execution.strategy_feedback import dispatch_strategy_feedback
 from full_python.models import MarketBar, Trade
 from full_python.replay import Strategy
 from full_python.simulation.config import SimulationConfig
@@ -56,16 +57,19 @@ class SimulationEngine:
             )
 
             session_pnl = engine.process_pre_strategy(bar, session)
+            dispatch_strategy_feedback(strategy, engine.poll_strategy_feedback())
 
             on_bar_context = getattr(strategy, "on_bar_context", None)
             if on_bar_context is not None:
                 on_bar_context(session_pnl=session_pnl, daily_limit_hit=engine.daily_limit_hit)
             result = strategy.on_bar(bar)
             engine.apply_strategy_result(bar, session, result)
+            dispatch_strategy_feedback(strategy, engine.poll_strategy_feedback())
 
             engine.note_bar_processed(bar, session)
 
         engine.close_end_of_data()
+        dispatch_strategy_feedback(strategy, engine.poll_strategy_feedback())
         return SimulationResult(
             ledger=active_ledger,
             trades=tuple(engine.trades),

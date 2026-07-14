@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterator, Optional
 
 from full_python.data.sessions import classify_timestamp
+from full_python.data.validation import market_bar_value_issues
 from full_python.livedata.clock import Clock
 from full_python.livedata.contract_authority import ContractAuthority
 from full_python.livedata.errors import DataIntegrityError, DataOutageError
@@ -46,6 +47,7 @@ class LiveBarSource:
         active_window: ActiveWindow,
         position_provider: Callable[[], bool],
         grace_seconds: float = 25.0,
+        session_end_minutes_et: Optional[int] = None,
     ) -> None:
         self._feed = feed
         self._clock = clock
@@ -53,6 +55,7 @@ class LiveBarSource:
         self._window = active_window
         self._position_open = position_provider
         self._grace = grace_seconds
+        self._session_end_minutes_et = session_end_minutes_et
         self._last_emitted_ts: Optional[str] = None
 
     def __iter__(self) -> Iterator[MarketBar]:
@@ -60,20 +63,35 @@ class LiveBarSource:
 
     def __next__(self) -> MarketBar:
         while True:
+            if self._session_ended() and not self._position_open():
+                raise StopIteration
+            cold_start = self._last_emitted_ts is None
             expected = (
-                None if self._last_emitted_ts is None
+                self._current_minute() if cold_start
                 else _parse(self._last_emitted_ts) + timedelta(minutes=1)
             )
-            vbar = self._feed.next_bar(self._timeout_seconds(expected))
+            deadline = self._poll_deadline(expected)
+            timeout_seconds = max(
+                0.0, (deadline - self._clock.now()).total_seconds()
+            )
+            vbar = self._feed.next_bar(timeout_seconds)
             if vbar is None:
                 if self._armed(expected):
+                    expected_label = _to_iso_z(expected)
+                    if cold_start:
+                        expected_label = f"{expected_label} (cold-start)"
                     raise DataOutageError(
                         "no bar within grace for expected minute "
-                        f"{_to_iso_z(expected) if expected else '<cold-start>'} (armed)"
+                        f"{expected_label} (armed)"
                     )
-                if expected is not None:
+                if not cold_start:
                     self._last_emitted_ts = _to_iso_z(expected)  # advance past the gap
                 continue
+            if cold_start and self._clock.now() > deadline and self._armed(expected):
+                raise DataOutageError(
+                    "first bar arrived after cold-start deadline for expected minute "
+                    f"{_to_iso_z(expected)} (armed)"
+                )
             bar = self._normalize(vbar)
             self._validate_monotonic(bar)
             # Arm the gap check off `expected` (the first missing minute /
@@ -86,11 +104,35 @@ class LiveBarSource:
             self._last_emitted_ts = bar.timestamp_utc
             return bar
 
-    def _timeout_seconds(self, expected: Optional[datetime]) -> float:
-        if expected is None:
-            return 60.0  # cold start: wait ~a minute for the first bar
-        deadline = expected + timedelta(minutes=1, seconds=self._grace)
-        return max(0.0, (deadline - self._clock.now()).total_seconds())
+    def _current_minute(self) -> datetime:
+        return self._clock.now().astimezone(timezone.utc).replace(
+            second=0, microsecond=0
+        )
+
+    def _deadline(self, expected: datetime) -> datetime:
+        return expected + timedelta(minutes=1, seconds=self._grace)
+
+    def _poll_deadline(self, expected: datetime) -> datetime:
+        deadline = self._deadline(expected)
+        session_end = self._session_end_deadline()
+        if session_end is not None:
+            deadline = min(deadline, session_end)
+        return deadline
+
+    def _session_end_deadline(self) -> Optional[datetime]:
+        if self._session_end_minutes_et is None:
+            return None
+        session = classify_timestamp(_to_iso_z(self._clock.now()))
+        hours, minutes = divmod(self._session_end_minutes_et, 60)
+        return session.timestamp_et.replace(
+            hour=hours, minute=minutes, second=0, microsecond=0
+        ).astimezone(timezone.utc)
+
+    def _session_ended(self) -> bool:
+        if self._session_end_minutes_et is None:
+            return False
+        session = classify_timestamp(_to_iso_z(self._clock.now()))
+        return session.minutes_from_midnight_et >= self._session_end_minutes_et
 
     def _armed(self, moment: Optional[datetime]) -> bool:
         if self._position_open():
@@ -108,11 +150,16 @@ class LiveBarSource:
                 f"vendor symbol {vbar.symbol!r} is not the front contract "
                 f"{front!r} for session {session.session_date}"
             )
-        return MarketBar(
+        bar = MarketBar(
             timestamp_utc=vbar.timestamp_utc, symbol=front,
             open=vbar.open, high=vbar.high, low=vbar.low,
             close=vbar.close, volume=vbar.volume,
         )
+        issues = market_bar_value_issues(bar)
+        if issues:
+            kind, detail = issues[0]
+            raise DataIntegrityError(f"{kind}: {detail}")
+        return bar
 
     def _validate_monotonic(self, bar: MarketBar) -> None:
         # Fixed-width ISO-8601 UTC strings sort chronologically.

@@ -199,6 +199,31 @@ def test_ws_failure_mid_session_still_produces_report(tmp_path) -> None:
     assert session.report_path.exists()
 
 
+def test_cold_start_outage_writes_halt_ledger_and_report(tmp_path) -> None:
+    """No first bar at 09:35 ET must halt, close, and leave evidence."""
+    clock = FakeClock(datetime(2026, 7, 10, 13, 35, 30, tzinfo=timezone.utc))
+    session = build_observe_session(
+        ws_client=FakeChartWs([]),
+        clock=clock,
+        account_spec="D",
+        account_id=1,
+        data_dir=tmp_path,
+        bars_back=10,
+        end_minutes_et=16 * 60 + 5,
+    )
+
+    exit_code = run_observe_session(session)
+
+    assert exit_code == 2
+    assert session.ws.closed
+    ledger_text = session.events_path.read_text(encoding="utf-8")
+    assert '"transition": "execution_halt"' in ledger_text
+    assert '"reason": "data_outage"' in ledger_text
+    report_text = session.report_path.read_text(encoding="utf-8")
+    assert "data_outage" in report_text
+    assert "NO-DATA" in report_text
+
+
 def test_report_only_names_html_from_events_stem(tmp_path) -> None:
     """--report-only on events-2.jsonl must write report-2.html, not clobber
     a first run's report.html."""

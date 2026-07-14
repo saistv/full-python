@@ -1,40 +1,46 @@
 # HANDOFF — start here
 
 You are picking up an NQ/MNQ futures trading system (Python port of a
-validated TradingView strategy). This document is self-contained: it does
+historically profitable TradingView strategy). This document is self-contained:
+it does
 not assume any particular AI tool, skill set, or external memory. Read it
 fully before touching anything. Last updated 2026-07-14.
 
-> **If you read nothing else:** `main`'s exchange calendar is wrong and its
-> TradingView parity is 103/106. **Merge PR #25 first** — it restores 106/106 and
-> corrects the calendar. Then run the 3 observe sessions (the live feed is now
-> protocol-correct). The order path is NOT built and must not be enabled; see
-> `docs/audits/2026-07-13-adversarial-audit.md` for what remains open.
+> **Start here.** Two independent tracks are in flight. The broker/order path is
+> being rebuilt on `main` (slices A-C landed; see §6). Separately, **PR #25**
+> corrects the exchange calendar (restoring TradingView parity 106/106 from
+> 103/106) and makes the live market-data feed protocol-correct. **Merge PR #25
+> before running any research** — until it lands, `main`'s baseline refuses to
+> trade seven open market sessions a year. Nothing may trade live: see
+> `docs/audits/2026-07-13-adversarial-audit.md` for the open P0/P1 backlog.
 
 ## 1. What this project is
 
 `saistv/full-python` — an event-sourced, deterministic Python backtester
 and (in progress) live-execution engine for the "Adaptive Trend"
-strategy. The strategy is ALREADY VALIDATED and profitable; the work here
-is (a) rigorously re-verifying it with fast Python tooling and (b)
-building the machinery to trade it live. The Pine/TradingView version is
+strategy. Its five-year historical result is reproducible and profitable
+under the current model, but the edge is NOT independently validated: no
+untouched final holdout remains and the complete historical trial family is
+unknown. The work here is (a) prospective re-validation with fast Python
+tooling and (b) building safe live machinery. The Pine/TradingView version is
 legacy reference only.
 
 Goal: detailed reports, regime awareness, a mean-reversion sleeve,
 smoother equity curve, good Sharpe, shorter losing streaks — but NOT at
-the cost of the validated core, which no analysis this year has beaten.
+the cost of the frozen historical candidate, which no analysis this year has
+beaten.
 
 ## 2. Non-negotiable guardrails (violating these loses money or wastes weeks)
 
-0. **The exchange calendar is DATA, not strategy.** CME equity-index futures
-   trade an abbreviated 09:30-13:00 ET session on seven US holidays (MLK,
-   Presidents, Memorial, Juneteenth, Independence, Labor, Thanksgiving) — the
-   entry window is open and the system trades them. Only Good Friday, Christmas
-   and New Year are full closures. **Declining to trade a session the market is
-   open for is a FILTER, and filters go through Gate 1 like anything else.** This
-   guardrail exists because it was violated: a cash-equity calendar shipped as a
-   "correctness fix", deleted TradingView-matched trades, and broke trade-level
-   parity (106/106 → 103/106) undetected for a day. Calendar rules are pinned to
+0. **The exchange calendar is DATA, not strategy.** CME equity-index futures trade
+   an abbreviated 09:30-13:00 ET session on seven US holidays (MLK, Presidents,
+   Memorial, Juneteenth, Independence, Labor, Thanksgiving) — the entry window is
+   open and the system trades them. Only Good Friday, Christmas and New Year are
+   full closures. **Declining to trade a session the market is open for is a
+   FILTER, and filters go through Gate 1 like anything else.** This guardrail
+   exists because it was violated: a cash-equity calendar shipped as a "correctness
+   fix", deleted TradingView-matched trades, and broke trade-level parity
+   (106/106 → 103/106) undetected. Calendar rules are pinned to
    `tests/fixtures/cme_equity_rth_close.json` — 1,379 weekdays of the exchange's
    own record. Do not edit the calendar to match a belief; check the fixture.
 
@@ -90,70 +96,78 @@ Do not skip the review step, and do not merge red tests.
 - **`docs/superpowers/specs/`** — design docs per feature.
 - **`docs/superpowers/plans/`** — implementation plans (complete code +
   tests) per feature.
-- **The test suite IS the executable spec.** `python3 -m pytest -q` →
-   currently 397 passed, 4 skipped. The skips are operator-data tests gated
-  on `FULL_PYTHON_BASELINE_DATA` (the operator's local 9-month CSV); with
-  it set, all pass and prove the live path reproduces the backtester
-  trade-for-trade.
+- **The test suite IS an executable spec, not proof of broker parity.**
+  `python3 -m pytest -q` currently passes, with operator-data tests gated on
+  `FULL_PYTHON_BASELINE_DATA` (the local 9-month CSV). Those tests prove
+  deterministic simulator/PaperBroker identity because both share
+  `PositionEngine`; they do NOT prove the separate Tradovate lifecycle or
+  account reconciliation path.
 
 ## 5. Current state (2026-07-14)
 
-- **⚠️ READ THIS FIRST: `main` currently carries a WRONG exchange calendar.**
-  The fix is on `claude/restore-research-authority` (**PR #25**) and is not yet
-  merged. Until it lands, every number produced from `main` is computed on a
-  baseline that refuses to trade seven open market sessions per year, and the
-  engine reconciles **103/106** against TradingView, not 106/106. Merge PR #25
-  before running any research on `main`.
-
-- **Exchange calendar corrected; research authority restored (PR #25).** The
+- **Exchange calendar corrected; TradingView parity restored (PR #25).** The
   2026-07-12 "holiday fix" applied a US **cash-equity** calendar to a **futures**
   market. CME equity-index futures trade an abbreviated **09:30-13:00 ET** session
   on MLK, Presidents, Memorial, Juneteenth, Independence, Labor and Thanksgiving —
   the 09:30-10:00 entry window is fully open, with real volume. Only Good Friday,
   Christmas and New Year are full closures. Declaring those seven days closed
-  deleted trades TradingView had actually taken (parity fell 106/106 → 103/106,
-  undetected because the golden fixture was regenerated from the engine's own
-  output) and shipped an unregistered strategy filter — worth **+$965 / 5yr**,
-  which FAILS the $10,000 materiality bar and would be rejected by Gate 1.
-  Calendar rules are now pinned to a **1,379-weekday fixture derived from the
-  exchange's own data**. Parity restored: **106/106, $0.00 entry-price delta**.
-  See `docs/decisions/2026-07-13-exchange-calendar-correction.md`.
+  deleted trades TradingView had actually taken: trade-level parity silently fell
+  to **103/106**, undetected because `golden_trades.json` had been regenerated
+  from the engine's own output (a sim-vs-sim fixture cannot detect a
+  sim-vs-TradingView regression). It also shipped an unregistered strategy filter
+  worth **+$965 / 5yr** — an order of magnitude below the $10,000 materiality bar,
+  so Gate 1 would have REJECTED it.
 
-  **Standing rule:** the exchange calendar is *data*, not strategy. Declining to
-  trade a session the market is open for is a *filter*, and filters go through
-  Gate 1 like anything else.
+  Calendar rules are now pinned to **1,379 weekdays of the exchange's own record**
+  (`tests/fixtures/cme_equity_rth_close.json`). Parity restored: **106/106, $0.00
+  entry-price delta**, and now guarded by `tests/test_tv_reconciliation.py` rather
+  than by a self-referential fixture. Corrected 5-yr authority: **NQ 829 trades /
+  $159,160 / PF 1.412 / bootstrap p95 DD -$43,080**. Every qualitative conclusion
+  of Phase 1 and Phase 2 survives, including the MNQ pilot's rejection. See
+  `docs/decisions/2026-07-13-exchange-calendar-correction.md`.
 
-- **Live feed made protocol-correct (PR #25).** Three defects, each of which
-  silently destroys a session, all reproduced-then-fixed: forming-bar snapshots
-  were counted as "ignored events" (killing the feed at the 09:30 open, the only
-  minute this strategy trades); a single realtime snapshot arriving before the
-  historical batch discarded **all** warmup history (`eoh` was not handled
+- **Live market-data feed made protocol-correct (PR #25).** Three defects, each
+  of which silently destroys a session, all reproduced-then-fixed: forming-bar
+  snapshots were counted as "ignored events" (Tradovate updates the forming bar on
+  every tick, so >100 snapshots in one minute killed the feed at the 09:30 open —
+  the only minute this strategy trades); a single realtime snapshot arriving before
+  the historical batch discarded **all** warmup history (`eoh` was not handled
   anywhere, though the protocol requires gather-and-sort); and `TradovateFeedError`
   escaped the halt protocol entirely. The shadow report now asserts bar
   **coverage** (warmup + full entry window), not merely agreement inside whatever
-  range happened to be captured — a session that could not have warmed up can no
-  longer read as PARITY.
+  range happened to be captured — a session in which the strategy could not have
+  warmed up can no longer read as PARITY.
 
-- **Phase 0 remediation (2026-07-12) — partially superseded.** Its broker work
-  (cancel-confirmed exits, reject/cancel recovery, placement-error mapping,
-  multi-contract prohibition) stands and is good. Its holiday/early-close logic
-  and its "progressive bars finalize correctly" claim were **wrong** and are
-  replaced by PR #25. See `docs/decisions/2026-07-12-phase0-correctness-remediation.md`
-  (stamped superseded).
+  **Supersedes the earlier claims** that "progressive bars now finalize correctly"
+  and that "holiday/early-close logic is shared by sim/live" — both were wrong.
+
+- **Historical replay correctness remediation (2026-07-12/13).** Exits wait for
+  confirmed stop cancellation; reject and unsolicited-cancel paths enter explicit
+  recovery; NQ/MNQ point value has one authority; RTH gaps fail closed; dirty
+  source changes run identity; stop-bar MFE/MAE is bounded and flagged. Fill-time
+  stop placement fails closed, nonfinite bars and invalid execution costs are
+  rejected, and the contaminated timing axis was rerun. See
+  `docs/decisions/2026-07-12-phase0-correctness-remediation.md` and
+  `2026-07-13-phase0-audit-follow-up.md`. This does NOT close the broker execution
+  P0 findings in the 2026-07-13 principal audit
+  (`docs/audits/2026-07-13-adversarial-audit.md` — see its status table).
 - **Phase 1 evidence migration — COMPLETE.** Standard reports now include
   deterministic session-block bootstrap bands and top-trade/day dependency.
   The old TradingView headline, old MNQ sizing verdict, and unsupported prop
   EV are retired. See `2026-07-12-phase1-evidence-migration.md`.
-- **Phase 2 robust experimentation — COMPLETE.** SQLite trial-budget
+- **Phase 2 historical characterization — IMPLEMENTED, not independent OOS
+  validation.** SQLite trial-budget
   registry and anchored fold reporting are built. Baseline walk-forward is
   positive in 5/7 NQ and 4/7 MNQ six-month folds; both halves of 2023 lose.
   The four-level NQ execution-cost axis also passes through 2 points per side
   ($120,010 net, PF 1.292, -$27,070 DD). See
   `2026-07-12-phase2-baseline-walk-forward.md` and
-  `2026-07-12-phase2-execution-cost-axis.md`. The execution-timing axis also
-  survives one-minute latency and 10% missed signals, but latency reduces
-  positive forward folds from 5/7 to 3/7 despite slightly higher aggregate
-  net. Component ablation retained the frozen stack: wings and prove-it are
+  `2026-07-12-phase2-execution-cost-axis.md`. After correcting fill-time stop
+  invalidation, one-minute latency remains profitable at 804 trades, $159,935
+  net, PF 1.437, -$19,735 DD, and 4/7 positive chronological segments. The
+  combined latency-plus-10%-miss scenario is 733 trades, $142,520 net, PF
+  1.424, -$16,090 DD, and 5/7 segments. Component ablation retained the frozen
+  stack: wings and prove-it are
   strongly defensive, squeeze release is directionally useful, and the small
   aggregate gain without squeeze momentum is below the materiality bar. See
   `2026-07-13-phase2-execution-timing-axis.md` and
@@ -162,13 +176,12 @@ Do not skip the review step, and do not merge red tests.
   the no-target stop-first model, but exact 5-20 point MFE-gate claims require
   sequence data. See `2026-07-13-phase2-intrabar-bounds.md`.
 
-- **Baseline frozen & TV-reconciled** — Python engine matches TradingView
-  106/106 trades at $0.00 entry-price delta on the 9-month anchor. **This holds
-  only with PR #25's calendar; on `main` today it is 103/106.** The reconciliation
-  is now guarded by a test (`tests/test_tv_reconciliation.py`) rather than by a
-  sim-generated fixture — a golden file produced from the engine's own output can
-  never detect a sim-vs-TradingView regression, which is exactly how the last one
-  went unnoticed.
+- **Baseline frozen & partially TV-reconciled** — Python matches all 106
+  overlapping TradingView entries at $0.00 entry-price delta on the 9-month
+  anchor. This is entry parity, not exact full-trade or broker parity. **It holds
+  only with PR #25's calendar; before it, `main` reconciled 103/106.** The
+  reconciliation is now guarded by a test against the operator's TV export
+  (`FULL_PYTHON_TV_EXPORT`), not by a fixture the engine generated itself.
 - **5-year dataset assembled** (2021-03-16 → 2026-06-26, 1.87M bars).
 - **Gate 1 config audit COMPLETE — zero changes promoted.** Prior-vol gate
   rejected (holdout sign reversal); MA-length and S/R-interaction sweeps
@@ -181,9 +194,10 @@ Do not skip the review step, and do not merge red tests.
   retained funded path is at most 10 sessions after every operational gate;
   keep at least 30 sessions in paper/shadow. See
   `docs/decisions/2026-07-13-mnq-pilot-sizing.md`.
-- **Live-engine sub-project 1 (execution core) — DONE, merged, real-data
-  identity proven.** Broker-agnostic `LiveLoop`, `PositionEngine` shared
-  by sim and live, `PaperBroker`, `RiskSupervisor`, order state machine.
+- **Live-engine sub-project 1 (simulation/paper orchestration) — DONE.**
+  Broker-agnostic `LiveLoop`, shared simulator/PaperBroker `PositionEngine`,
+  `RiskSupervisor`, and order-state shadow. Shared-code identity is proven;
+  independent Tradovate execution parity is not.
 - **Live-engine sub-project 2 (live data feed) — DONE, merged.**
   Vendor-agnostic `LiveBarSource`, contract authority, session-armed
   outage detection (halt+flatten). The trading window is config-driven
@@ -196,75 +210,95 @@ Do not skip the review step, and do not merge red tests.
   PF 0.692, t=-3.74). MR track paused per its research contract; run 2
   needs a new pre-filed mechanism, not parameter tuning. See
   `docs/research/2026-07-07-mr-orfade-run1-verdict.md`.
-- **Sub-project 3 — Tradovate adapter — offline-COMPLETE** (2026-07-10).
+- **Sub-project 3 — Tradovate adapter skeleton — OFFLINE ONLY** (2026-07-10).
   Foundation (auth/HTTP/WS/feed/broker skeleton, Tasks 1-6) plus the
   gap-closure pass plus the 2026-07-12 adversarial remediation
   (fill-derived trade ledger, live DLL, broker-held frozen protective
   stop, cancel-then-close exit path, submitted-order map with
-  halt-on-unknown/duplicate, position reconciliation). Broker Failure
+  halt-on-unknown/duplicate, position reconciliation). The principal audit
+  found unresolved P0/P1 protocol and recovery defects, so "complete" is not a
+  promotion claim. Broker Failure
   Matrix V2 is recorded in the Phase 0 decision. Specs:
   `docs/superpowers/specs/2026-07-07-tradovate-adapter-design.md` and
   `2026-07-10-tradovate-gap-closure-design.md`. Still offline-only —
   see guardrail 7.
+- **Demo-observer cold-start remediation — IMPLEMENTED OFFLINE** (2026-07-13).
+  Startup now arms from the injected clock, late/no first bars inside the
+  active window produce a durable `data_outage` halt report, and flat no-data
+  runs stop at the configured ET end. This closes principal audit P1-03 in
+  code; the attended DEMO outage/reconnect drills and three clean sessions are
+  still missing. See `docs/decisions/2026-07-13-demo-observer-cold-start.md`.
+- **Broker authority foundation (Milestone 2 Slice A) — IMPLEMENTED OFFLINE**
+  (2026-07-14). Simulation and live orchestration now dispatch one
+  broker-produced strategy-feedback stream; Tradovate entry fills and closed
+  trades reach the strategy exactly once, and entries are blocked unless the
+  broker is stably flat. This closes principal-audit P0-02 in code only. See
+  `docs/decisions/2026-07-14-broker-authority-foundation.md` and the staged
+  lifecycle design in `docs/superpowers/specs/2026-07-14-broker-safe-execution-design.md`.
+- **Broker identity authority (Milestone 2 Slice B) — IMPLEMENTED OFFLINE**
+  (2026-07-14). Every flatten-capable adapter now requires one exact
+  `contract_symbol` and `contract_id`; order decisions and broker position/fill
+  events are account/contract scoped; ambiguous REST snapshots halt; and
+  liquidation requests use exactly `accountId + contractId + admin`. This
+  closes P1-02's unsafe position-netting path and fixes the request-schema
+  prerequisite for P0-04. The full P1-02 remains open until runtime identity
+  resolution and REST working-order reconciliation are wired with startup
+  hydration; P0-04 remains open until flat position and working-order state are
+  confirmed after liquidation. See
+  `docs/decisions/2026-07-14-broker-identity-authority.md`.
+- **Durable order intents (Milestone 2 Slice C) — IMPLEMENTED OFFLINE**
+  (2026-07-14). Every entry, stop, exit, cancel, and liquidation POST now has a
+  hash-linked, `fsync`ed logical intent first. Explicit rejection and ambiguous
+  outcomes are durable; timeout/malformed responses latch recovery; any prior
+  journal history keeps a restarted broker closed; repeated cancellation and
+  liquidation cannot submit twice. The older event log is now correctly named
+  a best-effort observational trace. This is the persistence prerequisite for
+  P0-05, not closure: account user sync must associate journal history with
+  broker orders/fills before recovery. See
+  `docs/decisions/2026-07-14-durable-order-intents.md`.
 
-Repository checkpoint: PRs #15, #16, #17, and #18 were reviewed and merged in
-dependency order. `main` is current through merge commit `4de6b98` (MNQ pilot
-sizing); the local checkout and `origin/main` matched at that commit after the
-merge. Start new work from `main` on a fresh feature branch.
+Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
+`dce7988`; always verify current local and `origin/main` hashes rather than
+trusting this prose checkpoint. Start new work from current `main` on a fresh
+feature branch.
 
 ## 6. Open tasks (ranked)
 
-0. **MERGE PR #25 FIRST.** Until it lands, `main`'s calendar is wrong, its
-   TradingView parity is 103/106, and every research number on `main` is computed
-   on a baseline containing an unregistered filter. Nothing below is trustworthy
-   until this merges.
-
-1. **Run the 3 Gate 5 observe sessions — now that the feed can be trusted.**
-   `docs/live-observe-runbook.md`. Requires the operator's Tradovate demo
-   credentials and network access; credentials stay local and are never committed.
-   **A PARITY verdict now requires `--reference-bars`** (an independent bar CSV);
-   without it the report returns `BAR-UNVERIFIED` and a nonzero exit. Databento
-   publishes next day, so run the bar check post-hoc with `--report-only`. Note
-   that `data_outage` and `invariant_violation` halts share
-   `transition="execution_halt"` and differ by the `reason` field — consumers must
-   read `reason`.
-
-2. **Sub-project 5 — BUILD the order path.** This is the real remaining work and
-   it is build, not patch: the hardened order lifecycle in `tradovate/broker.py`
-   currently has **no production caller** at all. Every item blocks
-   `order_enabled`. Full evidence and executable reproductions in
-   `docs/audits/2026-07-13-adversarial-audit.md`:
-   - **account-event pump** — nothing calls `ingest_raw_event`; wire the WS
-     account feed to it (P1-6);
-   - **risk veto** — `TradovateBroker` applies no `RiskManager`, so it will submit
-     orders the simulator refuses (P1-7);
-   - **restart reconciliation** — the adapter starts flat and will double a live
-     position; GET `/position/list` + `/order/list` at startup and refuse to trade
-     until acked (P1-8);
-   - **flatten cancel-confirmation** — the discipline applied to `result.exits`
-     was never applied to `flatten()`; a stop filling during a DLL flatten can
-     leave two closing orders live (P0-2);
-   - **enforce `execution_state`** — `RECOVERY_REQUIRED` is set by the *routine*
-     DLL flatten, never cleared, and read by nothing (P1-5);
-   - persistent client order ids; broker writes FILL/TRADE to the ledger.
-
-   Exit criteria: the Failure Matrix re-run **through the pump** (not by calling
-   `ingest_raw_event` by hand, which is all the current tests do), plus a
-   kill-9-and-restart drill with an open demo position.
-
-3. **MNQ-first sizing is settled; execute the operational gates, not more sizing
-   research.** A 30-session funded pilot FAILS the `$500` risk gate (23.7%
-   budget-breach probability against a 5% bar). The approved conclusion is at most
-   a **10-session flat-1-MNQ operational pilot** after demo observe, demo order,
-   paper and reconciliation pass — judged on order integrity, not P&L. Keep a
-   30-session paper/shadow record. See `2026-07-13-mnq-pilot-sizing.md` (numbers
-   superseded by the calendar correction; the **decision stands**).
-3. **Resolve the account-level DLL open question** (see the Open
+1. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
+   code blocker is fixed; now execute the outage/disconnect drills in
+   `docs/live-observe-runbook.md`, then preserve three nonconsecutive clean
+   sessions with independent reference bars, exact signal parity, risk probe,
+   and redacted artifacts. A failed drill or unexplained session blocks the
+   gate.
+2. **Continue the order-capable broker redesign offline before any demo
+   order.** Slice A closed duplicate-entry/feedback P0-02; Slice B removed
+   unscoped position netting and corrected the liquidation schema; Slice C made
+   logical submission intents durable and non-retryable while unknown. Next is
+   Slice D: account user-event synchronization/startup hydration that resolves
+   runtime identity, REST working orders, fills, protection, and prior journal
+   history. Then implement broker-confirmed 15:59/shutdown flatten, partial
+   quantities, and the complete adversarial failure matrix. P0-04, P0-05,
+   P1-01, and the broader P1-02 remain open. See the 2026-07-14 broker-safe
+   execution design.
+3. **MNQ-first sizing is re-derived; execute operational gates only after the
+   blockers above.** A 30-session funded pilot fails the `$500` risk gate
+   (23-27% budget-breach probability). The research conclusion is at most a
+   10-session flat-1-MNQ funded operational pilot after demo observe, demo
+   order, paper, and reconciliation pass; keep a 30-session paper/shadow
+   record. See `2026-07-13-mnq-pilot-sizing.md`.
+4. **Sub-project 4 - Gate 5/6/7 operational tooling:** demo observe -> demo
+   order test -> paper -> reconciliation -> a tiny MNQ live pilot ($150/day,
+   $500 total, at most 10 funded sessions). The observe runner exists and its
+   cold-start blocker is fixed offline, but the real DEMO drills and the
+   three-session evidence run remain open. Demo credentials and network access
+   remain operator-controlled and must never be committed. Halt consumers must
+   read both `transition="execution_halt"` and its `reason` field.
+5. **Resolve the account-level DLL open question** (see the Open
    Operational Decisions list in the adapter spec): does Tradovate/the
    prop firm enforce an account-level daily-loss limit, and does it
    force-flatten or only block new orders? Feeds sub-project 4's pilot
    checklist; the client-side DLL stays regardless.
-4. **Mean-reversion sleeve — PAUSED** under its research contract after
+6. **Mean-reversion sleeve — PAUSED** under its research contract after
    the run-1 rejection; resume only with a new pre-filed mechanism.
 
 ## 7. Key facts a new agent will need
@@ -305,8 +339,8 @@ only — never gates entries).
 
 1. Give the new agent access to the repo (`saistv/full-python`) and point
    it at THIS file first, then `docs/decisions/` newest-first.
-2. Start from current `main` (`4de6b98` at this handoff checkpoint), fetch the
-   remote, check for newer merged work, and create a fresh feature branch.
+2. Fetch and verify current `main` against `origin/main`, then create a fresh
+   feature branch; do not rely on a commit hash copied from this handoff.
 3. Have it run `python3 -m pytest -q` to confirm a green baseline before
    changing anything (set `FULL_PYTHON_BASELINE_DATA` to the local 9-month
    CSV to run the real-data identity/golden tests).

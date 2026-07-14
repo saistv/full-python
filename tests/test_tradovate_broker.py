@@ -1,3 +1,6 @@
+from dataclasses import dataclass, replace
+from typing import Optional
+
 import pytest
 
 from full_python.data.sessions import classify_timestamp
@@ -9,7 +12,8 @@ from full_python.execution.broker_protocol import (
     PartialFilled,
     Rejected,
 )
-from full_python.models import MarketBar, OrderIntent, StrategyResult
+from full_python.execution.order_intent_journal import IntentState, OrderIntentJournal
+from full_python.models import Fill, MarketBar, OrderIntent, StrategyResult
 from full_python.tradovate.broker import (
     BrokerExecutionState,
     TradovateBroker,
@@ -19,8 +23,63 @@ from full_python.tradovate.config import DEMO_ENVIRONMENT, TradovateAdapterConfi
 from full_python.tradovate.errors import TradovateOrderSafetyError
 
 
-class FakeRestClient:
+@dataclass(frozen=True)
+class RecordedIntent:
+    intent_id: str
+    role: str
+    state: IntentState
+    broker_order_id: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class RecordingIntentJournal:
     def __init__(self):
+        self.records = []
+        self.latest_by_intent = {}
+
+    @property
+    def unresolved_intents(self):
+        unresolved = {
+            IntentState.SUBMISSION_PENDING,
+            IntentState.REQUEST_ACCEPTED,
+            IntentState.SUBMISSION_UNKNOWN,
+        }
+        return {
+            key: value
+            for key, value in self.latest_by_intent.items()
+            if value.state in unresolved
+        }
+
+    @property
+    def has_history(self):
+        return bool(self.records)
+
+    def begin(self, *, role, account_id, contract_id, body):
+        record = RecordedIntent(
+            intent_id=f"test:intent:{len(self.latest_by_intent) + 1:08d}",
+            role=role,
+            state=IntentState.SUBMISSION_PENDING,
+        )
+        self.records.append(record)
+        self.latest_by_intent[record.intent_id] = record
+        return record
+
+    def transition(self, intent_id, state, *, broker_order_id=None, detail=None):
+        previous = self.latest_by_intent[intent_id]
+        record = RecordedIntent(
+            intent_id=intent_id,
+            role=previous.role,
+            state=state,
+            broker_order_id=broker_order_id,
+            detail=detail,
+        )
+        self.records.append(record)
+        self.latest_by_intent[intent_id] = record
+        return record
+
+
+class FakeRestClient:
+    def __init__(self, journal=None):
         self.placed = []
         self.canceled = []
         self.liquidations = []
@@ -29,8 +88,17 @@ class FakeRestClient:
         self._auto_id = 100
         self.order_place_error = None      # set to an exception to make order_place raise
         self.order_cancel_error = None     # set to an exception to make order_cancel raise
+        self.liquidate_error = None
+        self.journal = journal
+        self.post_boundaries = []
+
+    def _record_boundary(self, operation):
+        if self.journal is not None:
+            pending = self.journal.records[-1]
+            self.post_boundaries.append((operation, pending.role, pending.state))
 
     def order_place(self, body):
+        self._record_boundary("order_place")
         if self.order_place_error is not None:
             error, self.order_place_error = self.order_place_error, None
             raise error
@@ -41,6 +109,7 @@ class FakeRestClient:
         return {"orderId": self._auto_id}
 
     def order_cancel(self, body):
+        self._record_boundary("order_cancel")
         if self.order_cancel_error is not None:
             error, self.order_cancel_error = self.order_cancel_error, None
             raise error
@@ -48,6 +117,11 @@ class FakeRestClient:
         return {}
 
     def order_liquidate_position(self, body):
+        self._record_boundary("liquidate")
+        if self.liquidate_error is not None:
+            error, self.liquidate_error = self.liquidate_error, None
+            raise error
+        assert set(body) == {"accountId", "contractId", "admin"}
         self.liquidations.append(body)
         self._auto_id += 1
         return {"orderId": self._auto_id}
@@ -59,6 +133,8 @@ def _cfg(order_enabled=False, flatten_enabled=False, daily_loss_limit=1000.0):
         account_spec="DEMO123",
         account_id=456,
         root_symbol="NQ",
+        contract_symbol="NQU6",
+        contract_id=789,
         order_enabled=order_enabled,
         flatten_enabled=flatten_enabled,
         dollar_point_value=20.0,
@@ -67,10 +143,17 @@ def _cfg(order_enabled=False, flatten_enabled=False, daily_loss_limit=1000.0):
     )
 
 
+def _new_broker(config, rest=None, journal=None):
+    journal = journal or RecordingIntentJournal()
+    rest = rest or FakeRestClient(journal)
+    rest.journal = journal
+    return TradovateBroker(config, rest, intent_journal=journal)
+
+
 def _bar():
     return MarketBar(
         timestamp_utc="2026-07-07T14:32:00Z",
-        symbol="NQ",
+        symbol="NQU6",
         open=100.0,
         high=101.0,
         low=99.0,
@@ -101,13 +184,17 @@ def _fill_event(order_id, action="Buy", qty=1, price=100.25, ts="2026-07-07T14:3
     return TradovateRawEvent(kind="fill", data={
         "orderId": order_id, "action": action, "qty": qty,
         "price": price, "timestamp": ts, "reason": reason,
+        "accountId": 456, "contractId": 789,
     })
 
 
 def _entered_broker(rest=None, side="buy", price=100.25, config=None):
     """Broker with a filled entry: order 101 placed, filled at `price`."""
     rest = rest or FakeRestClient()
-    broker = TradovateBroker(config or _cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(
+        config or _cfg(order_enabled=True, flatten_enabled=True),
+        rest,
+    )
     bar = _bar()
     broker.apply_strategy_result(bar, _session(bar), _entry_result(bar, side=side))
     broker.ingest_raw_event(_fill_event(101, action="Buy" if side == "buy" else "Sell", price=price))
@@ -127,7 +214,7 @@ def test_orders_disabled_rejects_order_intent_without_calling_rest():
 
 def test_orders_enabled_places_automated_market_order_and_emits_ack():
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
     bar = _bar()
 
     broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
@@ -136,7 +223,7 @@ def test_orders_enabled_places_automated_market_order_and_emits_ack():
         "accountSpec": "DEMO123",
         "accountId": 456,
         "action": "Buy",
-        "symbol": "NQ",
+        "symbol": "NQU6",
         "orderQty": 1,
         "orderType": "Market",
         "isAutomated": True,
@@ -144,9 +231,24 @@ def test_orders_enabled_places_automated_market_order_and_emits_ack():
     assert broker.poll_events() == [Acked(order_id="101")]
 
 
+def test_repeated_entry_while_first_entry_is_working_submits_once():
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+
+    market_entries = [body for body in rest.placed if body["orderType"] == "Market"]
+    assert len(market_entries) == 1
+    assert broker.execution_state == BrokerExecutionState.ENTRY_PENDING_FILL
+    rejects = [event for event in broker.poll_events() if isinstance(event, Rejected)]
+    assert rejects == [Rejected(order_id="", reason="entry_not_stable_flat")]
+
+
 def test_live_enabled_entry_requires_stop_price_metadata():
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
     bar = _bar()
 
     with pytest.raises(TradovateOrderSafetyError, match="stop_price"):
@@ -170,6 +272,21 @@ def test_fill_raw_event_updates_position_and_emits_filled():
     )]
 
 
+def test_entry_fill_emits_exactly_one_strategy_fill_with_intent_reason():
+    broker, _rest = _entered_broker()
+
+    assert broker.poll_strategy_feedback() == [Fill(
+        timestamp_utc="2026-07-07T14:32:00Z",
+        symbol="NQU6",
+        side="buy",
+        quantity=1,
+        price=100.25,
+        reason="adaptive_trend",
+        metadata={"broker_order_id": "101"},
+    )]
+    assert broker.poll_strategy_feedback() == []
+
+
 def test_partial_fill_event_requires_reconciliation_and_halts():
     broker, _rest = _entered_broker()
 
@@ -185,6 +302,8 @@ def test_partial_fill_event_requires_reconciliation_and_halts():
                 "remaining": 2,
                 "price": 100.25,
                 "timestamp": "2026-07-07T14:32:00Z",
+                "accountId": 456,
+                "contractId": 789,
             },
         ))
 
@@ -204,7 +323,13 @@ def test_position_snapshot_matching_fill_derived_state_passes():
 
     broker.ingest_raw_event(TradovateRawEvent(
         kind="position",
-        data={"side": "long", "qty": 1, "price": 100.25},
+        data={
+            "accountId": 456,
+            "contractId": 789,
+            "side": "long",
+            "qty": 1,
+            "price": 100.25,
+        },
     ))  # matching snapshot: no exception
 
     assert broker.position == BrokerPosition(side="long", quantity=1, entry_price=100.25)
@@ -227,11 +352,57 @@ def test_flatten_enabled_with_position_calls_liquidate_position():
 
     assert rest.canceled == [{"orderId": 102}]
     assert rest.liquidations == [{
-        "accountSpec": "DEMO123",
         "accountId": 456,
-        "symbol": "NQ",
+        "contractId": 789,
         "admin": False,
     }]
+    liquidation_records = [r for r in rest.journal.records if r.role == "liquidation"]
+    assert [r.state for r in liquidation_records] == [
+        IntentState.SUBMISSION_PENDING,
+        IntentState.ACKNOWLEDGED,
+    ]
+
+
+def test_flatten_contract_cannot_be_retargeted_by_current_bar_symbol():
+    broker, rest = _entered_broker()
+    wrong_contract_bar = replace(_bar(), symbol="NQZ6")
+
+    broker.flatten(wrong_contract_bar, "supervisor_halt")
+
+    assert rest.liquidations == [{
+        "accountId": 456,
+        "contractId": 789,
+        "admin": False,
+    }]
+
+
+def test_repeated_flatten_does_not_duplicate_working_liquidation():
+    broker, rest = _entered_broker()
+
+    broker.flatten(_bar(), "supervisor_halt")
+    broker.flatten(_bar(), "supervisor_halt")
+
+    assert len(rest.liquidations) == 1
+    liquidation_pending = [
+        record for record in rest.journal.records
+        if record.role == "liquidation" and record.state == IntentState.SUBMISSION_PENDING
+    ]
+    assert len(liquidation_pending) == 1
+
+
+def test_unknown_liquidation_outcome_cannot_retry():
+    from full_python.tradovate.errors import TradovateRequestError, TradovateStateError
+
+    broker, rest = _entered_broker()
+    rest.liquidate_error = TradovateRequestError("timeout_after_acceptance")
+
+    with pytest.raises(TradovateStateError, match="outcome unknown"):
+        broker.flatten(_bar(), "supervisor_halt")
+    broker.flatten(_bar(), "supervisor_halt")
+
+    assert len(rest.liquidations) == 0
+    assert len([boundary for boundary in rest.post_boundaries if boundary[0] == "liquidate"]) == 1
+    assert rest.journal.records[-1].state == IntentState.SUBMISSION_UNKNOWN
 
 
 def test_multi_contract_live_entry_is_forbidden_until_partial_fills_are_modeled():
@@ -261,16 +432,41 @@ def test_duplicate_fill_for_same_order_id_raises_state_error():
         broker.ingest_raw_event(_fill_event(101))
 
 
-def test_entry_fill_while_position_open_raises_state_error():
-    from full_python.tradovate.errors import TradovateStateError
-
-    broker, _rest = _entered_broker()
+def test_repeated_entry_after_fill_and_protection_is_rejected_before_rest():
+    broker, rest = _entered_broker()
     bar = _bar()
-    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))  # second entry order
-    acks = [e for e in broker.poll_events() if isinstance(e, Acked)]
 
-    with pytest.raises(TradovateStateError, match="position is already open"):
-        broker.ingest_raw_event(_fill_event(int(acks[-1].order_id)))
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+
+    market_entries = [body for body in rest.placed if body["orderType"] == "Market"]
+    assert len(market_entries) == 1
+    rejects = [event for event in broker.poll_events() if isinstance(event, Rejected)]
+    assert rejects == [Rejected(order_id="", reason="entry_not_stable_flat")]
+
+
+def test_entry_is_rejected_while_strategy_exit_waits_for_stop_cancel():
+    broker, rest = _entered_broker()
+    broker.apply_strategy_result(_bar(), _session(), _exit_result())
+    assert broker.execution_state == BrokerExecutionState.EXIT_PENDING_CANCEL
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    market_entries = [body for body in rest.placed if body["orderType"] == "Market"]
+    assert len(market_entries) == 1
+    rejects = [event for event in broker.poll_events() if isinstance(event, Rejected)]
+    assert rejects == [Rejected(order_id="", reason="entry_not_stable_flat")]
+
+
+def test_confirmed_entry_cancel_returns_to_stable_flat_for_later_signal():
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 101}))
+
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    assert len([body for body in rest.placed if body["orderType"] == "Market"]) == 2
 
 
 def test_reject_and_cancel_for_unknown_order_ids_raise_state_error():
@@ -297,6 +493,137 @@ def test_broker_requires_dollar_point_value_and_live_pairing():
     with pytest.raises(TradovateConfigError, match="flatten_enabled"):
         TradovateBroker(_cfg(order_enabled=True, flatten_enabled=False), FakeRestClient())
 
+    with pytest.raises(TradovateConfigError, match="contract_symbol"):
+        TradovateBroker(
+            replace(
+                _cfg(order_enabled=True, flatten_enabled=True),
+                contract_symbol=None,
+                contract_id=None,
+            ),
+            FakeRestClient(),
+        )
+
+    with pytest.raises(TradovateConfigError, match="intent_journal"):
+        TradovateBroker(
+            _cfg(order_enabled=True, flatten_enabled=True),
+            FakeRestClient(),
+        )
+
+
+def test_entry_intent_is_pending_before_rest_and_acknowledged_before_mapping():
+    journal = RecordingIntentJournal()
+    rest = FakeRestClient(journal)
+    broker = _new_broker(
+        _cfg(order_enabled=True, flatten_enabled=True),
+        rest,
+        journal,
+    )
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    assert rest.post_boundaries == [
+        ("order_place", "entry", IntentState.SUBMISSION_PENDING),
+    ]
+    assert [(record.role, record.state, record.broker_order_id) for record in journal.records] == [
+        ("entry", IntentState.SUBMISSION_PENDING, None),
+        ("entry", IntentState.ACKNOWLEDGED, "101"),
+    ]
+
+
+def test_preexisting_unresolved_intent_starts_recovery_latched_and_cannot_post():
+    journal = RecordingIntentJournal()
+    journal.begin(
+        role="entry",
+        account_id=456,
+        contract_id=789,
+        body={"symbol": "NQU6"},
+    )
+    rest = FakeRestClient(journal)
+    broker = _new_broker(
+        _cfg(order_enabled=True, flatten_enabled=True),
+        rest,
+        journal,
+    )
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    assert rest.placed == []
+    assert broker.poll_events() == [
+        Rejected(order_id="", reason="entry_not_stable_flat")
+    ]
+
+
+def test_preexisting_acknowledged_intent_also_requires_restart_hydration():
+    journal = RecordingIntentJournal()
+    pending = journal.begin(
+        role="entry",
+        account_id=456,
+        contract_id=789,
+        body={"symbol": "NQU6"},
+    )
+    journal.transition(
+        pending.intent_id,
+        IntentState.ACKNOWLEDGED,
+        broker_order_id="101",
+    )
+    rest = FakeRestClient(journal)
+    broker = _new_broker(
+        _cfg(order_enabled=True, flatten_enabled=True),
+        rest,
+        journal,
+    )
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    assert rest.placed == []
+
+
+def test_reopened_real_journal_keeps_broker_entry_latch_closed(tmp_path):
+    path = tmp_path / "orders.jsonl"
+    first = OrderIntentJournal(path, run_id="run-restart")
+    first.begin(
+        role="entry",
+        account_id=456,
+        contract_id=789,
+        body={"symbol": "NQU6"},
+    )
+    first.close()
+    reopened = OrderIntentJournal(path, run_id="run-restart")
+    rest = FakeRestClient()
+    broker = TradovateBroker(
+        _cfg(order_enabled=True, flatten_enabled=True),
+        rest,
+        intent_journal=reopened,
+    )
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    assert rest.placed == []
+    reopened.close()
+
+
+def test_entry_symbol_must_match_exact_configured_contract_before_rest():
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    result = StrategyResult(order_intents=(
+        OrderIntent.market_entry(
+            timestamp_utc=_bar().timestamp_utc,
+            symbol="NQ",
+            side="buy",
+            quantity=1,
+            reason="wrong_contract",
+            metadata={"stop_price": 95.0},
+        ),
+    ))
+
+    with pytest.raises(TradovateOrderSafetyError, match="contract symbol"):
+        broker.apply_strategy_result(_bar(), _session(), result)
+
+    assert rest.placed == []
+
 
 def test_entry_fill_submits_protective_stop_at_frozen_price():
     broker, rest = _entered_broker()
@@ -306,7 +633,7 @@ def test_entry_fill_submits_protective_stop_at_frozen_price():
         "accountSpec": "DEMO123",
         "accountId": 456,
         "action": "Sell",           # opposite of the long entry
-        "symbol": "NQ",
+        "symbol": "NQU6",
         "orderQty": 1,
         "orderType": "Stop",
         "stopPrice": 95.0,          # frozen at the entry intent's stop_price
@@ -320,7 +647,7 @@ def test_protective_stop_rest_failure_flattens_and_raises():
     from full_python.tradovate.errors import TradovateRequestError, TradovateStateError
 
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
     bar = _bar()
     broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
     rest.order_place_error = TradovateRequestError("boom")
@@ -346,7 +673,7 @@ def test_protective_stop_rejection_flattens_and_raises():
 
 def test_reject_event_for_known_entry_emits_rejected():
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
     bar = _bar()
     broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
 
@@ -358,6 +685,10 @@ def test_reject_event_for_known_entry_emits_rejected():
     assert rejects == [Rejected(order_id="101", reason="outside_market_hours")]
     assert broker.position is None
     assert rest.liquidations == []   # entry rejection needs no flatten
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    assert len([body for body in rest.placed if body["orderType"] == "Market"]) == 2
 
 
 def _exit_result(bar=None, reason="atf_flip"):
@@ -376,18 +707,30 @@ def test_strategy_exit_cancels_stop_then_market_closes():
 
     assert rest.canceled == [{"orderId": 102}]
     assert broker.execution_state == BrokerExecutionState.EXIT_PENDING_CANCEL
+    cancel_records = [r for r in rest.journal.records if r.role == "cancel"]
+    assert [r.state for r in cancel_records] == [
+        IntentState.SUBMISSION_PENDING,
+        IntentState.REQUEST_ACCEPTED,
+    ]
     # A REST-accepted cancel is only a request. No close may coexist with the
     # stop before the asynchronous cancellation event confirms final state.
     assert [b for b in rest.placed if b["orderType"] == "Market"] == [rest.placed[0]]
 
     broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
     assert broker.execution_state == BrokerExecutionState.EXIT_PENDING_FILL
+    cancel_records = [r for r in rest.journal.records if r.role == "cancel"]
+    assert cancel_records[-1].state == IntentState.CONFIRMED
+    exit_records = [r for r in rest.journal.records if r.role == "exit"]
+    assert [r.state for r in exit_records] == [
+        IntentState.SUBMISSION_PENDING,
+        IntentState.ACKNOWLEDGED,
+    ]
     close_bodies = [b for b in rest.placed if b["orderType"] == "Market"][1:]
     assert close_bodies == [{
         "accountSpec": "DEMO123",
         "accountId": 456,
         "action": "Sell",
-        "symbol": "NQ",
+        "symbol": "NQU6",
         "orderQty": 1,
         "orderType": "Market",
         "isAutomated": True,
@@ -399,9 +742,29 @@ def test_strategy_exit_cancels_stop_then_market_closes():
     assert broker.execution_state == BrokerExecutionState.NORMAL
 
 
+def test_exit_fill_emits_exactly_one_fill_derived_closed_trade_feedback():
+    broker, _rest = _entered_broker(price=100.0)
+    broker.poll_strategy_feedback()  # consume the entry fill feedback
+    broker.apply_strategy_result(_bar(), _session(), _exit_result(reason="atf_flip"))
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+    broker.ingest_raw_event(_fill_event(
+        103,
+        action="Sell",
+        price=101.25,
+        ts="2026-07-07T14:33:00Z",
+    ))
+
+    feedback = broker.poll_strategy_feedback()
+    assert len(feedback) == 1
+    trade = feedback[0]
+    assert trade == broker.trades[-1]
+    assert trade.exit_reason == "atf_flip"
+    assert broker.poll_strategy_feedback() == []
+
+
 def test_strategy_exit_while_flat_is_a_no_op():
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
     bar = _bar()
 
     broker.apply_strategy_result(bar, _session(bar), _exit_result(bar))
@@ -477,7 +840,7 @@ def test_unsolicited_protective_stop_cancel_flattens_and_halts():
 
 def test_flatten_while_flat_is_a_no_op():
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(flatten_enabled=True), rest)
 
     broker.flatten(_bar(), "supervisor_halt")
 
@@ -488,7 +851,7 @@ def test_flatten_while_flat_cancels_working_entry_and_late_fill_recovers():
     from full_python.tradovate.errors import TradovateStateError
 
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
     broker.apply_strategy_result(_bar(), _session(), _entry_result())
 
     broker.flatten(_bar(), "supervisor_halt")
@@ -500,16 +863,28 @@ def test_flatten_while_flat_cancels_working_entry_and_late_fill_recovers():
     assert len(rest.liquidations) == 1
 
 
+def test_repeated_flatten_while_entry_cancel_pending_does_not_cancel_twice():
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    broker.flatten(_bar(), "supervisor_halt")
+    broker.flatten(_bar(), "supervisor_halt")
+
+    assert rest.canceled == [{"orderId": 101}]
+
+
 def test_entry_failure_response_is_rejected_without_key_error():
     rest = FakeRestClient()
     rest.order_place_responses = [{"failureReason": "outside_market_hours"}]
-    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
 
     broker.apply_strategy_result(_bar(), _session(), _entry_result())
 
     assert broker.poll_events() == [
         Rejected(order_id="", reason="outside_market_hours")
     ]
+    assert rest.journal.records[-1].state == IntentState.REJECTED
 
 
 def test_entry_transport_error_maps_to_halting_state_error():
@@ -517,10 +892,47 @@ def test_entry_transport_error_maps_to_halting_state_error():
 
     rest = FakeRestClient()
     rest.order_place_error = TradovateRequestError("timeout")
-    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
 
     with pytest.raises(TradovateStateError, match="outcome unknown"):
         broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    assert rest.journal.records[-1].state == IntentState.SUBMISSION_UNKNOWN
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    assert rest.placed == []
+    assert broker.poll_events() == [
+        Rejected(order_id="", reason="entry_not_stable_flat")
+    ]
+
+
+def test_non_tradovate_exception_after_pending_is_still_durable_unknown():
+    from full_python.tradovate.errors import TradovateStateError
+
+    rest = FakeRestClient()
+    rest.order_place_error = RuntimeError("socket vanished")
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+
+    with pytest.raises(TradovateStateError, match="outcome unknown"):
+        broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    assert rest.journal.records[-1].state == IntentState.SUBMISSION_UNKNOWN
+
+
+def test_entry_malformed_response_is_unknown_and_never_retried():
+    from full_python.tradovate.errors import TradovateStateError
+
+    rest = FakeRestClient()
+    rest.order_place_responses = [{}]
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+
+    with pytest.raises(TradovateStateError, match="missing orderId"):
+        broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    assert rest.journal.records[-1].state == IntentState.SUBMISSION_UNKNOWN
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    assert len(rest.placed) == 1
 
 
 def test_flatten_while_short_cancels_stop_then_liquidates():
@@ -574,7 +986,7 @@ def test_daily_loss_breach_sets_flag_and_flattens_open_position():
     broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
     broker.ingest_raw_event(_fill_event(103, price=100.0, ts="2026-07-07T14:36:00Z"))
     # bar closes 25pts against: unrealized -500 -> session -1101 <= -1000
-    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQ",
+    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQU6",
                            open=100.0, high=100.0, low=75.0, close=75.0, volume=1.0)
 
     session_pnl = broker.process_bar_open(losing_bar, _session(losing_bar))
@@ -591,7 +1003,7 @@ def test_daily_loss_breach_with_flatten_disabled_halts():
     # orders disabled so the flag pairing rule allows flatten_enabled=False;
     # build the losing position via direct fill ingestion on a manual order.
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
     bar = _bar()
     broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
     broker.ingest_raw_event(_fill_event(101, price=100.0))
@@ -600,7 +1012,7 @@ def test_daily_loss_breach_with_flatten_disabled_halts():
     # whose position was built while flatten was enabled and a NEW broker is
     # not constructible in that state -- so this test pins the guard directly:
     broker._config = _cfg(order_enabled=False, flatten_enabled=False)
-    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQ",
+    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQU6",
                            open=100.0, high=100.0, low=40.0, close=40.0, volume=1.0)
 
     with pytest.raises(TradovateStateError, match="flatten"):
@@ -617,7 +1029,7 @@ def test_session_rollover_resets_daily_limit_when_flat():
     assert broker.daily_limit_hit is True
     broker.note_bar_processed(bar, _session(bar))
 
-    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQ",
+    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQU6",
                          open=100.0, high=100.0, low=100.0, close=100.0, volume=1.0)
     session_pnl = broker.process_bar_open(next_day, _session(next_day))
 
@@ -632,7 +1044,7 @@ def test_session_rollover_with_open_position_halts():
     bar = _bar()
     broker.process_bar_open(bar, _session(bar))
     broker.note_bar_processed(bar, _session(bar))
-    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQ",
+    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQU6",
                          open=100.0, high=100.0, low=100.0, close=100.0, volume=1.0)
 
     with pytest.raises(TradovateStateError, match="session rollover"):
@@ -646,7 +1058,14 @@ def test_position_snapshot_with_position_while_fill_derived_flat_raises():
 
     with pytest.raises(TradovateStateError, match="contradicts"):
         broker.ingest_raw_event(TradovateRawEvent(
-            kind="position", data={"side": "long", "qty": 1, "price": 100.25},
+            kind="position",
+            data={
+                "accountId": 456,
+                "contractId": 789,
+                "side": "long",
+                "qty": 1,
+                "price": 100.25,
+            },
         ))
 
 
@@ -657,8 +1076,61 @@ def test_flat_position_snapshot_while_fill_derived_open_raises():
 
     with pytest.raises(TradovateStateError, match="contradicts"):
         broker.ingest_raw_event(TradovateRawEvent(
-            kind="position", data={"side": "flat", "qty": 0},
+            kind="position",
+            data={"accountId": 456, "contractId": 789, "side": "flat", "qty": 0},
         ))
+
+
+@pytest.mark.parametrize(
+    "data, message",
+    [
+        ({"contractId": 789, "side": "flat", "qty": 0}, "accountId"),
+        ({"accountId": 456, "side": "flat", "qty": 0}, "contractId"),
+        (
+            {"accountId": 999, "contractId": 789, "side": "flat", "qty": 0},
+            "foreign account",
+        ),
+        (
+            {"accountId": 456, "contractId": 790, "side": "flat", "qty": 0},
+            "foreign contract",
+        ),
+    ],
+)
+def test_position_event_requires_exact_account_and_contract_identity(data, message):
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    with pytest.raises(TradovateStateError, match=message):
+        broker.ingest_raw_event(TradovateRawEvent(kind="position", data=data))
+
+
+@pytest.mark.parametrize(
+    "identity, message",
+    [
+        ({"contractId": 789}, "accountId"),
+        ({"accountId": 456}, "contractId"),
+        ({"accountId": 999, "contractId": 789}, "foreign account"),
+        ({"accountId": 456, "contractId": 790}, "foreign contract"),
+    ],
+)
+def test_fill_event_requires_exact_account_and_contract_identity(identity, message):
+    from full_python.tradovate.errors import TradovateStateError
+
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    data = {
+        "orderId": 101,
+        "action": "Buy",
+        "qty": 1,
+        "price": 100.25,
+        "timestamp": "2026-07-07T14:32:00Z",
+        **identity,
+    }
+
+    with pytest.raises(TradovateStateError, match=message):
+        broker.ingest_raw_event(TradovateRawEvent(kind="fill", data=data))
 
 
 def test_rest_position_snapshot_disagreement_raises():
@@ -666,13 +1138,42 @@ def test_rest_position_snapshot_disagreement_raises():
 
     broker, _rest = _entered_broker()   # fill-derived: long 1
 
-    broker.reconcile_rest_positions([{"netPos": 1, "netPrice": 100.5}])  # match: ok
+    broker.reconcile_rest_positions([{
+        "accountId": 456, "contractId": 789, "netPos": 1, "netPrice": 100.5,
+    }])  # match: ok
 
     with pytest.raises(TradovateStateError, match="REST position"):
-        broker.reconcile_rest_positions([{"netPos": -2, "netPrice": 100.5}])
+        broker.reconcile_rest_positions([{
+            "accountId": 456, "contractId": 789, "netPos": -2, "netPrice": 100.5,
+        }])
 
     with pytest.raises(TradovateStateError, match="REST position"):
         broker.reconcile_rest_positions([])  # broker flat, we are long
+
+
+@pytest.mark.parametrize(
+    "positions, message",
+    [
+        ([{"contractId": 789, "netPos": 0}], "accountId"),
+        ([{"accountId": 456, "netPos": 0}], "contractId"),
+        ([{"accountId": 999, "contractId": 789, "netPos": 0}], "foreign account"),
+        ([{"accountId": 456, "contractId": 790, "netPos": 0}], "foreign contract"),
+        (
+            [
+                {"accountId": 456, "contractId": 789, "netPos": 0},
+                {"accountId": 456, "contractId": 789, "netPos": 0},
+            ],
+            "duplicate",
+        ),
+    ],
+)
+def test_rest_position_snapshot_rejects_ambiguous_identity(positions, message):
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    with pytest.raises(TradovateStateError, match=message):
+        broker.reconcile_rest_positions(positions)
 
 
 def test_rest_position_snapshot_multiple_open_items_raises_even_if_net_flat():
@@ -686,8 +1187,8 @@ def test_rest_position_snapshot_multiple_open_items_raises_even_if_net_flat():
 
     with pytest.raises(TradovateStateError, match="REST position"):
         broker.reconcile_rest_positions([
-            {"netPos": 1, "netPrice": 100.0},
-            {"netPos": -1, "netPrice": 99.0},
+            {"accountId": 456, "contractId": 789, "netPos": 1, "netPrice": 100.0},
+            {"accountId": 456, "contractId": 790, "netPos": -1, "netPrice": 99.0},
         ])
 
 
@@ -698,5 +1199,6 @@ def test_flat_position_snapshot_while_flat_passes():
     broker = TradovateBroker(_cfg(), FakeRestClient())
 
     broker.ingest_raw_event(TradovateRawEvent(
-        kind="position", data={"side": "flat", "qty": 0},
+        kind="position",
+        data={"accountId": 456, "contractId": 789, "side": "flat", "qty": 0},
     ))

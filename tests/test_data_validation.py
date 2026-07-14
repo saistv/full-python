@@ -55,6 +55,19 @@ def test_malformed_ohlc_is_structural() -> None:
     assert report.issue_counts["non_positive_price"] == 1
 
 
+def test_nonfinite_ohlcv_is_structural() -> None:
+    report = validate_bars(
+        [
+            _bar("2026-06-30T13:30:00Z", high=float("inf")),
+            _bar("2026-06-30T13:31:00Z", volume=float("nan")),
+        ]
+    )
+
+    assert not report.is_structurally_clean
+    assert report.issue_counts["non_finite_price"] == 1
+    assert report.issue_counts["non_finite_volume"] == 1
+
+
 def test_rth_gap_is_structural() -> None:
     report = validate_bars(
         [

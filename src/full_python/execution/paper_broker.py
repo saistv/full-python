@@ -3,7 +3,7 @@ PositionEngine (identity by shared code -- design spec Amendment 2).
 
 Fill semantics are therefore EXACTLY SimulationEngine's frozen policy:
 entries at next bar open +/- slippage, stops/targets intrabar, the six
-exit paths, hooks and ledger events -- because they are the same code.
+exit paths, feedback and ledger events -- because they are the same code.
 This module only adds BrokerEvent synthesis from the ledger tail so the
 OrderStateMachine can shadow position as an independent cross-check.
 """
@@ -18,6 +18,7 @@ from full_python.execution.broker_protocol import (
     BrokerEvent,
     BrokerPosition,
     Filled,
+    StrategyFeedback,
 )
 from full_python.models import MarketBar, StrategyResult, Trade
 from full_python.simulation.config import SimulationConfig
@@ -78,6 +79,9 @@ class PaperBroker:
                 ))
         self._ledger_cursor = len(records)
         return events
+
+    def poll_strategy_feedback(self) -> list[StrategyFeedback]:
+        return self._engine.poll_strategy_feedback()
 
     @property
     def position(self) -> Optional[BrokerPosition]:

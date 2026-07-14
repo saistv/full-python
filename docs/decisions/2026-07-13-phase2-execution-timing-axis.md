@@ -1,5 +1,10 @@
 # Phase 2 NQ Execution-Timing Axis
 
+> **Superseded correction (2026-07-13):** the delayed-entry rows below were
+> contaminated by fill-time stops landing on the profitable side of the actual
+> entry. Do not use those rows. See
+> `2026-07-13-phase0-audit-follow-up.md` for corrected results.
+
 **Decision:** the locked edge remains profitable under one-minute added
 latency, deterministic 10% missed entries, and their combination. The timing
 hypothesis passes on total net, but latency materially worsens forward-fold
@@ -65,4 +70,3 @@ Artifacts:
 
 Remaining Phase 2 work: registered component ablation and tick/lower-timeframe
 bounds for same-minute entry-stop trades.
-

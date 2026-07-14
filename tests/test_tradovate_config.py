@@ -28,6 +28,8 @@ def test_adapter_config_defaults_orders_disabled() -> None:
     assert cfg.order_enabled is False
     assert cfg.flatten_enabled is False
     assert cfg.root_symbol == "NQ"
+    assert cfg.contract_symbol is None
+    assert cfg.contract_id is None
     assert cfg.token_renewal_lead_seconds == 15 * 60
 
 
@@ -149,4 +151,40 @@ def test_adapter_config_rejects_non_positive_risk_values() -> None:
     with pytest.raises(TradovateConfigError, match="daily_loss_limit"):
         TradovateAdapterConfig(
             environment=DEMO_ENVIRONMENT, account_spec="S", account_id=1, daily_loss_limit=0.0
+        )
+
+
+def test_adapter_config_validates_exact_contract_identity_when_set() -> None:
+    with pytest.raises(TradovateConfigError, match="contract_id"):
+        TradovateAdapterConfig(
+            environment=DEMO_ENVIRONMENT,
+            account_spec="S",
+            account_id=1,
+            contract_symbol="NQU6",
+            contract_id=0,
+        )
+    with pytest.raises(TradovateConfigError, match="together"):
+        TradovateAdapterConfig(
+            environment=DEMO_ENVIRONMENT,
+            account_spec="S",
+            account_id=1,
+            contract_symbol="NQU6",
+        )
+    with pytest.raises(TradovateConfigError, match="root_symbol"):
+        TradovateAdapterConfig(
+            environment=DEMO_ENVIRONMENT,
+            account_spec="S",
+            account_id=1,
+            root_symbol="NQ",
+            contract_symbol="MNQU6",
+            contract_id=789,
+        )
+    with pytest.raises(TradovateConfigError, match="dated contract"):
+        TradovateAdapterConfig(
+            environment=DEMO_ENVIRONMENT,
+            account_spec="S",
+            account_id=1,
+            root_symbol="NQ",
+            contract_symbol="NQ",
+            contract_id=789,
         )

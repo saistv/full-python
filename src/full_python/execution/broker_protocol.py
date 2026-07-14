@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Optional, Protocol, Union
 
 from full_python.data.sessions import SessionInfo
-from full_python.models import MarketBar, StrategyResult, Trade
+from full_python.models import Fill, MarketBar, StrategyResult, Trade
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,7 @@ class Canceled:
 
 
 BrokerEvent = Union[Acked, Filled, PartialFilled, Rejected, Canceled]
+StrategyFeedback = Union[Fill, Trade]
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,8 @@ class Broker(Protocol):
     def flatten(self, bar: MarketBar, reason: str) -> None: ...
 
     def poll_events(self) -> list[BrokerEvent]: ...
+
+    def poll_strategy_feedback(self) -> list[StrategyFeedback]: ...
 
     @property
     def position(self) -> Optional[BrokerPosition]: ...
