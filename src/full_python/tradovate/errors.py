@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from full_python.execution.state_machine import ExecutionInvariantError
+from full_python.livedata.errors import LiveDataError
 
 
 class TradovateError(Exception):
@@ -38,8 +39,14 @@ class TradovateWebSocketError(TradovateError):
     pass
 
 
-class TradovateFeedError(TradovateError):
-    pass
+class TradovateFeedError(TradovateError, LiveDataError):
+    """The market-data feed can no longer be trusted.
+
+    Subclasses LiveDataError so LiveLoop's existing data-outage path catches it:
+    flatten (the broker is still authoritative on a data loss) and halt. Without
+    this it was neither a LiveDataError nor an ExecutionInvariantError, so a feed
+    protocol failure crashed straight through the safety layer.
+    """
 
 
 class TradovateOrderDisabledError(TradovateError):
