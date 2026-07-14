@@ -46,6 +46,7 @@ broker reconciliation before proceeding.
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
@@ -68,6 +69,7 @@ from full_python.execution.order_intent_journal import (
 from full_python.models import Fill, MarketBar, StrategyResult, Trade
 from full_python.risk.daily_loss import is_daily_loss_breached
 from full_python.tradovate.config import TradovateAdapterConfig
+from full_python.tradovate.account_sync import AccountHydrationSnapshot
 from full_python.tradovate.errors import (
     TradovateConfigError,
     TradovateError,
@@ -168,11 +170,11 @@ class TradovateBroker:
         self._requested_cancel_ids: set[str] = set()
         self._cancel_intent_ids: dict[str, str] = {}
         self._liquidation_in_flight = False
-        # Any history means this is a restart with volatile broker state lost.
-        # Slice D account hydration must explicitly reconcile it before an
-        # entry latch can ever reopen, even when the last POST was acknowledged.
+        # Empty local memory is not evidence that a real account is flat. Every
+        # order-capable broker starts closed until user sync and REST agree.
         self._recovery_required = bool(
-            intent_journal is not None and intent_journal.has_history
+            config.order_enabled
+            or (intent_journal is not None and intent_journal.has_history)
         )
         self._execution_state = (
             BrokerExecutionState.RECOVERY_REQUIRED
@@ -181,11 +183,163 @@ class TradovateBroker:
         )
         self._previous_session: Optional[SessionInfo] = None
         self._daily_limit_hit = False
+        self._account_realized_pnl = 0.0
+        self._hydrated_trade_date: Optional[str] = None
+
+    def hydrate_account_state(self, snapshot: AccountHydrationSnapshot) -> None:
+        """Open the entry latch only from exact, reconciled stable-flat truth."""
+        if snapshot.account_id != self._config.account_id:
+            self._latch_recovery()
+            raise TradovateStateError("hydration snapshot account identity mismatch")
+        if snapshot.account_spec != self._config.account_spec:
+            self._latch_recovery()
+            raise TradovateStateError("hydration snapshot account name mismatch")
+        if snapshot.contract_id != self._active_contract_id():
+            self._latch_recovery()
+            raise TradovateStateError("hydration snapshot contract identity mismatch")
+        if snapshot.contract_symbol != self._active_contract_symbol():
+            self._latch_recovery()
+            raise TradovateStateError("hydration snapshot contract symbol mismatch")
+
+        local_realized = self._fill_ledger.realized_session_pnl(
+            snapshot.trade_date
+        )
+        self._account_realized_pnl = snapshot.daily_realized_pnl - local_realized
+        self._hydrated_trade_date = snapshot.trade_date
+        self._daily_limit_hit = is_daily_loss_breached(
+            snapshot.daily_realized_pnl,
+            self._config.daily_loss_limit,
+        )
+        if snapshot.position is not None:
+            self._position = snapshot.position
+            self._latch_recovery()
+            raise TradovateStateError(
+                "inherited open position requires strategy-state recovery"
+            )
+        if snapshot.working_orders:
+            self._latch_recovery()
+            raise TradovateStateError(
+                "inherited working orders require order-state recovery"
+            )
+        if not snapshot.entry_permitted:
+            self._latch_recovery()
+            raise TradovateStateError("hydration snapshot does not permit entry")
+
+        journal = self._intent_journal
+        if journal is not None:
+            for record in list(journal.latest_by_intent.values()):
+                if record.state in {
+                    IntentState.REJECTED,
+                    IntentState.CONFIRMED,
+                    IntentState.RECONCILED,
+                }:
+                    continue
+                if record.state == IntentState.REQUEST_ACCEPTED:
+                    client_operation_id = record.client_operation_id
+                    command = (
+                        None
+                        if client_operation_id is None
+                        else snapshot.commands_by_client_id.get(
+                            client_operation_id
+                        )
+                    )
+                    order_id = (
+                        None
+                        if command is None or command.get("orderId") is None
+                        else str(command["orderId"])
+                    )
+                    order = (
+                        None
+                        if order_id is None
+                        else snapshot.orders_by_id.get(order_id)
+                    )
+                    if (
+                        record.role != "cancel"
+                        or command is None
+                        or command.get("isAutomated") is not True
+                        or order is None
+                        or str(order.get("ordStatus"))
+                        not in {"Canceled", "Expired"}
+                    ):
+                        self._latch_recovery()
+                        raise TradovateStateError(
+                            f"accepted cancel intent {record.intent_id} is not "
+                            "confirmed terminal by its broker command"
+                        )
+                    journal.transition(
+                        record.intent_id,
+                        IntentState.RECONCILED,
+                        broker_order_id=order_id,
+                        detail=f"startup:{order.get('ordStatus')}",
+                    )
+                    continue
+                if record.state == IntentState.ACKNOWLEDGED:
+                    client_operation_id = record.client_operation_id
+                    if client_operation_id is None:
+                        self._latch_recovery()
+                        raise TradovateStateError(
+                            f"acknowledged intent {record.intent_id} has no "
+                            "broker-visible client operation ID"
+                        )
+                    command = snapshot.commands_by_client_id.get(
+                        client_operation_id
+                    )
+                    if command is None:
+                        self._latch_recovery()
+                        raise TradovateStateError(
+                            f"acknowledged intent {record.intent_id} has no "
+                            "matching broker command"
+                        )
+                    order_id = record.broker_order_id
+                    if (
+                        str(command.get("orderId")) != order_id
+                        or command.get("isAutomated") is not True
+                    ):
+                        self._latch_recovery()
+                        raise TradovateStateError(
+                            f"acknowledged intent {record.intent_id} broker command "
+                            "does not match its order or automation authority"
+                        )
+                    order = None if order_id is None else snapshot.orders_by_id.get(order_id)
+                    if order is None or str(order.get("ordStatus")) in {
+                        "PendingCancel", "PendingNew", "PendingReplace",
+                        "Suspended", "Unknown", "Working",
+                    }:
+                        self._latch_recovery()
+                        raise TradovateStateError(
+                            f"acknowledged intent {record.intent_id} is not terminal "
+                            "in the broker snapshot"
+                        )
+                    journal.transition(
+                        record.intent_id,
+                        IntentState.RECONCILED,
+                        broker_order_id=order_id,
+                        detail=f"startup:{order.get('ordStatus')}",
+                    )
+                    continue
+                self._latch_recovery()
+                raise TradovateStateError(
+                    f"journal intent {record.intent_id} is not safely reconcilable"
+                )
+
+        for order_id, local_order in self._orders.items():
+            broker_order = snapshot.orders_by_id.get(order_id)
+            if broker_order is not None:
+                local_order.status = str(broker_order.get("ordStatus", "")).lower()
+        self._pending_exit = None
+        self._working_stop_id = None
+        self._requested_cancel_ids.clear()
+        self._cancel_intent_ids.clear()
+        self._liquidation_in_flight = False
+        self._position = None
+        self._recovery_required = False
+        self._execution_state = BrokerExecutionState.NORMAL
 
     # -- per-bar hooks (LiveLoop sequence) --------------------------------
 
     def process_bar_open(self, bar: MarketBar, session: SessionInfo) -> float:
         self._handle_session_rollover(session)
+        self._require_current_hydration(session)
         self._fill_ledger.mark_bar(high=bar.high, low=bar.low)
         session_pnl = self._session_pnl(bar, session)
         if not self._daily_limit_hit and is_daily_loss_breached(
@@ -209,16 +363,33 @@ class TradovateBroker:
                 "session rollover with an open position or working orders -- "
                 "the 15:59 backstop should have flattened; halting for review"
             )
+        if self._config.order_enabled:
+            if self._hydrated_trade_date != session.session_date.isoformat():
+                self._latch_recovery()
+                raise TradovateStateError(
+                    "session rollover requires fresh broker account hydration"
+                )
+            return
         self._daily_limit_hit = False
 
     def _has_working_orders(self) -> bool:
         return any(order.status == "working" for order in self._orders.values())
 
+    def _require_current_hydration(self, session: SessionInfo) -> None:
+        if (
+            self._config.order_enabled
+            and self._hydrated_trade_date != session.session_date.isoformat()
+        ):
+            self._latch_recovery()
+            raise TradovateStateError(
+                "broker account hydration does not match the active session"
+            )
+
     def _session_pnl(self, bar: MarketBar, session: SessionInfo) -> float:
         # Same equity formula as the sim: realized NET since session start
         # plus GROSS unrealized at the bar close (Pine's strategy.equity --
         # openprofit excludes the open trade's commission).
-        realized = self._fill_ledger.realized_session_pnl(
+        realized = self._account_realized_pnl + self._fill_ledger.realized_session_pnl(
             session.session_date.isoformat()
         )
         unrealized = 0.0
@@ -278,6 +449,7 @@ class TradovateBroker:
                     Rejected(order_id="", reason="entry_not_stable_flat")
                 )
                 continue
+            self._require_current_hydration(session)
             body = {
                 "accountSpec": self._config.account_spec,
                 "accountId": self._config.account_id,
@@ -334,6 +506,7 @@ class TradovateBroker:
             "accountId": self._config.account_id,
             "contractId": self._active_contract_id(),
             "admin": False,
+            "isAutomated": True,
         }
         self._liquidation_in_flight = True
         try:
@@ -506,6 +679,7 @@ class TradovateBroker:
             "accountId": self._config.account_id,
             "contractId": self._active_contract_id(),
             "admin": False,
+            "isAutomated": True,
         }
         self._liquidation_in_flight = True
         try:
@@ -694,14 +868,18 @@ class TradovateBroker:
         self, body: dict[str, Any], *, role: str
     ) -> Optional[tuple[str, str]]:
         journal = self._journal()
+        client_operation_id = _new_client_operation_id()
+        wire_body = dict(body)
+        wire_body["clOrdId"] = client_operation_id
         pending = journal.begin(
             role=role,
             account_id=self._config.account_id,
             contract_id=self._active_contract_id(),
-            body=body,
+            client_operation_id=client_operation_id,
+            body=wire_body,
         )
         try:
-            response = self._rest_client.order_place(body)
+            response = self._rest_client.order_place(wire_body)
         except Exception as exc:
             journal.transition(
                 pending.intent_id,
@@ -721,14 +899,18 @@ class TradovateBroker:
 
     def _journaled_liquidation(self, body: dict[str, Any]) -> tuple[str, str]:
         journal = self._journal()
+        client_operation_id = _new_client_operation_id()
+        wire_body = dict(body)
+        wire_body["customTag50"] = client_operation_id
         pending = journal.begin(
             role="liquidation",
             account_id=self._config.account_id,
             contract_id=self._active_contract_id(),
-            body=body,
+            client_operation_id=client_operation_id,
+            body=wire_body,
         )
         try:
-            response = self._rest_client.order_liquidate_position(body)
+            response = self._rest_client.order_liquidate_position(wire_body)
         except Exception as exc:
             journal.transition(
                 pending.intent_id,
@@ -750,11 +932,17 @@ class TradovateBroker:
 
     def _journaled_cancel(self, order_id: str) -> None:
         journal = self._journal()
-        body = {"orderId": int(order_id)}
+        client_operation_id = _new_client_operation_id()
+        body = {
+            "orderId": int(order_id),
+            "clOrdId": client_operation_id,
+            "isAutomated": True,
+        }
         pending = journal.begin(
             role="cancel",
             account_id=self._config.account_id,
             contract_id=self._active_contract_id(),
+            client_operation_id=client_operation_id,
             body=body,
         )
         try:
@@ -770,7 +958,7 @@ class TradovateBroker:
                 f"cancel submission outcome unknown for order {order_id}; "
                 "reconciliation required"
             ) from exc
-        reason = response.get("failureReason") if isinstance(response, dict) else None
+        reason = _failure_reason(response)
         if reason:
             journal.transition(
                 pending.intent_id,
@@ -813,7 +1001,7 @@ class TradovateBroker:
                 self._latch_recovery()
                 raise TradovateStateError(f"duplicate broker order id {order_id}")
             return order_id, intent_id
-        reason = response.get("failureReason") if isinstance(response, dict) else None
+        reason = _failure_reason(response)
         if reason:
             journal.transition(
                 intent_id,
@@ -848,8 +1036,10 @@ class TradovateBroker:
         return (
             self._execution_state == BrokerExecutionState.NORMAL
             and not self._recovery_required
+            and not self._daily_limit_hit
             and self._position is None
             and self._pending_exit is None
+            and not self._liquidation_in_flight
             and not self._has_working_orders()
         )
 
@@ -968,6 +1158,16 @@ class TradovateBroker:
         return self._position
 
     @property
+    def account_realized_pnl(self) -> float:
+        trade_date = self._hydrated_trade_date
+        local_realized = (
+            0.0
+            if trade_date is None
+            else self._fill_ledger.realized_session_pnl(trade_date)
+        )
+        return self._account_realized_pnl + local_realized
+
+    @property
     def execution_state(self) -> BrokerExecutionState:
         return self._execution_state
 
@@ -1040,3 +1240,16 @@ def _partial_fill_from_data(data: dict[str, Any]) -> PartialFilled:
         price=float(data["price"]),
         timestamp_utc=str(data["timestamp"]),
     )
+
+
+def _new_client_operation_id() -> str:
+    return f"fp-{uuid.uuid4().hex}"
+
+
+def _failure_reason(response: Any) -> Optional[str]:
+    if not isinstance(response, dict):
+        return None
+    value = response.get("failureReason")
+    if value in (None, "", "Success"):
+        return None
+    return str(value)

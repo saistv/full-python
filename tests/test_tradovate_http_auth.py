@@ -216,3 +216,29 @@ def test_invalid_token_values_raise_auth_error_without_coercion() -> None:
 
     with pytest.raises(TradovateAuthError, match="accessToken"):
         auth.request_access_token()
+
+
+def test_account_hydration_list_helpers_use_documented_paths() -> None:
+    paths = [
+        "/order/list",
+        "/command/list",
+        "/commandReport/list",
+        "/orderVersion/list",
+        "/cashBalance/list",
+        "/accountRiskStatus/list",
+    ]
+    transport = FakeHttpTransport([
+        HttpResponse(status=200, body={"path": path}) for path in paths
+    ])
+    http = TradovateHttpClient(
+        "https://demo.tradovateapi.com/v1", transport,
+        access_token="access-token",
+    )
+
+    assert http.order_list() == {"path": paths[0]}
+    assert http.command_list() == {"path": paths[1]}
+    assert http.command_report_list() == {"path": paths[2]}
+    assert http.order_version_list() == {"path": paths[3]}
+    assert http.cash_balance_list() == {"path": paths[4]}
+    assert http.account_risk_status_list() == {"path": paths[5]}
+    assert [request.path for request in transport.requests] == paths

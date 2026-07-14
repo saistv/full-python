@@ -135,6 +135,24 @@ class TradovateHttpClient:
     def fill_list(self) -> Any:
         return self.get("/fill/list")
 
+    def order_list(self) -> Any:
+        return self.get("/order/list")
+
+    def command_list(self) -> Any:
+        return self.get("/command/list")
+
+    def command_report_list(self) -> Any:
+        return self.get("/commandReport/list")
+
+    def order_version_list(self) -> Any:
+        return self.get("/orderVersion/list")
+
+    def cash_balance_list(self) -> Any:
+        return self.get("/cashBalance/list")
+
+    def account_risk_status_list(self) -> Any:
+        return self.get("/accountRiskStatus/list")
+
     def _send(self, method: str, path: str, body: Any) -> Any:
         normalized_path = path if path.startswith("/") else f"/{path}"
         headers = {

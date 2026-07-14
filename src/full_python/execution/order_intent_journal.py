@@ -13,7 +13,8 @@ from typing import Any, Optional, Protocol
 from full_python.execution.state_machine import ExecutionInvariantError
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = {1, SCHEMA_VERSION}
 GENESIS_HASH = "0" * 64
 
 
@@ -51,12 +52,15 @@ class IntentRecord:
     state: IntentState
     previous_hash: str
     record_hash: str
+    client_operation_id: Optional[str] = None
     broker_order_id: Optional[str] = None
     detail: Optional[str] = None
 
     def to_dict(self, *, include_hash: bool = True) -> dict[str, Any]:
         data = asdict(self)
         data["state"] = self.state.value
+        if self.schema_version == 1:
+            data.pop("client_operation_id")
         if not include_hash:
             data.pop("record_hash")
         return data
@@ -75,6 +79,11 @@ class IntentRecord:
             state=IntentState(str(data["state"])),
             previous_hash=str(data["previous_hash"]),
             record_hash=str(data["record_hash"]),
+            client_operation_id=(
+                None
+                if data.get("client_operation_id") is None
+                else str(data["client_operation_id"])
+            ),
             broker_order_id=(
                 None
                 if data.get("broker_order_id") is None
@@ -91,6 +100,7 @@ class IntentJournal(Protocol):
         role: str,
         account_id: int,
         contract_id: int,
+        client_operation_id: Optional[str] = None,
         body: Any,
     ) -> IntentRecord: ...
 
@@ -108,6 +118,9 @@ class IntentJournal(Protocol):
 
     @property
     def has_history(self) -> bool: ...
+
+    @property
+    def latest_by_intent(self) -> dict[str, IntentRecord]: ...
 
 
 class OrderIntentJournal:
@@ -159,12 +172,14 @@ class OrderIntentJournal:
         role: str,
         account_id: int,
         contract_id: int,
+        client_operation_id: Optional[str] = None,
         body: Any,
     ) -> IntentRecord:
         if not role.strip():
             raise IntentJournalError("intent role must be nonblank")
         if account_id <= 0 or contract_id <= 0:
             raise IntentJournalError("intent account_id and contract_id must be positive")
+        _validate_client_operation_id(client_operation_id)
         intent_id = f"{self._run_id}:intent:{self._next_intent_number:08d}"
         self._next_intent_number += 1
         record = self._new_record(
@@ -172,6 +187,7 @@ class OrderIntentJournal:
             role=role,
             account_id=account_id,
             contract_id=contract_id,
+            client_operation_id=client_operation_id,
             body_digest=_body_digest(body),
             state=IntentState.SUBMISSION_PENDING,
         )
@@ -200,6 +216,7 @@ class OrderIntentJournal:
             role=previous.role,
             account_id=previous.account_id,
             contract_id=previous.contract_id,
+            client_operation_id=previous.client_operation_id,
             body_digest=previous.body_digest,
             state=state,
             broker_order_id=broker_order_id,
@@ -231,6 +248,7 @@ class OrderIntentJournal:
         role: str,
         account_id: int,
         contract_id: int,
+        client_operation_id: Optional[str],
         body_digest: str,
         state: IntentState,
         broker_order_id: Optional[str] = None,
@@ -244,6 +262,7 @@ class OrderIntentJournal:
             "role": role,
             "account_id": account_id,
             "contract_id": contract_id,
+            "client_operation_id": client_operation_id,
             "body_digest": body_digest,
             "state": state,
             "previous_hash": self.records[-1].record_hash if self.records else GENESIS_HASH,
@@ -300,10 +319,11 @@ class OrderIntentJournal:
         self._next_intent_number = pending_count + 1
 
     def _validate_loaded_record(self, record: IntentRecord, index: int) -> None:
-        if record.schema_version != SCHEMA_VERSION:
+        if record.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
             raise IntentJournalError(
                 f"intent journal record {index} has unsupported schema_version"
             )
+        _validate_client_operation_id(record.client_operation_id)
         if record.run_id != self._run_id:
             raise IntentJournalError(
                 f"intent journal record {index} run_id does not match {self._run_id!r}"
@@ -339,12 +359,14 @@ class OrderIntentJournal:
             record.role,
             record.account_id,
             record.contract_id,
+            record.client_operation_id,
             record.body_digest,
         )
         previous_identity = (
             previous.role,
             previous.account_id,
             previous.contract_id,
+            previous.client_operation_id,
             previous.body_digest,
         )
         if identity != previous_identity:
@@ -376,7 +398,7 @@ _ALLOWED_TRANSITIONS = {
         IntentState.RECONCILED,
     },
     IntentState.SUBMISSION_UNKNOWN: {IntentState.RECONCILED},
-    IntentState.ACKNOWLEDGED: set(),
+    IntentState.ACKNOWLEDGED: {IntentState.RECONCILED},
     IntentState.REJECTED: set(),
     IntentState.CONFIRMED: set(),
     IntentState.RECONCILED: set(),
@@ -402,3 +424,12 @@ def _bounded_detail(detail: Optional[str]) -> Optional[str]:
     if detail is None:
         return None
     return str(detail)[:256]
+
+
+def _validate_client_operation_id(value: Optional[str]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or not value.strip() or len(value) > 64:
+        raise IntentJournalError(
+            "client_operation_id must be a nonblank string no longer than 64 characters"
+        )
