@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -30,6 +30,24 @@ class ScriptedFeed:
         return item
 
 
+class AdvancingFeed(ScriptedFeed):
+    """Models a real timeout by advancing the injected wall clock."""
+
+    def __init__(self, items, clock) -> None:
+        super().__init__(items)
+        self._clock = clock
+        self.calls = 0
+
+    def next_bar(self, timeout_seconds: float):
+        self.calls += 1
+        item = super().next_bar(timeout_seconds)
+        if item is None:
+            self._clock.set(
+                self._clock.now() + timedelta(seconds=timeout_seconds)
+            )
+        return item
+
+
 # Front contract for a Nov-2025 session is NQZ5 (validated roll logic).
 AUTH = ContractAuthority(root="NQ")
 FRONT_NOV_2025 = AUTH.front_contract(date(2025, 11, 3))  # concrete, not hardcoded
@@ -46,9 +64,16 @@ IN_POSITION = lambda: True
 CLOCK = FakeClock(datetime(2025, 11, 3, 15, 0, tzinfo=timezone.utc))
 
 
-def _source(items, window=RTH_WINDOW, position=FLAT, clock=None):
+def _source(
+    items,
+    window=RTH_WINDOW,
+    position=FLAT,
+    clock=None,
+    session_end_minutes_et=None,
+):
     return LiveBarSource(ScriptedFeed(items), clock or FakeClock(CLOCK.now()),
-                         AUTH, window, position)
+                         AUTH, window, position,
+                         session_end_minutes_et=session_end_minutes_et)
 
 
 def test_active_window_contains():
@@ -100,6 +125,105 @@ def test_armed_timeout_raises_outage():
     assert next(it).timestamp_utc == "2025-11-03T14:32:00Z"
     with pytest.raises(DataOutageError):
         next(it)  # feed returns None; armed by open position
+
+
+def test_cold_start_inside_active_window_halts_on_first_timeout():
+    clock = FakeClock(datetime(2025, 11, 3, 14, 35, 30, tzinfo=timezone.utc))
+    window = ActiveWindow(start_minutes_et=9 * 60 + 30, end_minutes_et=10 * 60)
+    src = _source(
+        [None, _vbar("2025-11-03T14:35:00Z")],
+        window=window,
+        position=FLAT,
+        clock=clock,
+    )
+
+    with pytest.raises(DataOutageError, match="cold-start"):
+        next(iter(src))
+
+
+def test_late_first_bar_inside_active_window_misses_startup_deadline():
+    clock = FakeClock(datetime(2025, 11, 3, 14, 35, 30, tzinfo=timezone.utc))
+
+    class LateFirstBarFeed:
+        def next_bar(self, timeout_seconds: float):
+            clock.set(clock.now() + timedelta(seconds=timeout_seconds + 1))
+            return _vbar("2025-11-03T14:35:00Z")
+
+    src = LiveBarSource(
+        LateFirstBarFeed(),
+        clock,
+        AUTH,
+        ActiveWindow(start_minutes_et=9 * 60 + 30, end_minutes_et=10 * 60),
+        FLAT,
+    )
+
+    with pytest.raises(DataOutageError, match="after cold-start deadline"):
+        next(iter(src))
+
+
+def test_cold_start_before_active_window_can_accept_a_late_first_bar():
+    clock = FakeClock(datetime(2025, 11, 3, 14, 29, 30, tzinfo=timezone.utc))
+    feed = AdvancingFeed(
+        [None, _vbar("2025-11-03T14:30:00Z")],
+        clock,
+    )
+    src = LiveBarSource(
+        feed,
+        clock,
+        AUTH,
+        ActiveWindow(start_minutes_et=9 * 60 + 30, end_minutes_et=10 * 60),
+        FLAT,
+        session_end_minutes_et=16 * 60 + 5,
+    )
+
+    assert next(iter(src)).timestamp_utc == "2025-11-03T14:30:00Z"
+    assert feed.calls == 2
+
+
+def test_cold_start_after_active_window_stops_at_configured_session_end():
+    clock = FakeClock(datetime(2025, 11, 3, 15, 5, 0, tzinfo=timezone.utc))
+    feed = AdvancingFeed([None, None, None], clock)
+    src = LiveBarSource(
+        feed,
+        clock,
+        AUTH,
+        ActiveWindow(start_minutes_et=9 * 60 + 30, end_minutes_et=10 * 60),
+        FLAT,
+        session_end_minutes_et=10 * 60 + 7,
+    )
+
+    assert list(src) == []
+    assert feed.calls == 2
+    assert clock.now() == datetime(2025, 11, 3, 15, 7, 0, tzinfo=timezone.utc)
+
+
+def test_cold_start_after_session_end_does_not_poll_feed():
+    clock = FakeClock(datetime(2025, 11, 3, 15, 8, 0, tzinfo=timezone.utc))
+    feed = AdvancingFeed([], clock)
+    src = LiveBarSource(
+        feed,
+        clock,
+        AUTH,
+        ActiveWindow(start_minutes_et=9 * 60 + 30, end_minutes_et=10 * 60),
+        FLAT,
+        session_end_minutes_et=10 * 60 + 7,
+    )
+
+    assert list(src) == []
+    assert feed.calls == 0
+
+
+def test_open_position_never_stops_quietly_at_session_end_without_data():
+    clock = FakeClock(datetime(2025, 11, 3, 15, 8, 0, tzinfo=timezone.utc))
+    src = _source(
+        [None],
+        position=IN_POSITION,
+        clock=clock,
+        session_end_minutes_et=10 * 60 + 7,
+    )
+
+    with pytest.raises(DataOutageError, match="cold-start"):
+        next(iter(src))
 
 
 def test_armed_interior_gap_raises_outage():
