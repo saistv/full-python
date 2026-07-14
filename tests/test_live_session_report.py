@@ -9,6 +9,7 @@ from full_python.events import EventLedger, EventRecord, EventType
 from full_python.live.recording import RecordingStrategy
 from full_python.live.session_report import (
     bars_from_ledger,
+    check_bar_coverage,
     diff_bars,
     diff_signals,
     recorded_signals,
@@ -43,6 +44,68 @@ def _write_reference(path: Path, ledger: EventLedger) -> Path:
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _session_bars(minutes_et_range, session="2026-07-10") -> list:
+    """MarketBars on a July session; 09:30 ET == 13:30 UTC (EDT)."""
+    out = []
+    for minute in minutes_et_range:
+        hour_utc, minute_utc = divmod(minute + 4 * 60, 60)  # ET -> UTC
+        out.append(MarketBar(
+            timestamp_utc=f"{session}T{hour_utc:02d}:{minute_utc:02d}:00Z",
+            symbol="NQU6", open=100.0, high=100.5, low=99.5, close=100.0, volume=10.0,
+        ))
+    return out
+
+
+def test_coverage_check_fails_when_the_capture_lost_its_warmup_history() -> None:
+    # The exact failure the feed's history-drop bug produced: the capture holds
+    # only the entry window and no warmup. The strategy cannot warm up, trades
+    # nothing -- and the replay of the same truncated capture also produces no
+    # signals, so signal parity is silent. Only a coverage assertion catches it.
+    reference = _session_bars(range(9 * 60 + 25, 10 * 60))   # 09:25-09:59 ET
+    captured = _session_bars(range(9 * 60 + 30, 10 * 60))    # window only, no warmup
+
+    problems = check_bar_coverage(
+        captured, reference,
+        entry_start_minutes_et=9 * 60 + 30,
+        entry_end_minutes_et=10 * 60,
+        warmup_bars=5,
+    )
+
+    assert problems
+    assert any("warmup" in p for p in problems)
+
+
+def test_coverage_check_fails_when_the_capture_is_truncated_before_the_window_closes() -> None:
+    # diff_bars clips the reference to the captured range, so a capture that
+    # simply STOPS mid-window looks clean to it. Coverage must still fail.
+    reference = _session_bars(range(9 * 60 + 25, 10 * 60))
+    captured = _session_bars(range(9 * 60 + 25, 9 * 60 + 45))  # ends at 09:44
+
+    problems = check_bar_coverage(
+        captured, reference,
+        entry_start_minutes_et=9 * 60 + 30,
+        entry_end_minutes_et=10 * 60,
+        warmup_bars=5,
+    )
+
+    assert problems
+    assert any("entry window" in p for p in problems)
+
+
+def test_coverage_check_passes_on_a_complete_capture() -> None:
+    reference = _session_bars(range(9 * 60 + 25, 10 * 60))
+    captured = _session_bars(range(9 * 60 + 25, 10 * 60))
+
+    problems = check_bar_coverage(
+        captured, reference,
+        entry_start_minutes_et=9 * 60 + 30,
+        entry_end_minutes_et=10 * 60,
+        warmup_bars=5,
+    )
+
+    assert problems == []
 
 
 def test_bars_roundtrip_from_ledger() -> None:

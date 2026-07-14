@@ -49,10 +49,32 @@ Note: a second run on the same day writes `events-2.jsonl` / `report-2.html` (an
 
 ## Gate 5 pass criteria (pre-registered in the spec)
 
-3 clean sessions, each with: exact PARITY verdict; every
-disconnect/outage handled by the documented halt policy; probe output
-captured. Divergent or unexplained sessions do not count and open a
-bar-level debug from the ledger.
+3 clean sessions, each with: a **PARITY** verdict; every disconnect/outage
+handled by the documented halt policy; probe output captured. Divergent or
+unexplained sessions do not count and open a bar-level debug from the ledger.
+
+**A PARITY verdict requires an independent bar check.** Without
+`--reference-bars` the report returns `BAR-UNVERIFIED` and a nonzero exit — it
+can no longer be mistaken for a pass. Signal parity alone is not evidence: if the
+capture is wrong, the replay of that same wrong capture agrees with it.
+
+The bar check asserts two things against an independent source:
+
+1. **Agreement** — every reference bar inside the captured range is present and
+   identical (OHLCV and symbol).
+2. **Coverage** — the capture contains every minute of the 09:30-10:00 entry
+   window, and at least 200 bars before it opened. A session whose warmup history
+   was lost cannot have traded, and must never read as PARITY.
+
+Databento publishes next day, so run the bar check post-hoc:
+
+    python3 -m full_python.live --report-only runs/live/<date>/events.jsonl \
+        --reference-bars <independent_session_bars.csv>
+
+**Abbreviated holiday sessions (09:30-13:00 ET) are trading days** — MLK,
+Presidents, Memorial, Juneteenth, Independence, Labor and Thanksgiving. The market
+is open, the entry window is open, and the system trades them. Only Good Friday,
+Christmas and New Year are full closures.
 
 Before counting the first session, perform attended failure drills in DEMO:
 
@@ -69,8 +91,8 @@ Archive each drill's redacted ledger/report next to the session evidence. These
 drills validate detection and artifacts; they do not count toward the three
 clean sessions.
 
-| # | Date | Verdict | Halts (reason) | Probe captured | Clean? |
-|---|------|---------|----------------|----------------|--------|
-| 1 |      |         |                |                |        |
-| 2 |      |         |                |                |        |
-| 3 |      |         |                |                |        |
+| # | Date | Verdict | Bar check | Halts (reason) | Probe captured | Clean? |
+|---|------|---------|-----------|----------------|----------------|--------|
+| 1 |      |         |           |                |                |        |
+| 2 |      |         |           |                |                |        |
+| 3 |      |         |           |                |                |        |

@@ -6,6 +6,14 @@ it does
 not assume any particular AI tool, skill set, or external memory. Read it
 fully before touching anything. Last updated 2026-07-14.
 
+> **Start here.** Two independent tracks are in flight. The broker/order path is
+> being rebuilt on `main` (slices A-C landed; see §6). Separately, **PR #25**
+> corrects the exchange calendar (restoring TradingView parity 106/106 from
+> 103/106) and makes the live market-data feed protocol-correct. **Merge PR #25
+> before running any research** — until it lands, `main`'s baseline refuses to
+> trade seven open market sessions a year. Nothing may trade live: see
+> `docs/audits/2026-07-13-adversarial-audit.md` for the open P0/P1 backlog.
+
 ## 1. What this project is
 
 `saistv/full-python` — an event-sourced, deterministic Python backtester
@@ -23,6 +31,18 @@ the cost of the frozen historical candidate, which no analysis this year has
 beaten.
 
 ## 2. Non-negotiable guardrails (violating these loses money or wastes weeks)
+
+0. **The exchange calendar is DATA, not strategy.** CME equity-index futures trade
+   an abbreviated 09:30-13:00 ET session on seven US holidays (MLK, Presidents,
+   Memorial, Juneteenth, Independence, Labor, Thanksgiving) — the entry window is
+   open and the system trades them. Only Good Friday, Christmas and New Year are
+   full closures. **Declining to trade a session the market is open for is a
+   FILTER, and filters go through Gate 1 like anything else.** This guardrail
+   exists because it was violated: a cash-equity calendar shipped as a "correctness
+   fix", deleted TradingView-matched trades, and broke trade-level parity
+   (106/106 → 103/106) undetected. Calendar rules are pinned to
+   `tests/fixtures/cme_equity_rth_close.json` — 1,379 weekdays of the exchange's
+   own record. Do not edit the calendar to match a belief; check the fixture.
 
 1. **Python is the performance authority.** The historical
    `$251K / PF 2.071 / 448 trades` TradingView claim is unreproducible and
@@ -83,20 +103,54 @@ Do not skip the review step, and do not merge red tests.
   `PositionEngine`; they do NOT prove the separate Tradovate lifecycle or
   account reconciliation path.
 
-## 5. Current state (2026-07-13)
+## 5. Current state (2026-07-14)
 
-- **Historical replay correctness remediation — COMPLETE through the
-  2026-07-13 audit follow-up.** Tradovate
-  progressive bars now finalize correctly; shadow parity requires an
-  independent bar CSV; exits wait for confirmed stop cancellation; reject and
-  unsolicited-cancel paths enter explicit recovery; holiday/early-close logic
-  is shared by sim/live; NQ/MNQ point value has one authority; RTH gaps fail
-  closed; dirty source changes run identity; stop-bar MFE/MAE is bounded and
-  flagged. Fill-time stop placement now fails closed, nonfinite bars and
-  invalid execution costs are rejected, and the contaminated timing axis was
-  rerun. See `docs/decisions/2026-07-12-phase0-correctness-remediation.md`
-  and `2026-07-13-phase0-audit-follow-up.md`. This does NOT close the broker
-  execution P0 findings in the 2026-07-13 principal audit.
+- **Exchange calendar corrected; TradingView parity restored (PR #25).** The
+  2026-07-12 "holiday fix" applied a US **cash-equity** calendar to a **futures**
+  market. CME equity-index futures trade an abbreviated **09:30-13:00 ET** session
+  on MLK, Presidents, Memorial, Juneteenth, Independence, Labor and Thanksgiving —
+  the 09:30-10:00 entry window is fully open, with real volume. Only Good Friday,
+  Christmas and New Year are full closures. Declaring those seven days closed
+  deleted trades TradingView had actually taken: trade-level parity silently fell
+  to **103/106**, undetected because `golden_trades.json` had been regenerated
+  from the engine's own output (a sim-vs-sim fixture cannot detect a
+  sim-vs-TradingView regression). It also shipped an unregistered strategy filter
+  worth **+$965 / 5yr** — an order of magnitude below the $10,000 materiality bar,
+  so Gate 1 would have REJECTED it.
+
+  Calendar rules are now pinned to **1,379 weekdays of the exchange's own record**
+  (`tests/fixtures/cme_equity_rth_close.json`). Parity restored: **106/106, $0.00
+  entry-price delta**, and now guarded by `tests/test_tv_reconciliation.py` rather
+  than by a self-referential fixture. Corrected 5-yr authority: **NQ 829 trades /
+  $159,160 / PF 1.412 / bootstrap p95 DD -$43,080**. Every qualitative conclusion
+  of Phase 1 and Phase 2 survives, including the MNQ pilot's rejection. See
+  `docs/decisions/2026-07-13-exchange-calendar-correction.md`.
+
+- **Live market-data feed made protocol-correct (PR #25).** Three defects, each
+  of which silently destroys a session, all reproduced-then-fixed: forming-bar
+  snapshots were counted as "ignored events" (Tradovate updates the forming bar on
+  every tick, so >100 snapshots in one minute killed the feed at the 09:30 open —
+  the only minute this strategy trades); a single realtime snapshot arriving before
+  the historical batch discarded **all** warmup history (`eoh` was not handled
+  anywhere, though the protocol requires gather-and-sort); and `TradovateFeedError`
+  escaped the halt protocol entirely. The shadow report now asserts bar
+  **coverage** (warmup + full entry window), not merely agreement inside whatever
+  range happened to be captured — a session in which the strategy could not have
+  warmed up can no longer read as PARITY.
+
+  **Supersedes the earlier claims** that "progressive bars now finalize correctly"
+  and that "holiday/early-close logic is shared by sim/live" — both were wrong.
+
+- **Historical replay correctness remediation (2026-07-12/13).** Exits wait for
+  confirmed stop cancellation; reject and unsolicited-cancel paths enter explicit
+  recovery; NQ/MNQ point value has one authority; RTH gaps fail closed; dirty
+  source changes run identity; stop-bar MFE/MAE is bounded and flagged. Fill-time
+  stop placement fails closed, nonfinite bars and invalid execution costs are
+  rejected, and the contaminated timing axis was rerun. See
+  `docs/decisions/2026-07-12-phase0-correctness-remediation.md` and
+  `2026-07-13-phase0-audit-follow-up.md`. This does NOT close the broker execution
+  P0 findings in the 2026-07-13 principal audit
+  (`docs/audits/2026-07-13-adversarial-audit.md` — see its status table).
 - **Phase 1 evidence migration — COMPLETE.** Standard reports now include
   deterministic session-block bootstrap bands and top-trade/day dependency.
   The old TradingView headline, old MNQ sizing verdict, and unsupported prop
@@ -124,7 +178,10 @@ Do not skip the review step, and do not merge red tests.
 
 - **Baseline frozen & partially TV-reconciled** — Python matches all 106
   overlapping TradingView entries at $0.00 entry-price delta on the 9-month
-  anchor. This is entry parity, not exact full-trade or broker parity.
+  anchor. This is entry parity, not exact full-trade or broker parity. **It holds
+  only with PR #25's calendar; before it, `main` reconciled 103/106.** The
+  reconciliation is now guarded by a test against the operator's TV export
+  (`FULL_PYTHON_TV_EXPORT`), not by a fixture the engine generated itself.
 - **5-year dataset assembled** (2021-03-16 → 2026-06-26, 1.87M bars).
 - **Gate 1 config audit COMPLETE — zero changes promoted.** Prior-vol gate
   rejected (holdout sign reversal); MA-length and S/R-interaction sweeps

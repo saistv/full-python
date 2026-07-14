@@ -1,5 +1,12 @@
 # Phase 2 Baseline Anchored Walk-Forward
 
+> **SUPERSEDED NUMBERS (2026-07-13).** Every figure in this document was computed
+> on a calendar that wrongly treated seven abbreviated CME holiday sessions
+> (09:30-13:00 ET, market open) as full closures. See
+> `docs/decisions/2026-07-13-exchange-calendar-correction.md` for the corrected
+> authority table and TradingView parity restoration. Qualitative conclusions in
+> this document survive the correction; the numbers do not.
+
 **Status:** baseline characterization complete; Phase 2 remains in progress.
 No parameter selection occurred.
 

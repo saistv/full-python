@@ -1,5 +1,12 @@
 # Phase 0 Correctness Remediation
 
+> **SUPERSEDED NUMBERS (2026-07-13).** Every figure in this document was computed
+> on a calendar that wrongly treated seven abbreviated CME holiday sessions
+> (09:30-13:00 ET, market open) as full closures. See
+> `docs/decisions/2026-07-13-exchange-calendar-correction.md` for the corrected
+> authority table and TradingView parity restoration. Qualitative conclusions in
+> this document survive the correction; the numbers do not.
+
 **Decision:** Phase 0 from the 2026-07-12 independent audit is complete.
 This earns a return to research and independently verified observe sessions. It
 does **not** authorize an order-enabled runner, paper orders, or funded trading.

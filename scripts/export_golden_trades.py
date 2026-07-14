@@ -14,7 +14,7 @@ from pathlib import Path
 
 TRADES_CSV = Path(os.environ.get(
     "FULL_PYTHON_GOLDEN_TRADES",
-    "runs/phase0-corrected-anchor/trades.csv",
+    "runs/verify-anchor/trades.csv",
 ))
 FIXTURE_PATH = Path("tests/fixtures/golden_trades.json")
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any, List, Optional, Tuple
 
+import pytest
+
 from full_python.livedata.contract_authority import ContractAuthority
 from full_python.livedata.live_bar_source import ActiveWindow, LiveBarSource
 from full_python.tradovate.errors import TradovateFeedError
@@ -60,6 +62,23 @@ def _raw_bar(ts: str, close: float = 100.5) -> dict:
 
 def _chart_event(chart_id: int, bars: List[dict]) -> dict:
     return {"e": "chart", "d": {"charts": [{"id": chart_id, "bars": bars}]}}
+
+
+def _eoh_event(chart_id: int = 101) -> dict:
+    """Tradovate's end-of-history marker: {id: <historicalId>, eoh: true}.
+
+    Until this arrives the client must gather bars and sort them -- the
+    documented protocol makes no ordering guarantee for the historical batch.
+    """
+    return {"e": "chart", "d": {"charts": [{"id": chart_id, "eoh": True}]}}
+
+
+class FakeMonotonicClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
 
 
 def test_chart_bar_to_vendor_bar_normalizes_timestamp_and_volume() -> None:
@@ -120,6 +139,7 @@ def test_next_bar_replaces_forming_bar_and_emits_it_when_next_timestamp_arrives(
             {"e": "props", "d": {"ignored": True}},
             {"e": "chart", "d": {"charts": [{"id": 999, "bars": [first]}]}},
             _chart_event(101, [first, duplicate, second]),
+            _eoh_event(),
         ]
     )
     feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
@@ -128,14 +148,10 @@ def test_next_bar_replaces_forming_bar_and_emits_it_when_next_timestamp_arrives(
     finalized = feed.next_bar(timeout_seconds=2.5)
     assert finalized.timestamp_utc == "2026-07-07T14:31:00Z"
     assert finalized.close == 101.5
-    assert len(ws.received_timeouts) == 3
-    assert all(0.0 < value <= 2.5 for value in ws.received_timeouts)
 
     # 14:32 is still forming. It must not be emitted until a newer timestamp
     # proves that the minute is complete.
     assert feed.next_bar(timeout_seconds=1.0) is None
-    assert len(ws.received_timeouts) == 4
-    assert 0.0 < ws.received_timeouts[-1] <= 1.0
 
 
 def test_historical_batch_emits_every_bar_except_latest_forming_minute() -> None:
@@ -144,7 +160,7 @@ def test_historical_batch_emits_every_bar_except_latest_forming_minute() -> None
         _raw_bar("2026-07-07T14:31:00Z", close=101.0),
         _raw_bar("2026-07-07T14:32:00Z", close=102.0),
     ]
-    ws = FakeChartWebSocket([_chart_event(101, bars)])
+    ws = FakeChartWebSocket([_chart_event(101, bars), _eoh_event()])
     feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
     feed.subscribe(closest_timestamp="2026-07-07T14:32Z", bars_back=3)
 
@@ -156,6 +172,7 @@ def test_historical_batch_emits_every_bar_except_latest_forming_minute() -> None
 def test_later_snapshot_replaces_pending_forming_bar_across_events() -> None:
     ws = FakeChartWebSocket([
         _chart_event(101, [_raw_bar("2026-07-07T14:31:00Z", close=100.5)]),
+        _eoh_event(),
         _chart_event(202, [_raw_bar("2026-07-07T14:31:00Z", close=101.5)]),
         _chart_event(202, [_raw_bar("2026-07-07T14:32:00Z", close=102.5)]),
     ])
@@ -165,6 +182,135 @@ def test_later_snapshot_replaces_pending_forming_bar_across_events() -> None:
     bar = feed.next_bar(2.0)
     assert bar.timestamp_utc == "2026-07-07T14:31:00Z"
     assert bar.close == 101.5
+
+
+def test_forming_bar_snapshots_are_progress_not_ignorable_noise() -> None:
+    # Tradovate updates the forming bar on every tick. The 09:30 open -- the only
+    # minute this strategy trades -- is the highest tick-rate minute of the day.
+    # Counting each snapshot as an "ignored event" kills the session precisely
+    # when it matters most.
+    updates = [
+        _chart_event(202, [_raw_bar("2026-07-07T14:31:00Z", close=100.0 + i * 0.25)])
+        for i in range(300)
+    ]
+    ws = FakeChartWebSocket([_eoh_event()] + updates
+                            + [_chart_event(202, [_raw_bar("2026-07-07T14:32:00Z")])])
+    feed = TradovateMarketDataFeed(ws, symbol="NQZ5", max_ignored_events=100)
+    feed.subscribe(closest_timestamp="2026-07-07T14:31Z", bars_back=5)
+
+    bar = feed.next_bar(timeout_seconds=5.0)  # must not raise
+
+    assert bar.timestamp_utc == "2026-07-07T14:31:00Z"
+    assert bar.close == 100.0 + 299 * 0.25  # the LAST snapshot, not the first
+
+
+def test_realtime_snapshot_before_history_does_not_discard_warmup() -> None:
+    # A single realtime snapshot arriving before the historical batch must not
+    # throw away the warmup history: the strategy needs 200 bars before it can
+    # trade, and a session without them silently trades nothing.
+    history = [_raw_bar(f"2026-07-07T13:{m:02d}:00Z", close=100 + m) for m in range(10, 60)]
+    ws = FakeChartWebSocket([
+        _chart_event(202, [_raw_bar("2026-07-07T14:31:00Z", close=999.0)]),  # realtime first
+        _chart_event(101, history),                                          # history after
+        _eoh_event(),
+    ])
+    feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
+    feed.subscribe(closest_timestamp="2026-07-07T14:31Z", bars_back=400)
+
+    emitted = []
+    while True:
+        bar = feed.next_bar(timeout_seconds=0.05)
+        if bar is None:
+            break
+        emitted.append(bar.timestamp_utc)
+
+    assert len(emitted) == len(history)          # every warmup bar survives
+    assert emitted == sorted(emitted)            # and is emitted in order
+    assert emitted[0] == "2026-07-07T13:10:00Z"
+
+
+def test_out_of_order_history_is_sorted_before_emission() -> None:
+    # The protocol makes no ordering guarantee; the client must gather and sort.
+    shuffled = [
+        _raw_bar("2026-07-07T14:03:00Z"),
+        _raw_bar("2026-07-07T14:01:00Z"),
+        _raw_bar("2026-07-07T14:02:00Z"),
+        _raw_bar("2026-07-07T14:00:00Z"),
+    ]
+    ws = FakeChartWebSocket([
+        _chart_event(101, shuffled[:2]),
+        _chart_event(101, shuffled[2:]),
+        _eoh_event(),
+    ])
+    feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
+    feed.subscribe(closest_timestamp="2026-07-07T14:03Z", bars_back=10)
+
+    emitted = []
+    while True:
+        bar = feed.next_bar(timeout_seconds=0.05)
+        if bar is None:
+            break
+        emitted.append(bar.timestamp_utc)
+
+    assert emitted == [
+        "2026-07-07T14:00:00Z",
+        "2026-07-07T14:01:00Z",
+        "2026-07-07T14:02:00Z",
+    ]  # 14:03 is the newest and still forming
+
+
+def test_history_is_withheld_until_the_end_of_history_marker() -> None:
+    # Nothing may be emitted while the historical batch is still streaming: an
+    # older bar could still arrive, and emitting early would drop it.
+    ws = FakeChartWebSocket([
+        _chart_event(101, [_raw_bar("2026-07-07T14:01:00Z"), _raw_bar("2026-07-07T14:02:00Z")]),
+    ])
+    feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
+    feed.subscribe(closest_timestamp="2026-07-07T14:02Z", bars_back=10)
+
+    assert feed.next_bar(timeout_seconds=0.05) is None
+    assert not feed.history_complete
+
+
+def test_history_grace_timeout_finalizes_when_eoh_never_arrives() -> None:
+    # If the marker never comes, the feed must not stall forever.
+    clock = FakeMonotonicClock()
+    ws = FakeChartWebSocket([
+        _chart_event(101, [_raw_bar("2026-07-07T14:01:00Z"), _raw_bar("2026-07-07T14:02:00Z")]),
+    ])
+    feed = TradovateMarketDataFeed(
+        ws, symbol="NQZ5", monotonic_clock=clock, history_grace_seconds=30.0
+    )
+    feed.subscribe(closest_timestamp="2026-07-07T14:02Z", bars_back=10)
+
+    assert feed.next_bar(timeout_seconds=0.05) is None   # still inside the grace period
+
+    clock.value = 31.0                                    # grace elapsed
+    bar = feed.next_bar(timeout_seconds=0.05)
+
+    assert bar is not None
+    assert bar.timestamp_utc == "2026-07-07T14:01:00Z"
+    assert feed.history_complete
+
+
+def test_feed_error_is_a_live_data_error_so_the_loop_halts_and_flattens() -> None:
+    # TradovateFeedError escaped LiveLoop's halt protocol entirely: it was
+    # neither a LiveDataError nor an ExecutionInvariantError, so a feed protocol
+    # failure crashed straight through the safety layer.
+    from full_python.livedata.errors import LiveDataError
+
+    assert issubclass(TradovateFeedError, LiveDataError)
+
+
+def test_malformed_bar_inside_a_chart_packet_becomes_a_feed_error() -> None:
+    ws = FakeChartWebSocket([
+        _chart_event(101, [{"timestamp": "2026-07-07T14:01:00Z", "open": "100.0"}]),
+    ])
+    feed = TradovateMarketDataFeed(ws, symbol="NQZ5")
+    feed.subscribe(closest_timestamp="2026-07-07T14:01Z", bars_back=5)
+
+    with pytest.raises(TradovateFeedError):
+        feed.next_bar(timeout_seconds=0.05)
 
 
 def test_next_bar_stops_after_too_many_ignored_events() -> None:
@@ -202,6 +348,7 @@ def test_next_bar_uses_remaining_timeout_budget_for_ignored_events() -> None:
 
 def test_next_bar_matches_realtime_subscription_id() -> None:
     ws = FakeChartWebSocket([
+        _eoh_event(),
         _chart_event(202, [
             _raw_bar("2026-07-07T14:33:00Z"),
             _raw_bar("2026-07-07T14:34:00Z"),
@@ -259,7 +406,8 @@ def test_feed_vendor_bar_is_consumed_by_live_bar_source() -> None:
                         "volume": 8,
                     },
                 ],
-            )
+            ),
+            _eoh_event(),
         ]
     )
     feed = TradovateMarketDataFeed(ws, symbol=front)

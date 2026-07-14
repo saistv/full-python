@@ -1,5 +1,12 @@
 # MNQ-First Pilot Sizing Gate
 
+> **SUPERSEDED NUMBERS (2026-07-13).** Every figure in this document was computed
+> on a calendar that wrongly treated seven abbreviated CME holiday sessions
+> (09:30-13:00 ET, market open) as full closures. See
+> `docs/decisions/2026-07-13-exchange-calendar-correction.md` for the corrected
+> authority table and TradingView parity restoration. Qualitative conclusions in
+> this document survive the correction; the numbers do not.
+
 **Decision:** reject a 30-session funded pilot under the `$500` cumulative
 loss budget. Retain flat one MNQ as the eventual live pilot instrument, but use
 the `$500` budget for at most a 10-session operational pilot after all observe,

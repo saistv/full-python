@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from full_python.data.loaders import CsvBarColumnMap, load_csv_bars
+from full_python.data.sessions import classify_timestamp
 from full_python.events import EventLedger, EventType
 from full_python.models import MarketBar
 from full_python.strategy.adaptive_trend import AdaptiveTrendStrategy
@@ -137,6 +138,64 @@ def diff_bars(recorded: list[MarketBar], reference: list[MarketBar]) -> list[str
     return differences
 
 
+def check_bar_coverage(
+    recorded: list,
+    reference: list,
+    *,
+    entry_start_minutes_et: int,
+    entry_end_minutes_et: int,
+    warmup_bars: int,
+) -> list:
+    """Assert the capture holds ENOUGH bars, not merely correct ones.
+
+    ``diff_bars`` compares only inside ``[captured[0], captured[-1]]``, so a
+    capture that lost its leading warmup history -- or that simply stopped
+    mid-window -- looks clean to it. That is exactly what the feed's history-drop
+    bug produced: no warmup, no signals, and a replay of the same truncated
+    capture that also produced no signals, so the session still read PARITY.
+
+    A session is only meaningful if the strategy could actually warm up and could
+    see the whole entry window. Both are checked here, per captured session.
+    """
+    if not recorded:
+        return ["no recorded bars"]
+
+    problems: list = []
+    captured_by_session: dict = {}
+    for bar in recorded:
+        session = classify_timestamp(bar.timestamp_utc)
+        captured_by_session.setdefault(session.session_date, set()).add(bar.timestamp_utc)
+
+    for session_date, captured in sorted(captured_by_session.items()):
+        expected_window = sorted(
+            bar.timestamp_utc
+            for bar in reference
+            if classify_timestamp(bar.timestamp_utc).session_date == session_date
+            and entry_start_minutes_et
+            <= classify_timestamp(bar.timestamp_utc).minutes_from_midnight_et
+            < entry_end_minutes_et
+        )
+        if not expected_window:
+            continue  # the reference has no entry window here (e.g. a closure)
+
+        missing = [ts for ts in expected_window if ts not in captured]
+        if missing:
+            problems.append(
+                f"{session_date}: {len(missing)} of {len(expected_window)} entry window "
+                f"minutes missing from the capture (first: {missing[0]})"
+            )
+
+        window_open = expected_window[0]
+        warmup_available = sum(1 for ts in captured if ts < window_open)
+        if warmup_available < warmup_bars:
+            problems.append(
+                f"{session_date}: only {warmup_available} bars captured before the entry "
+                f"window opened; the strategy needs {warmup_bars} warmup bars, so it could "
+                "not have traded this session"
+            )
+    return problems
+
+
 def _halts(ledger: EventLedger) -> list:
     return [
         record for record in ledger.records
@@ -241,8 +300,15 @@ def run_report(events_path, html_path, *, reference_bars_path=None) -> int:
         bar_check_status = "NOT RUN"
         bar_differences: list[str] = []
     else:
+        config = production_am_config()
         reference = load_csv_bars(Path(reference_bars_path), REFERENCE_COLUMN_MAP)
-        bar_differences = diff_bars(bars, reference)
+        bar_differences = diff_bars(bars, reference) + check_bar_coverage(
+            bars,
+            reference,
+            entry_start_minutes_et=config.entry_start_minutes_et,
+            entry_end_minutes_et=config.entry_end_minutes_et,
+            warmup_bars=config.warmup_bars,
+        )
         bar_check_status = "VERIFIED" if not bar_differences else "FAILED"
     halts = _halts(ledger)
     try:

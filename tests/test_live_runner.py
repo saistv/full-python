@@ -56,6 +56,11 @@ def _chart_event(ts: str, price: float, symbol_unused: str = "") -> dict:
     }]}]}}
 
 
+def _eoh_event() -> dict:
+    """End-of-history marker for the historical subscription (id 1)."""
+    return {"e": "chart", "d": {"charts": [{"id": 1, "eoh": True}]}}
+
+
 def _bar(ts: str, price: float = 100.0) -> MarketBar:
     return MarketBar(timestamp_utc=ts, symbol="NQ", open=price, high=price,
                      low=price, close=price, volume=1.0)
@@ -112,6 +117,7 @@ def test_build_and_run_observe_session_end_to_end(tmp_path) -> None:
     clock = FakeClock(datetime(2026, 7, 10, 18, 31, 30, tzinfo=timezone.utc))
     # Front contract for 2026-07-10 is NQU6 (Sep 2026) per the roll rule.
     ws = FakeChartWs([
+        _eoh_event(),
         _chart_event("2026-07-10T18:31:00.000Z", 100.0),
         _chart_event("2026-07-10T18:32:00.000Z", 101.0),
         _chart_event("2026-07-10T18:33:00.000Z", 102.0),
