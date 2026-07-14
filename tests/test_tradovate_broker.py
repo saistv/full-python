@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from full_python.data.sessions import classify_timestamp
@@ -48,6 +50,7 @@ class FakeRestClient:
         return {}
 
     def order_liquidate_position(self, body):
+        assert set(body) == {"accountId", "contractId", "admin"}
         self.liquidations.append(body)
         self._auto_id += 1
         return {"orderId": self._auto_id}
@@ -59,6 +62,8 @@ def _cfg(order_enabled=False, flatten_enabled=False, daily_loss_limit=1000.0):
         account_spec="DEMO123",
         account_id=456,
         root_symbol="NQ",
+        contract_symbol="NQU6",
+        contract_id=789,
         order_enabled=order_enabled,
         flatten_enabled=flatten_enabled,
         dollar_point_value=20.0,
@@ -70,7 +75,7 @@ def _cfg(order_enabled=False, flatten_enabled=False, daily_loss_limit=1000.0):
 def _bar():
     return MarketBar(
         timestamp_utc="2026-07-07T14:32:00Z",
-        symbol="NQ",
+        symbol="NQU6",
         open=100.0,
         high=101.0,
         low=99.0,
@@ -101,6 +106,7 @@ def _fill_event(order_id, action="Buy", qty=1, price=100.25, ts="2026-07-07T14:3
     return TradovateRawEvent(kind="fill", data={
         "orderId": order_id, "action": action, "qty": qty,
         "price": price, "timestamp": ts, "reason": reason,
+        "accountId": 456, "contractId": 789,
     })
 
 
@@ -136,7 +142,7 @@ def test_orders_enabled_places_automated_market_order_and_emits_ack():
         "accountSpec": "DEMO123",
         "accountId": 456,
         "action": "Buy",
-        "symbol": "NQ",
+        "symbol": "NQU6",
         "orderQty": 1,
         "orderType": "Market",
         "isAutomated": True,
@@ -190,7 +196,7 @@ def test_entry_fill_emits_exactly_one_strategy_fill_with_intent_reason():
 
     assert broker.poll_strategy_feedback() == [Fill(
         timestamp_utc="2026-07-07T14:32:00Z",
-        symbol="NQ",
+        symbol="NQU6",
         side="buy",
         quantity=1,
         price=100.25,
@@ -215,6 +221,8 @@ def test_partial_fill_event_requires_reconciliation_and_halts():
                 "remaining": 2,
                 "price": 100.25,
                 "timestamp": "2026-07-07T14:32:00Z",
+                "accountId": 456,
+                "contractId": 789,
             },
         ))
 
@@ -234,7 +242,13 @@ def test_position_snapshot_matching_fill_derived_state_passes():
 
     broker.ingest_raw_event(TradovateRawEvent(
         kind="position",
-        data={"side": "long", "qty": 1, "price": 100.25},
+        data={
+            "accountId": 456,
+            "contractId": 789,
+            "side": "long",
+            "qty": 1,
+            "price": 100.25,
+        },
     ))  # matching snapshot: no exception
 
     assert broker.position == BrokerPosition(side="long", quantity=1, entry_price=100.25)
@@ -257,9 +271,21 @@ def test_flatten_enabled_with_position_calls_liquidate_position():
 
     assert rest.canceled == [{"orderId": 102}]
     assert rest.liquidations == [{
-        "accountSpec": "DEMO123",
         "accountId": 456,
-        "symbol": "NQ",
+        "contractId": 789,
+        "admin": False,
+    }]
+
+
+def test_flatten_contract_cannot_be_retargeted_by_current_bar_symbol():
+    broker, rest = _entered_broker()
+    wrong_contract_bar = replace(_bar(), symbol="NQZ6")
+
+    broker.flatten(wrong_contract_bar, "supervisor_halt")
+
+    assert rest.liquidations == [{
+        "accountId": 456,
+        "contractId": 789,
         "admin": False,
     }]
 
@@ -352,6 +378,36 @@ def test_broker_requires_dollar_point_value_and_live_pairing():
     with pytest.raises(TradovateConfigError, match="flatten_enabled"):
         TradovateBroker(_cfg(order_enabled=True, flatten_enabled=False), FakeRestClient())
 
+    with pytest.raises(TradovateConfigError, match="contract_symbol"):
+        TradovateBroker(
+            replace(
+                _cfg(order_enabled=True, flatten_enabled=True),
+                contract_symbol=None,
+                contract_id=None,
+            ),
+            FakeRestClient(),
+        )
+
+
+def test_entry_symbol_must_match_exact_configured_contract_before_rest():
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    result = StrategyResult(order_intents=(
+        OrderIntent.market_entry(
+            timestamp_utc=_bar().timestamp_utc,
+            symbol="NQ",
+            side="buy",
+            quantity=1,
+            reason="wrong_contract",
+            metadata={"stop_price": 95.0},
+        ),
+    ))
+
+    with pytest.raises(TradovateOrderSafetyError, match="contract symbol"):
+        broker.apply_strategy_result(_bar(), _session(), result)
+
+    assert rest.placed == []
+
 
 def test_entry_fill_submits_protective_stop_at_frozen_price():
     broker, rest = _entered_broker()
@@ -361,7 +417,7 @@ def test_entry_fill_submits_protective_stop_at_frozen_price():
         "accountSpec": "DEMO123",
         "accountId": 456,
         "action": "Sell",           # opposite of the long entry
-        "symbol": "NQ",
+        "symbol": "NQU6",
         "orderQty": 1,
         "orderType": "Stop",
         "stopPrice": 95.0,          # frozen at the entry intent's stop_price
@@ -446,7 +502,7 @@ def test_strategy_exit_cancels_stop_then_market_closes():
         "accountSpec": "DEMO123",
         "accountId": 456,
         "action": "Sell",
-        "symbol": "NQ",
+        "symbol": "NQU6",
         "orderQty": 1,
         "orderType": "Market",
         "isAutomated": True,
@@ -660,7 +716,7 @@ def test_daily_loss_breach_sets_flag_and_flattens_open_position():
     broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
     broker.ingest_raw_event(_fill_event(103, price=100.0, ts="2026-07-07T14:36:00Z"))
     # bar closes 25pts against: unrealized -500 -> session -1101 <= -1000
-    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQ",
+    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQU6",
                            open=100.0, high=100.0, low=75.0, close=75.0, volume=1.0)
 
     session_pnl = broker.process_bar_open(losing_bar, _session(losing_bar))
@@ -686,7 +742,7 @@ def test_daily_loss_breach_with_flatten_disabled_halts():
     # whose position was built while flatten was enabled and a NEW broker is
     # not constructible in that state -- so this test pins the guard directly:
     broker._config = _cfg(order_enabled=False, flatten_enabled=False)
-    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQ",
+    losing_bar = MarketBar(timestamp_utc="2026-07-07T14:37:00Z", symbol="NQU6",
                            open=100.0, high=100.0, low=40.0, close=40.0, volume=1.0)
 
     with pytest.raises(TradovateStateError, match="flatten"):
@@ -703,7 +759,7 @@ def test_session_rollover_resets_daily_limit_when_flat():
     assert broker.daily_limit_hit is True
     broker.note_bar_processed(bar, _session(bar))
 
-    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQ",
+    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQU6",
                          open=100.0, high=100.0, low=100.0, close=100.0, volume=1.0)
     session_pnl = broker.process_bar_open(next_day, _session(next_day))
 
@@ -718,7 +774,7 @@ def test_session_rollover_with_open_position_halts():
     bar = _bar()
     broker.process_bar_open(bar, _session(bar))
     broker.note_bar_processed(bar, _session(bar))
-    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQ",
+    next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQU6",
                          open=100.0, high=100.0, low=100.0, close=100.0, volume=1.0)
 
     with pytest.raises(TradovateStateError, match="session rollover"):
@@ -732,7 +788,14 @@ def test_position_snapshot_with_position_while_fill_derived_flat_raises():
 
     with pytest.raises(TradovateStateError, match="contradicts"):
         broker.ingest_raw_event(TradovateRawEvent(
-            kind="position", data={"side": "long", "qty": 1, "price": 100.25},
+            kind="position",
+            data={
+                "accountId": 456,
+                "contractId": 789,
+                "side": "long",
+                "qty": 1,
+                "price": 100.25,
+            },
         ))
 
 
@@ -743,8 +806,61 @@ def test_flat_position_snapshot_while_fill_derived_open_raises():
 
     with pytest.raises(TradovateStateError, match="contradicts"):
         broker.ingest_raw_event(TradovateRawEvent(
-            kind="position", data={"side": "flat", "qty": 0},
+            kind="position",
+            data={"accountId": 456, "contractId": 789, "side": "flat", "qty": 0},
         ))
+
+
+@pytest.mark.parametrize(
+    "data, message",
+    [
+        ({"contractId": 789, "side": "flat", "qty": 0}, "accountId"),
+        ({"accountId": 456, "side": "flat", "qty": 0}, "contractId"),
+        (
+            {"accountId": 999, "contractId": 789, "side": "flat", "qty": 0},
+            "foreign account",
+        ),
+        (
+            {"accountId": 456, "contractId": 790, "side": "flat", "qty": 0},
+            "foreign contract",
+        ),
+    ],
+)
+def test_position_event_requires_exact_account_and_contract_identity(data, message):
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    with pytest.raises(TradovateStateError, match=message):
+        broker.ingest_raw_event(TradovateRawEvent(kind="position", data=data))
+
+
+@pytest.mark.parametrize(
+    "identity, message",
+    [
+        ({"contractId": 789}, "accountId"),
+        ({"accountId": 456}, "contractId"),
+        ({"accountId": 999, "contractId": 789}, "foreign account"),
+        ({"accountId": 456, "contractId": 790}, "foreign contract"),
+    ],
+)
+def test_fill_event_requires_exact_account_and_contract_identity(identity, message):
+    from full_python.tradovate.errors import TradovateStateError
+
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    data = {
+        "orderId": 101,
+        "action": "Buy",
+        "qty": 1,
+        "price": 100.25,
+        "timestamp": "2026-07-07T14:32:00Z",
+        **identity,
+    }
+
+    with pytest.raises(TradovateStateError, match=message):
+        broker.ingest_raw_event(TradovateRawEvent(kind="fill", data=data))
 
 
 def test_rest_position_snapshot_disagreement_raises():
@@ -752,13 +868,42 @@ def test_rest_position_snapshot_disagreement_raises():
 
     broker, _rest = _entered_broker()   # fill-derived: long 1
 
-    broker.reconcile_rest_positions([{"netPos": 1, "netPrice": 100.5}])  # match: ok
+    broker.reconcile_rest_positions([{
+        "accountId": 456, "contractId": 789, "netPos": 1, "netPrice": 100.5,
+    }])  # match: ok
 
     with pytest.raises(TradovateStateError, match="REST position"):
-        broker.reconcile_rest_positions([{"netPos": -2, "netPrice": 100.5}])
+        broker.reconcile_rest_positions([{
+            "accountId": 456, "contractId": 789, "netPos": -2, "netPrice": 100.5,
+        }])
 
     with pytest.raises(TradovateStateError, match="REST position"):
         broker.reconcile_rest_positions([])  # broker flat, we are long
+
+
+@pytest.mark.parametrize(
+    "positions, message",
+    [
+        ([{"contractId": 789, "netPos": 0}], "accountId"),
+        ([{"accountId": 456, "netPos": 0}], "contractId"),
+        ([{"accountId": 999, "contractId": 789, "netPos": 0}], "foreign account"),
+        ([{"accountId": 456, "contractId": 790, "netPos": 0}], "foreign contract"),
+        (
+            [
+                {"accountId": 456, "contractId": 789, "netPos": 0},
+                {"accountId": 456, "contractId": 789, "netPos": 0},
+            ],
+            "duplicate",
+        ),
+    ],
+)
+def test_rest_position_snapshot_rejects_ambiguous_identity(positions, message):
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+
+    with pytest.raises(TradovateStateError, match=message):
+        broker.reconcile_rest_positions(positions)
 
 
 def test_rest_position_snapshot_multiple_open_items_raises_even_if_net_flat():
@@ -772,8 +917,8 @@ def test_rest_position_snapshot_multiple_open_items_raises_even_if_net_flat():
 
     with pytest.raises(TradovateStateError, match="REST position"):
         broker.reconcile_rest_positions([
-            {"netPos": 1, "netPrice": 100.0},
-            {"netPos": -1, "netPrice": 99.0},
+            {"accountId": 456, "contractId": 789, "netPos": 1, "netPrice": 100.0},
+            {"accountId": 456, "contractId": 790, "netPos": -1, "netPrice": 99.0},
         ])
 
 
@@ -784,5 +929,6 @@ def test_flat_position_snapshot_while_flat_passes():
     broker = TradovateBroker(_cfg(), FakeRestClient())
 
     broker.ingest_raw_event(TradovateRawEvent(
-        kind="position", data={"side": "flat", "qty": 0},
+        kind="position",
+        data={"accountId": 456, "contractId": 789, "side": "flat", "qty": 0},
     ))

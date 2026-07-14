@@ -36,13 +36,14 @@ class FakeRestClient:
         return {}
 
     def order_liquidate_position(self, body):
+        assert set(body) == {"accountId", "contractId", "admin"}
         self.liquidations.append(body)
         self._auto_id += 1
         return {"orderId": self._auto_id}
 
 
 def _bar(ts: str, price: float) -> MarketBar:
-    return MarketBar(timestamp_utc=ts, symbol="NQ", open=price, high=price,
+    return MarketBar(timestamp_utc=ts, symbol="NQU6", open=price, high=price,
                      low=price, close=price, volume=1.0)
 
 
@@ -50,6 +51,7 @@ def _fill(order_id: int, action: str, price: float, ts: str) -> TradovateRawEven
     return TradovateRawEvent(kind="fill", data={
         "orderId": order_id, "action": action, "qty": 1,
         "price": price, "timestamp": ts, "reason": "",
+        "accountId": 456, "contractId": 789,
     })
 
 
@@ -84,7 +86,7 @@ class ScriptedStrategy:
         if self._index in self._entry_indices:
             return StrategyResult(order_intents=(
                 OrderIntent.market_entry(
-                    timestamp_utc=bar.timestamp_utc, symbol="NQ", side="buy",
+                    timestamp_utc=bar.timestamp_utc, symbol="NQU6", side="buy",
                     quantity=1, reason="scripted", metadata={"stop_price": bar.close - 30.0},
                 ),
             ))
@@ -111,7 +113,7 @@ class FillAwareStrategy:
         return StrategyResult(order_intents=(
             OrderIntent.market_entry(
                 timestamp_utc=bar.timestamp_utc,
-                symbol="NQ",
+                symbol="NQU6",
                 side="buy",
                 quantity=1,
                 reason="sr_breakout",
@@ -123,7 +125,8 @@ class FillAwareStrategy:
 def _cfg() -> TradovateAdapterConfig:
     return TradovateAdapterConfig(
         environment=DEMO_ENVIRONMENT, account_spec="DEMO123", account_id=456,
-        root_symbol="NQ", order_enabled=True, flatten_enabled=True,
+        root_symbol="NQ", contract_symbol="NQU6", contract_id=789,
+        order_enabled=True, flatten_enabled=True,
         dollar_point_value=20.0, commission_per_contract_round_trip=1.0,
         daily_loss_limit=1000.0,
     )

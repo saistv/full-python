@@ -124,6 +124,15 @@ class TradovateBroker:
                     "order_enabled requires flatten_enabled "
                     "(a DLL breach or failed protective stop must be able to flatten)"
                 )
+        if config.flatten_enabled:
+            if config.contract_symbol is None:
+                raise TradovateConfigError(
+                    "flatten_enabled requires an exact contract_symbol"
+                )
+            if config.contract_id is None:
+                raise TradovateConfigError(
+                    "flatten_enabled requires an exact contract_id"
+                )
         self._config = config
         self._rest_client = rest_client
         self._events: list[BrokerEvent] = []
@@ -205,6 +214,7 @@ class TradovateBroker:
             if not self._config.order_enabled:
                 self._events.append(Rejected(order_id="", reason="order_disabled"))
                 continue
+            self._require_active_symbol(exit_decision.symbol)
             if self._pending_exit is not None:
                 continue
             stop_id = self._working_stop_id
@@ -213,7 +223,7 @@ class TradovateBroker:
                     "strategy exit requested for an unprotected open position"
                 )
             self._pending_exit = PendingExit(
-                symbol=bar.symbol,
+                symbol=self._active_contract_symbol(),
                 action="Sell" if self._position.side == "long" else "Buy",
                 quantity=self._position.quantity,
                 reason=exit_decision.reason,
@@ -225,6 +235,7 @@ class TradovateBroker:
             if not self._config.order_enabled:
                 self._events.append(Rejected(order_id="", reason="order_disabled"))
                 continue
+            self._require_active_symbol(intent.symbol)
             if "stop_price" not in intent.metadata:
                 raise TradovateOrderSafetyError("stop_price metadata required")
             if intent.quantity != 1:
@@ -287,9 +298,8 @@ class TradovateBroker:
             return
         try:
             response = self._rest_client.order_liquidate_position({
-                "accountSpec": self._config.account_spec,
                 "accountId": self._config.account_id,
-                "symbol": bar.symbol,
+                "contractId": self._active_contract_id(),
                 "admin": False,
             })
         except TradovateError as exc:
@@ -302,7 +312,7 @@ class TradovateBroker:
             role=ROLE_EXIT,
             side="sell" if position.side == "long" else "buy",
             quantity=position.quantity,
-            symbol=bar.symbol,
+            symbol=self._active_contract_symbol(),
             reason=reason,
         )
         self._events.append(Acked(order_id=order_id))
@@ -324,12 +334,14 @@ class TradovateBroker:
             self._reconcile_position_event(event.data)
             return
         if event.kind == "partial_fill":
+            self._require_event_identity(event.data, source="partial fill")
             order = self._known_order(str(event.data["orderId"]))
             self._events.append(_partial_fill_from_data(event.data))
             raise TradovateStateError(
                 f"partial fill for order {order.order_id}; broker reconciliation required"
             )
         if event.kind == "fill":
+            self._require_event_identity(event.data, source="fill")
             self._ingest_fill(_fill_from_data(event.data))
             return
         if event.kind == "reject":
@@ -385,7 +397,7 @@ class TradovateBroker:
             session_date=session_date,
         )
         if order.order_id in self._requested_cancel_ids and self._recovery_required:
-            self._emergency_flatten(order.symbol)
+            self._emergency_flatten()
             raise TradovateStateError(
                 f"entry order {order.order_id} filled after flatten cancellation; "
                 "emergency flatten requested"
@@ -418,14 +430,14 @@ class TradovateBroker:
         try:
             response = self._rest_client.order_place(body)
         except TradovateError as exc:
-            self._emergency_flatten(entry_order.symbol)
+            self._emergency_flatten()
             raise TradovateStateError(
                 "protective stop submission failed; emergency flatten requested"
             ) from exc
         try:
             stop_id = self._required_order_id(response, "protective stop")
         except TradovateStateError:
-            self._emergency_flatten(entry_order.symbol)
+            self._emergency_flatten()
             raise
         self._orders[stop_id] = SubmittedOrder(
             order_id=stop_id,
@@ -439,7 +451,7 @@ class TradovateBroker:
         self._working_stop_id = stop_id
         self._events.append(Acked(order_id=stop_id))
 
-    def _emergency_flatten(self, symbol: str) -> None:
+    def _emergency_flatten(self) -> None:
         # Entry-capable configs are flatten-capable by construction (__init__),
         # so no flag check here. Best-effort: the TradovateStateError raised at
         # the call site halts the loop regardless; a cancel/liquidate failure
@@ -449,9 +461,8 @@ class TradovateBroker:
         self._cancel_working_orders_best_effort()
         try:
             response = self._rest_client.order_liquidate_position({
-                "accountSpec": self._config.account_spec,
                 "accountId": self._config.account_id,
-                "symbol": symbol,
+                "contractId": self._active_contract_id(),
                 "admin": False,
             })
         except TradovateError:
@@ -466,7 +477,7 @@ class TradovateBroker:
             role=ROLE_EXIT,
             side="sell" if position is not None and position.side == "long" else "buy",
             quantity=position.quantity if position is not None else 0,
-            symbol=symbol,
+            symbol=self._active_contract_symbol(),
             reason="emergency_flatten",
         )
 
@@ -523,7 +534,7 @@ class TradovateBroker:
             order_id = self._required_order_id(response, "strategy exit")
         except TradovateStateError:
             self._pending_exit = None
-            self._emergency_flatten(pending.symbol)
+            self._emergency_flatten()
             raise
         self._register_order(SubmittedOrder(
             order_id=order_id,
@@ -585,13 +596,13 @@ class TradovateBroker:
         if order.role == ROLE_PROTECTIVE_STOP:
             if order.order_id == self._working_stop_id:
                 self._working_stop_id = None
-            self._emergency_flatten(order.symbol)
+            self._emergency_flatten()
             raise TradovateStateError(
                 f"protective stop {order.order_id} rejected; emergency flatten requested"
             )
         if order.role == ROLE_EXIT:
             if order.reason != "emergency_flatten":
-                self._emergency_flatten(order.symbol)
+                self._emergency_flatten()
             raise TradovateStateError(
                 f"exit order {order.order_id} rejected; recovery required"
             )
@@ -615,7 +626,7 @@ class TradovateBroker:
                 return
             if requested and self._recovery_required:
                 return
-            self._emergency_flatten(order.symbol)
+            self._emergency_flatten()
             raise TradovateStateError(
                 f"protective stop {order.order_id} canceled unexpectedly; "
                 "emergency flatten requested"
@@ -655,7 +666,55 @@ class TradovateBroker:
             and not self._has_working_orders()
         )
 
+    def _active_contract_symbol(self) -> str:
+        symbol = self._config.contract_symbol
+        if symbol is None:
+            raise TradovateStateError(
+                "exact contract_symbol authority is not configured"
+            )
+        return symbol
+
+    def _active_contract_id(self) -> int:
+        contract_id = self._config.contract_id
+        if contract_id is None:
+            raise TradovateStateError("exact contract_id authority is not configured")
+        return contract_id
+
+    def _require_active_symbol(self, symbol: str) -> None:
+        expected = self._active_contract_symbol()
+        if symbol != expected:
+            raise TradovateOrderSafetyError(
+                f"order contract symbol {symbol!r} does not match active contract "
+                f"symbol {expected!r}"
+            )
+
+    def _require_event_identity(
+        self, data: dict[str, Any], *, source: str
+    ) -> None:
+        for key in ("accountId", "contractId"):
+            if key not in data:
+                raise TradovateStateError(f"{source} is missing required {key}")
+        try:
+            account_id = int(data["accountId"])
+            contract_id = int(data["contractId"])
+        except (TypeError, ValueError) as exc:
+            raise TradovateStateError(
+                f"{source} contains invalid accountId or contractId"
+            ) from exc
+        if account_id != self._config.account_id:
+            raise TradovateStateError(
+                f"{source} belongs to foreign account {account_id}; "
+                f"configured account is {self._config.account_id}"
+            )
+        active_contract_id = self._active_contract_id()
+        if contract_id != active_contract_id:
+            raise TradovateStateError(
+                f"{source} belongs to foreign contract {contract_id}; "
+                f"active contract is {active_contract_id}"
+            )
+
     def _reconcile_position_event(self, data: dict[str, Any]) -> None:
+        self._require_event_identity(data, source="broker position event")
         reported = _position_from_data(data)
         if not _positions_match(reported, self._position):
             raise TradovateStateError(
@@ -667,39 +726,47 @@ class TradovateBroker:
         """Cross-check a REST /position/list snapshot against fill-derived
         truth (Failure Matrix: REST vs WebSocket disagreement -> halt).
 
-        Assumes a single instrument with at most one open contract
-        position at a time. A compliant snapshot therefore has at most
-        one item with a nonzero ``netPos``. If more than one item
-        reports a nonzero ``netPos`` (e.g. a contract-roll straddle
-        holding both the old and new contract, or a duplicated/
-        contradictory feed), this halts rather than summing them --
-        a +1/-1 pair must never be netted down to a false flat.
-
-        ``entry_price`` in the mismatch message below is diagnostic
-        only: it is the last non-null ``netPrice`` seen while scanning
-        the snapshot, never a value that is compared. ``_positions_match``
-        compares side + quantity only -- broker netPrice averaging
-        legitimately differs from our fill price.
+        A compliant account-scoped snapshot is empty or contains exactly one
+        row for the configured active contract. Every row must carry exact
+        account and contract identity. This rejects foreign accounts, stale
+        roll contracts, duplicate rows, and offsetting positions instead of
+        netting any of them into false agreement.
         """
-        open_items = [item for item in positions if int(item.get("netPos", 0)) != 0]
-        if len(open_items) > 1:
-            raise TradovateStateError(
-                "REST position snapshot reports multiple open contract "
-                f"positions {open_items!r} -- cannot reconcile a single-"
-                "instrument position from this (e.g. a roll straddle); halting"
-            )
-        net = 0
-        price = 0.0
         for item in positions:
-            net += int(item.get("netPos", 0))
-            if item.get("netPrice") is not None:
-                price = float(item["netPrice"])
+            if not isinstance(item, dict):
+                raise TradovateStateError(
+                    f"REST position snapshot contains a non-object row {item!r}"
+                )
+            self._require_event_identity(item, source="REST position snapshot")
+            if "netPos" not in item:
+                raise TradovateStateError(
+                    "REST position snapshot row is missing required netPos"
+                )
+        if len(positions) > 1:
+            raise TradovateStateError(
+                "REST position snapshot contains duplicate active-contract rows "
+                f"{positions!r}; halting"
+            )
         reported: Optional[BrokerPosition] = None
+        if positions:
+            item = positions[0]
+            try:
+                net = int(item["netPos"])
+            except (TypeError, ValueError) as exc:
+                raise TradovateStateError(
+                    "REST position snapshot contains invalid netPos"
+                ) from exc
+        else:
+            net = 0
         if net != 0:
+            if positions[0].get("netPrice") is None:
+                raise TradovateStateError(
+                    "REST position snapshot open row is missing netPrice"
+                )
             reported = BrokerPosition(
                 side="long" if net > 0 else "short",
                 quantity=abs(net),
-                entry_price=price,
+                entry_price=float(positions[0]["netPrice"]),
             )
         if not _positions_match(reported, self._position):
             raise TradovateStateError(

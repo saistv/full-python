@@ -75,7 +75,7 @@ broker events and confirmed snapshots, not by HTTP success alone.
 This closes P0-02 offline and creates the event boundary required by all later
 slices.
 
-### Slice B: Identity authority - P1-02 and P0-04 prerequisite
+### Slice B: Identity authority - P1-02 position path and P0-04 prerequisite
 
 - Resolve and persist the active Tradovate `contractId` beside account ID.
 - Reject missing, foreign-account, foreign-contract, duplicated, and roll
@@ -83,6 +83,10 @@ slices.
 - Scope order and fill events to the configured account and contract.
 - Replace symbol-based liquidation bodies with the exact documented
   `accountId`, `contractId`, and `admin` schema.
+
+Slice B removes false position agreement but does not close the complete P1-02
+finding. Runtime identity resolution/persistence and REST working-order
+reconciliation are delivered with Slice D startup hydration.
 
 ### Slice C: Durable intents and unknown outcomes - P0-05
 
