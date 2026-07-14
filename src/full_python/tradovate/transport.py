@@ -140,6 +140,7 @@ class WebSocketConnection:
         self._buffer = bytearray(prebuffer)
         self._monotonic = monotonic_clock
         self._closed = False
+        self._last_received_monotonic: Optional[float] = None
 
     def send(self, frame: str) -> None:
         if self._closed:
@@ -170,6 +171,7 @@ class WebSocketConnection:
                     self._closed = True
                     raise TradovateWebSocketError("timeout mid-frame on websocket")
                 return None
+            self._last_received_monotonic = self._monotonic()
             if opcode in (OPCODE_CLOSE, OPCODE_PING, OPCODE_PONG) and (
                 not fin or len(payload) > 125
             ):
@@ -207,6 +209,10 @@ class WebSocketConnection:
                 self.send("[]")  # answer the server heartbeat, stay hidden
                 continue
             return text
+
+    @property
+    def last_received_monotonic(self) -> Optional[float]:
+        return self._last_received_monotonic
 
     def close(self) -> None:
         if self._closed:

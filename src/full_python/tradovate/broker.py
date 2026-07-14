@@ -335,6 +335,14 @@ class TradovateBroker:
         self._recovery_required = False
         self._execution_state = BrokerExecutionState.NORMAL
 
+    def invalidate_account_state(self, reason: str) -> None:
+        """Close account authority before any uncertain state transition."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise TradovateStateError("account state invalidation requires a reason")
+        self._hydrated_trade_date = None
+        self._account_realized_pnl = 0.0
+        self._latch_recovery()
+
     # -- per-bar hooks (LiveLoop sequence) --------------------------------
 
     def process_bar_open(self, bar: MarketBar, session: SessionInfo) -> float:

@@ -3,15 +3,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from copy import deepcopy
 import math
-from typing import Any, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from full_python.execution.broker_protocol import BrokerPosition
 from full_python.tradovate.config import TradovateAdapterConfig
 from full_python.tradovate.errors import TradovateStateError
 
 
-_REQUIRED_SYNC_COLLECTIONS = (
+REQUIRED_SYNC_COLLECTIONS = (
     "accounts",
     "contracts",
     "positions",
@@ -23,6 +24,24 @@ _REQUIRED_SYNC_COLLECTIONS = (
     "cashBalances",
     "accountRiskStatuses",
 )
+
+REQUIRED_SYNC_ENTITY_TYPES = (
+    "account",
+    "contract",
+    "position",
+    "order",
+    "command",
+    "commandReport",
+    "orderVersion",
+    "fill",
+    "cashBalance",
+    "accountRiskStatus",
+)
+
+ENTITY_TYPE_TO_COLLECTION = dict(zip(
+    REQUIRED_SYNC_ENTITY_TYPES,
+    REQUIRED_SYNC_COLLECTIONS,
+))
 
 _TRANSITIONAL_ORDER_STATUSES = {
     "PendingCancel",
@@ -99,6 +118,12 @@ class AccountHydrationSnapshot:
             )
 
 
+@dataclass(frozen=True)
+class AccountHydrationResult:
+    snapshot: AccountHydrationSnapshot
+    collections: dict[str, tuple[dict[str, Any], ...]]
+
+
 class TradovateAccountHydrator:
     """Take and compare user-sync plus REST startup snapshots.
 
@@ -131,8 +156,16 @@ class TradovateAccountHydrator:
         self._rest = rest_client
 
     def hydrate(self) -> AccountHydrationSnapshot:
+        return self.hydrate_with_state().snapshot
+
+    def hydrate_with_state(self) -> AccountHydrationResult:
         initial = self._websocket.request(
-            "user/syncrequest", {"users": [self._user_id]}
+            "user/syncrequest",
+            {
+                "splitResponses": True,
+                "accounts": [self._config.account_id],
+                "entityTypes": list(REQUIRED_SYNC_ENTITY_TYPES),
+            },
         )
         if not isinstance(initial, dict):
             raise TradovateStateError(
@@ -140,9 +173,41 @@ class TradovateAccountHydrator:
             )
         sync = {
             name: _required_entity_list(initial, name)
-            for name in _REQUIRED_SYNC_COLLECTIONS
+            for name in REQUIRED_SYNC_COLLECTIONS
         }
-        rest = {
+        detached = {
+            name: tuple(deepcopy(row) for row in rows)
+            for name, rows in sync.items()
+        }
+        snapshot = self.verify_sync_state(detached)
+        return AccountHydrationResult(snapshot=snapshot, collections=detached)
+
+    def verify_sync_state(
+        self,
+        collections: Mapping[str, Sequence[dict[str, Any]]],
+    ) -> AccountHydrationSnapshot:
+        sync = {
+            name: _required_list_result(list(collections.get(name, ())), name)
+            if name in collections
+            else _missing_sync_collection(name)
+            for name in REQUIRED_SYNC_COLLECTIONS
+        }
+        rest = self._fetch_rest_state()
+        contract = self._rest.contract_find(self._config.contract_symbol)
+        if not isinstance(contract, dict):
+            raise TradovateStateError(
+                f"contract {self._config.contract_symbol!r} was not found by REST"
+            )
+        return _normalize_and_compare(
+            self._config,
+            sync,
+            rest,
+            contract,
+            expected_trade_date=self._expected_trade_date,
+        )
+
+    def _fetch_rest_state(self) -> dict[str, list[dict[str, Any]]]:
+        return {
             "accounts": _required_list_result(self._rest.account_list(), "accounts"),
             "positions": _required_list_result(self._rest.position_list(), "positions"),
             "orders": _required_list_result(self._rest.order_list(), "orders"),
@@ -161,18 +226,6 @@ class TradovateAccountHydrator:
                 self._rest.account_risk_status_list(), "accountRiskStatuses"
             ),
         }
-        contract = self._rest.contract_find(self._config.contract_symbol)
-        if not isinstance(contract, dict):
-            raise TradovateStateError(
-                f"contract {self._config.contract_symbol!r} was not found by REST"
-            )
-        return _normalize_and_compare(
-            self._config,
-            sync,
-            rest,
-            contract,
-            expected_trade_date=self._expected_trade_date,
-        )
 
 
 def _normalize_and_compare(
@@ -356,6 +409,12 @@ def _required_entity_list(payload: dict[str, Any], name: str) -> list[dict[str, 
             f"user sync initial response is missing required {name} collection"
         )
     return _required_list_result(payload[name], name)
+
+
+def _missing_sync_collection(name: str):
+    raise TradovateStateError(
+        f"user sync initial response is missing required {name} collection"
+    )
 
 
 def _required_list_result(value: Any, name: str) -> list[dict[str, Any]]:

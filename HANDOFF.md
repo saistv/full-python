@@ -4,14 +4,13 @@ You are picking up an NQ/MNQ futures trading system (Python port of a
 historically profitable TradingView strategy). This document is self-contained:
 it does
 not assume any particular AI tool, skill set, or external memory. Read it
-fully before touching anything. Last updated 2026-07-14.
+fully before touching anything. Last updated 2026-07-15.
 
-> **Start here.** Two independent tracks are in flight. The broker/order path is
-> being rebuilt on `main` (slices A-C landed; see §6). Separately, **PR #25**
-> corrects the exchange calendar (restoring TradingView parity 106/106 from
-> 103/106) and makes the live market-data feed protocol-correct. **Merge PR #25
-> before running any research** — until it lands, `main`'s baseline refuses to
-> trade seven open market sessions a year. Nothing may trade live: see
+> **Start here.** PR #25's exchange-calendar/feed correction and PR #26's
+> stable-flat account hydration are merged on `main`. The current broker/order
+> work adds Slice D2's incremental account-sync runtime, disconnect/liveness
+> invalidation, token-client replacement, and periodic REST reconciliation.
+> This is still offline protocol evidence. Nothing may trade live: see
 > `docs/audits/2026-07-13-adversarial-audit.md` for the open P0/P1 backlog.
 
 ## 1. What this project is
@@ -274,6 +273,17 @@ Do not skip the review step, and do not merge red tests.
   outcomes, incremental sync, reconnect/token renewal, and periodic REST
   reconciliation remain open. See
   `docs/decisions/2026-07-14-account-state-hydration.md`.
+- **Incremental account synchronization (Milestone 2 Slice D2) — IMPLEMENTED
+  OFFLINE** (2026-07-15). Current exact-account `user/syncrequest` filters feed
+  a strict atomic entity cache. Every property update, disconnect, shutdown,
+  liveness failure, token replacement, malformed event, or REST disagreement
+  closes broker authority. Fresh REST agreement can reopen only stable-flat
+  state; renewal replaces both clients and requires full rehydration. The
+  transport now exposes inbound activity and the client sends bounded
+  application heartbeats. This does not close P1-01: the undocumented real
+  split-response envelope, blocking-call heartbeat behavior, and attended DEMO
+  reconnect drills remain unproven. See
+  `docs/decisions/2026-07-15-account-sync-runtime.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -283,13 +293,14 @@ feature branch.
 ## 6. Open tasks (ranked)
 
 1. **Continue the order-capable broker redesign offline before any demo
-   order.** Slice D1 now provides exact stable-flat startup hydration. Next
-   add the incremental user-event cache, disconnect invalidation, reconnect and
-   token-client replacement, heartbeat supervision, and periodic REST
-   reconciliation. Then implement broker-confirmed 15:59/shutdown flatten,
-   partial quantities, and the complete adversarial failure matrix. P0-04,
-   P0-05, P1-01, and the broader P1-02 remain open. See the 2026-07-14
-   broker-safe execution and account-hydration designs.
+   order.** Slices D1-D2 now provide stable-flat startup plus incremental
+   invalidation/reconciliation. Next implement broker-confirmed
+   15:59/shutdown flatten, partial quantities, unknown-outcome recovery, and
+   the complete adversarial failure matrix. Capture the real DEMO split-sync
+   envelope and prove heartbeat/reconnect behavior before composing any order
+   runner. P0-04, P0-05, P1-01, and the broader P1-02 remain open. See the
+   2026-07-14 broker-safe execution design and 2026-07-15 account-sync runtime
+   design.
 2. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
    code blocker is fixed; now execute the outage/disconnect drills in
    `docs/live-observe-runbook.md`, then preserve three nonconsecutive clean
