@@ -189,6 +189,16 @@ Do not skip the review step, and do not merge red tests.
   hydration; P0-04 remains open until flat position and working-order state are
   confirmed after liquidation. See
   `docs/decisions/2026-07-14-broker-identity-authority.md`.
+- **Durable order intents (Milestone 2 Slice C) — IMPLEMENTED OFFLINE**
+  (2026-07-14). Every entry, stop, exit, cancel, and liquidation POST now has a
+  hash-linked, `fsync`ed logical intent first. Explicit rejection and ambiguous
+  outcomes are durable; timeout/malformed responses latch recovery; any prior
+  journal history keeps a restarted broker closed; repeated cancellation and
+  liquidation cannot submit twice. The older event log is now correctly named
+  a best-effort observational trace. This is the persistence prerequisite for
+  P0-05, not closure: account user sync must associate journal history with
+  broker orders/fills before recovery. See
+  `docs/decisions/2026-07-14-durable-order-intents.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -205,13 +215,14 @@ feature branch.
    gate.
 2. **Continue the order-capable broker redesign offline before any demo
    order.** Slice A closed duplicate-entry/feedback P0-02; Slice B removed
-   unscoped position netting and corrected the liquidation schema. Next is
-   Slice C: durable idempotent intents and unknown-submission recovery, followed
-   by user-event synchronization/startup hydration with runtime identity and
-   REST working-order reconciliation, broker-confirmed 15:59/shutdown flatten,
-   partial quantities, and the complete adversarial failure matrix. P0-04 and
-   the broader P1-02 remain open. See the 2026-07-14 broker-safe execution
-   design.
+   unscoped position netting and corrected the liquidation schema; Slice C made
+   logical submission intents durable and non-retryable while unknown. Next is
+   Slice D: account user-event synchronization/startup hydration that resolves
+   runtime identity, REST working orders, fills, protection, and prior journal
+   history. Then implement broker-confirmed 15:59/shutdown flatten, partial
+   quantities, and the complete adversarial failure matrix. P0-04, P0-05,
+   P1-01, and the broader P1-02 remain open. See the 2026-07-14 broker-safe
+   execution design.
 3. **MNQ-first sizing is re-derived; execute operational gates only after the
    blockers above.** A 30-session funded pilot fails the `$500` risk gate
    (23-27% budget-breach probability). The research conclusion is at most a

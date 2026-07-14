@@ -42,7 +42,8 @@ Note: a second run on the same day writes `events-2.jsonl` / `report-2.html` (an
 
 ## Artifacts (per session, under `runs/live/<session-date>/`)
 
-- `events.jsonl` — full event ledger, one per run (crash-safe, append-per-event)
+- `events.jsonl` — best-effort observational ledger, one per run
+  (append-and-flush per event; not the financial recovery journal)
 - `account_risk.json` — GET-only risk probe (autoLiq = the DLL evidence)
 - `report.html` — shadow parity report (verdict, signals, halts, sim info)
 

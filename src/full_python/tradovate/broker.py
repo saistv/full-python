@@ -12,6 +12,10 @@ surface, offline-first (all tests run on fake transports). Safety model:
   working entry, open position, pending exit, or recovery state rejects later
   signals before REST. Authoritative entry fills and fill-derived closed trades
   reach the strategy once through the shared feedback stream.
+- Financial intents: every mutating REST request requires an injected durable
+  intent journal. Pending state is durable before POST, acknowledged broker IDs
+  are durable before volatile mapping, and ambiguous outcomes latch recovery.
+  Any journal history on restart remains closed pending Slice D hydration.
 - Broker-held protective stop: submitted immediately on every entry fill
   at the entry's frozen stop_price, never modified afterwards (production
   policy freezes stops at entry; result.stop_updates are deliberately not
@@ -57,6 +61,10 @@ from full_python.execution.broker_protocol import (
     Rejected,
     StrategyFeedback,
 )
+from full_python.execution.order_intent_journal import (
+    IntentJournal,
+    IntentState,
+)
 from full_python.models import Fill, MarketBar, StrategyResult, Trade
 from full_python.risk.daily_loss import is_daily_loss_breached
 from full_python.tradovate.config import TradovateAdapterConfig
@@ -97,6 +105,7 @@ class SubmittedOrder:
     symbol: str
     stop_price: Optional[float] = None
     reason: str = ""
+    logical_intent_id: str = ""
     status: str = "working"  # "working" | "filled" | "canceled" | "rejected"
 
 
@@ -110,7 +119,13 @@ class PendingExit:
 
 
 class TradovateBroker:
-    def __init__(self, config: TradovateAdapterConfig, rest_client: Any) -> None:
+    def __init__(
+        self,
+        config: TradovateAdapterConfig,
+        rest_client: Any,
+        *,
+        intent_journal: Optional[IntentJournal] = None,
+    ) -> None:
         if config.dollar_point_value is None:
             raise TradovateConfigError(
                 "TradovateBroker requires dollar_point_value "
@@ -133,8 +148,13 @@ class TradovateBroker:
                 raise TradovateConfigError(
                     "flatten_enabled requires an exact contract_id"
                 )
+            if intent_journal is None:
+                raise TradovateConfigError(
+                    "flatten_enabled requires a durable intent_journal"
+                )
         self._config = config
         self._rest_client = rest_client
+        self._intent_journal = intent_journal
         self._events: list[BrokerEvent] = []
         self._strategy_feedback: list[StrategyFeedback] = []
         self._orders: dict[str, SubmittedOrder] = {}
@@ -146,8 +166,19 @@ class TradovateBroker:
         self._working_stop_id: Optional[str] = None
         self._pending_exit: Optional[PendingExit] = None
         self._requested_cancel_ids: set[str] = set()
-        self._recovery_required = False
-        self._execution_state = BrokerExecutionState.NORMAL
+        self._cancel_intent_ids: dict[str, str] = {}
+        self._liquidation_in_flight = False
+        # Any history means this is a restart with volatile broker state lost.
+        # Slice D account hydration must explicitly reconcile it before an
+        # entry latch can ever reopen, even when the last POST was acknowledged.
+        self._recovery_required = bool(
+            intent_journal is not None and intent_journal.has_history
+        )
+        self._execution_state = (
+            BrokerExecutionState.RECOVERY_REQUIRED
+            if self._recovery_required
+            else BrokerExecutionState.NORMAL
+        )
         self._previous_session: Optional[SessionInfo] = None
         self._daily_limit_hit = False
 
@@ -257,17 +288,17 @@ class TradovateBroker:
                 "isAutomated": True,
             }
             try:
-                response = self._rest_client.order_place(body)
+                receipt = self._journaled_order_place(body, role=ROLE_ENTRY)
+            except TradovateStateError:
+                raise
             except TradovateError as exc:
-                self._recovery_required = True
-                self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
                 raise TradovateStateError(
                     "entry submission outcome unknown; broker reconciliation required"
                 ) from exc
-            order_id = self._order_id_or_reject(response, role=ROLE_ENTRY)
-            if order_id is None:
+            if receipt is None:
                 continue
-            self._orders[order_id] = SubmittedOrder(
+            order_id, logical_intent_id = receipt
+            self._register_order(SubmittedOrder(
                 order_id=order_id,
                 role=ROLE_ENTRY,
                 side=intent.side.lower(),
@@ -275,7 +306,8 @@ class TradovateBroker:
                 symbol=intent.symbol,
                 stop_price=float(intent.metadata["stop_price"]),
                 reason=intent.reason,
-            )
+                logical_intent_id=logical_intent_id,
+            ))
             self._execution_state = BrokerExecutionState.ENTRY_PENDING_FILL
             self._events.append(Acked(order_id=order_id))
 
@@ -290,31 +322,37 @@ class TradovateBroker:
     def flatten(self, bar: MarketBar, reason: str) -> None:
         if not self._config.flatten_enabled:
             raise TradovateOrderSafetyError("flatten_disabled")
+        if self._liquidation_in_flight:
+            return
         self._recovery_required = True
         self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
         self._cancel_working_orders_best_effort()
         position = self._position
         if position is None:
             return
+        body = {
+            "accountId": self._config.account_id,
+            "contractId": self._active_contract_id(),
+            "admin": False,
+        }
+        self._liquidation_in_flight = True
         try:
-            response = self._rest_client.order_liquidate_position({
-                "accountId": self._config.account_id,
-                "contractId": self._active_contract_id(),
-                "admin": False,
-            })
-        except TradovateError as exc:
+            order_id, logical_intent_id = self._journaled_liquidation(body)
+        except TradovateStateError:
+            raise
+        except Exception as exc:
             raise TradovateStateError(
                 "liquidation submission outcome unknown; broker reconciliation required"
             ) from exc
-        order_id = self._required_order_id(response, "liquidation")
-        self._orders[order_id] = SubmittedOrder(
+        self._register_order(SubmittedOrder(
             order_id=order_id,
             role=ROLE_EXIT,
             side="sell" if position.side == "long" else "buy",
             quantity=position.quantity,
             symbol=self._active_contract_symbol(),
             reason=reason,
-        )
+            logical_intent_id=logical_intent_id,
+        ))
         self._events.append(Acked(order_id=order_id))
 
     def poll_events(self) -> list[BrokerEvent]:
@@ -428,18 +466,20 @@ class TradovateBroker:
             "isAutomated": True,
         }
         try:
-            response = self._rest_client.order_place(body)
-        except TradovateError as exc:
+            receipt = self._journaled_order_place(body, role=ROLE_PROTECTIVE_STOP)
+        except TradovateStateError:
+            self._emergency_flatten()
+            raise
+        except Exception as exc:
             self._emergency_flatten()
             raise TradovateStateError(
                 "protective stop submission failed; emergency flatten requested"
             ) from exc
-        try:
-            stop_id = self._required_order_id(response, "protective stop")
-        except TradovateStateError:
+        if receipt is None:
             self._emergency_flatten()
-            raise
-        self._orders[stop_id] = SubmittedOrder(
+            raise TradovateStateError("protective stop response rejected")
+        stop_id, logical_intent_id = receipt
+        self._register_order(SubmittedOrder(
             order_id=stop_id,
             role=ROLE_PROTECTIVE_STOP,
             side=action.lower(),
@@ -447,7 +487,8 @@ class TradovateBroker:
             symbol=entry_order.symbol,
             stop_price=entry_order.stop_price,
             reason="stop",
-        )
+            logical_intent_id=logical_intent_id,
+        ))
         self._working_stop_id = stop_id
         self._events.append(Acked(order_id=stop_id))
 
@@ -456,30 +497,31 @@ class TradovateBroker:
         # so no flag check here. Best-effort: the TradovateStateError raised at
         # the call site halts the loop regardless; a cancel/liquidate failure
         # leaves the account to the operator, which is exactly what halt means.
+        if self._liquidation_in_flight:
+            return
         self._recovery_required = True
         self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
         self._cancel_working_orders_best_effort()
+        body = {
+            "accountId": self._config.account_id,
+            "contractId": self._active_contract_id(),
+            "admin": False,
+        }
+        self._liquidation_in_flight = True
         try:
-            response = self._rest_client.order_liquidate_position({
-                "accountId": self._config.account_id,
-                "contractId": self._active_contract_id(),
-                "admin": False,
-            })
+            order_id, logical_intent_id = self._journaled_liquidation(body)
         except TradovateError:
             return
-        try:
-            order_id = self._required_order_id(response, "emergency liquidation")
-        except TradovateStateError:
-            return
         position = self._position
-        self._orders[order_id] = SubmittedOrder(
+        self._register_order(SubmittedOrder(
             order_id=order_id,
             role=ROLE_EXIT,
             side="sell" if position is not None and position.side == "long" else "buy",
             quantity=position.quantity if position is not None else 0,
             symbol=self._active_contract_symbol(),
             reason="emergency_flatten",
-        )
+            logical_intent_id=logical_intent_id,
+        ))
 
     def _cancel_working_orders_best_effort(self) -> None:
         # Emergency path only: a cancel failure must not stop the liquidation.
@@ -488,16 +530,18 @@ class TradovateBroker:
         for order in list(self._orders.values()):
             if order.status != "working":
                 continue
+            if order.order_id in self._requested_cancel_ids:
+                continue
             try:
-                self._rest_client.order_cancel({"orderId": int(order.order_id)})
+                self._journaled_cancel(order.order_id)
                 self._requested_cancel_ids.add(order.order_id)
             except TradovateError:
                 continue
 
     def _request_cancel_or_halt(self, stop_id: str) -> None:
         try:
-            self._rest_client.order_cancel({"orderId": int(stop_id)})
-        except TradovateError as exc:
+            self._journaled_cancel(stop_id)
+        except Exception as exc:
             # Two live closing orders must never coexist. The stop still
             # protects the position; halt for human review instead of
             # submitting the market close.
@@ -522,7 +566,12 @@ class TradovateBroker:
             "isAutomated": True,
         }
         try:
-            response = self._rest_client.order_place(body)
+            receipt = self._journaled_order_place(body, role=ROLE_EXIT)
+        except TradovateStateError:
+            self._pending_exit = None
+            self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
+            self._emergency_flatten()
+            raise
         except TradovateError as exc:
             self._pending_exit = None
             self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
@@ -530,12 +579,11 @@ class TradovateBroker:
                 "exit submission outcome unknown after stop cancellation; "
                 "broker reconciliation required"
             ) from exc
-        try:
-            order_id = self._required_order_id(response, "strategy exit")
-        except TradovateStateError:
+        if receipt is None:
             self._pending_exit = None
             self._emergency_flatten()
-            raise
+            raise TradovateStateError("strategy exit response rejected")
+        order_id, logical_intent_id = receipt
         self._register_order(SubmittedOrder(
             order_id=order_id,
             role=ROLE_EXIT,
@@ -543,6 +591,7 @@ class TradovateBroker:
             quantity=pending.quantity,
             symbol=pending.symbol,
             reason=pending.reason,
+            logical_intent_id=logical_intent_id,
         ))
         self._pending_exit = None
         self._execution_state = BrokerExecutionState.EXIT_PENDING_FILL
@@ -609,6 +658,9 @@ class TradovateBroker:
 
     def _ingest_cancel(self, data: dict[str, Any]) -> None:
         order = self._known_order(str(data["orderId"]))
+        cancel_intent_id = self._cancel_intent_ids.pop(order.order_id, None)
+        if cancel_intent_id is not None:
+            self._journal().transition(cancel_intent_id, IntentState.CONFIRMED)
         requested = order.order_id in self._requested_cancel_ids
         self._requested_cancel_ids.discard(order.order_id)
         order.status = "canceled"
@@ -632,25 +684,160 @@ class TradovateBroker:
                 "emergency flatten requested"
             )
 
-    def _order_id_or_reject(self, response: Any, *, role: str) -> Optional[str]:
+    def _journal(self) -> IntentJournal:
+        journal = self._intent_journal
+        if journal is None:
+            raise TradovateStateError("broker mutation requires an intent journal")
+        return journal
+
+    def _journaled_order_place(
+        self, body: dict[str, Any], *, role: str
+    ) -> Optional[tuple[str, str]]:
+        journal = self._journal()
+        pending = journal.begin(
+            role=role,
+            account_id=self._config.account_id,
+            contract_id=self._active_contract_id(),
+            body=body,
+        )
+        try:
+            response = self._rest_client.order_place(body)
+        except Exception as exc:
+            journal.transition(
+                pending.intent_id,
+                IntentState.SUBMISSION_UNKNOWN,
+                detail=type(exc).__name__,
+            )
+            self._latch_recovery()
+            raise TradovateStateError(
+                f"{role.replace('_', ' ')} submission outcome unknown; "
+                "reconciliation required"
+            ) from exc
+        return self._interpret_order_response(
+            pending.intent_id,
+            response,
+            role=role,
+        )
+
+    def _journaled_liquidation(self, body: dict[str, Any]) -> tuple[str, str]:
+        journal = self._journal()
+        pending = journal.begin(
+            role="liquidation",
+            account_id=self._config.account_id,
+            contract_id=self._active_contract_id(),
+            body=body,
+        )
+        try:
+            response = self._rest_client.order_liquidate_position(body)
+        except Exception as exc:
+            journal.transition(
+                pending.intent_id,
+                IntentState.SUBMISSION_UNKNOWN,
+                detail=type(exc).__name__,
+            )
+            self._latch_recovery()
+            raise TradovateStateError(
+                "liquidation submission outcome unknown; reconciliation required"
+            ) from exc
+        receipt = self._interpret_order_response(
+            pending.intent_id,
+            response,
+            role="liquidation",
+        )
+        if receipt is None:
+            raise TradovateStateError("liquidation response rejected")
+        return receipt
+
+    def _journaled_cancel(self, order_id: str) -> None:
+        journal = self._journal()
+        body = {"orderId": int(order_id)}
+        pending = journal.begin(
+            role="cancel",
+            account_id=self._config.account_id,
+            contract_id=self._active_contract_id(),
+            body=body,
+        )
+        try:
+            response = self._rest_client.order_cancel(body)
+        except Exception as exc:
+            journal.transition(
+                pending.intent_id,
+                IntentState.SUBMISSION_UNKNOWN,
+                detail=type(exc).__name__,
+            )
+            self._latch_recovery()
+            raise TradovateStateError(
+                f"cancel submission outcome unknown for order {order_id}; "
+                "reconciliation required"
+            ) from exc
+        reason = response.get("failureReason") if isinstance(response, dict) else None
+        if reason:
+            journal.transition(
+                pending.intent_id,
+                IntentState.REJECTED,
+                detail=str(reason),
+            )
+            self._latch_recovery()
+            raise TradovateStateError(
+                f"cancel request for order {order_id} rejected: {reason}"
+            )
+        if not isinstance(response, dict):
+            journal.transition(
+                pending.intent_id,
+                IntentState.SUBMISSION_UNKNOWN,
+                detail="malformed_response",
+            )
+            self._latch_recovery()
+            raise TradovateStateError(
+                f"cancel response for order {order_id} is malformed"
+            )
+        journal.transition(pending.intent_id, IntentState.REQUEST_ACCEPTED)
+        self._cancel_intent_ids[order_id] = pending.intent_id
+
+    def _interpret_order_response(
+        self,
+        intent_id: str,
+        response: Any,
+        *,
+        role: str,
+    ) -> Optional[tuple[str, str]]:
+        journal = self._journal()
         if isinstance(response, dict) and response.get("orderId") is not None:
             order_id = str(response["orderId"])
+            journal.transition(
+                intent_id,
+                IntentState.ACKNOWLEDGED,
+                broker_order_id=order_id,
+            )
             if order_id in self._orders:
+                self._latch_recovery()
                 raise TradovateStateError(f"duplicate broker order id {order_id}")
-            return order_id
+            return order_id, intent_id
         reason = response.get("failureReason") if isinstance(response, dict) else None
-        if role == ROLE_ENTRY and reason:
-            self._events.append(Rejected(order_id="", reason=str(reason)))
-            return None
+        if reason:
+            journal.transition(
+                intent_id,
+                IntentState.REJECTED,
+                detail=str(reason),
+            )
+            if role == ROLE_ENTRY:
+                self._events.append(Rejected(order_id="", reason=str(reason)))
+                return None
+            self._latch_recovery()
+            raise TradovateStateError(f"{role} response rejected: {reason}")
+        journal.transition(
+            intent_id,
+            IntentState.SUBMISSION_UNKNOWN,
+            detail="missing_order_id",
+        )
+        self._latch_recovery()
         raise TradovateStateError(
             f"{role} response missing orderId: {response!r}"
         )
 
-    def _required_order_id(self, response: Any, operation: str) -> str:
-        order_id = self._order_id_or_reject(response, role=operation)
-        if order_id is None:  # only entry responses can return None
-            raise TradovateStateError(f"{operation} response rejected")
-        return order_id
+    def _latch_recovery(self) -> None:
+        self._recovery_required = True
+        self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
 
     def _register_order(self, order: SubmittedOrder) -> None:
         if order.order_id in self._orders:

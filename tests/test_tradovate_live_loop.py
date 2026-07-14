@@ -6,11 +6,13 @@ cross-check -> supervisor -> strategy -> apply_strategy_result.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Iterator, Optional
 
 from full_python.data.sessions import classify_timestamp
 from full_python.events import EventLedger, EventType
 from full_python.execution.live_loop import LiveLoop
+from full_python.execution.order_intent_journal import IntentState
 from full_python.execution.supervisor import RiskSupervisor, RiskSupervisorConfig
 from full_python.models import MarketBar, OrderIntent, StrategyResult
 from full_python.tradovate.broker import TradovateBroker, TradovateRawEvent
@@ -41,6 +43,48 @@ class FakeRestClient:
         self._auto_id += 1
         return {"orderId": self._auto_id}
 
+
+class MemoryIntentJournal:
+    def __init__(self):
+        self.records = []
+        self.latest_by_intent = {}
+
+    @property
+    def unresolved_intents(self):
+        unresolved = {
+            IntentState.SUBMISSION_PENDING,
+            IntentState.REQUEST_ACCEPTED,
+            IntentState.SUBMISSION_UNKNOWN,
+        }
+        return {key: value for key, value in self.latest_by_intent.items()
+                if value.state in unresolved}
+
+    @property
+    def has_history(self):
+        return bool(self.records)
+
+    def begin(self, *, role, account_id, contract_id, body):
+        record = SimpleNamespace(
+            intent_id=f"live-test:{len(self.latest_by_intent) + 1}",
+            role=role,
+            state=IntentState.SUBMISSION_PENDING,
+        )
+        self.records.append(record)
+        self.latest_by_intent[record.intent_id] = record
+        return record
+
+    def transition(self, intent_id, state, *, broker_order_id=None, detail=None):
+        prior = self.latest_by_intent[intent_id]
+        record = SimpleNamespace(
+            intent_id=intent_id,
+            role=prior.role,
+            state=state,
+            broker_order_id=broker_order_id,
+            detail=detail,
+        )
+        self.records.append(record)
+        self.latest_by_intent[intent_id] = record
+        return record
 
 def _bar(ts: str, price: float) -> MarketBar:
     return MarketBar(timestamp_utc=ts, symbol="NQU6", open=price, high=price,
@@ -132,9 +176,13 @@ def _cfg() -> TradovateAdapterConfig:
     )
 
 
+def _broker(rest: FakeRestClient) -> TradovateBroker:
+    return TradovateBroker(_cfg(), rest, intent_journal=MemoryIntentJournal())
+
+
 def test_losing_round_trips_trip_dll_and_supervisor_through_live_loop() -> None:
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(), rest)
+    broker = _broker(rest)
     strategy = ScriptedStrategy(entry_indices=[0, 2])
     ts = ["2026-07-07T14:3%d:00Z" % i for i in range(1, 7)]
     bars = [_bar(ts[0], 100.0), _bar(ts[1], 100.0), _bar(ts[2], 100.0),
@@ -164,7 +212,7 @@ def test_losing_round_trips_trip_dll_and_supervisor_through_live_loop() -> None:
 
 def test_unknown_fill_halts_live_loop_without_flatten() -> None:
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(), rest)
+    broker = _broker(rest)
     strategy = ScriptedStrategy(entry_indices=[])
     bars = [_bar("2026-07-07T14:31:00Z", 100.0), _bar("2026-07-07T14:32:00Z", 100.0)]
     events = {1: [_fill(999, "Buy", 100.0, "2026-07-07T14:31:30Z")]}  # platform/manual fill
@@ -183,7 +231,7 @@ def test_unknown_fill_halts_live_loop_without_flatten() -> None:
 
 def test_authoritative_fill_reaches_strategy_before_next_bar_decision() -> None:
     rest = FakeRestClient()
-    broker = TradovateBroker(_cfg(), rest)
+    broker = _broker(rest)
     strategy = FillAwareStrategy()
     bars = [
         _bar("2026-07-07T14:31:00Z", 100.0),

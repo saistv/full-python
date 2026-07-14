@@ -7,9 +7,9 @@ is a sentinel that raises on any attribute access, so even a future
 code path that tried to place an order would fail loudly. Enabling
 orders is a different spec (the demo order test), not a config change.
 
-Shutdown model: the persistent ledger flushes every event, so Ctrl+C
-and crashes lose nothing; the runner's job on exit is only to cancel
-the chart subscription, close the socket, and run the shadow report.
+Shutdown model: the observational ledger flushes every event, while the
+runner's job on exit is to cancel the chart subscription, close the socket,
+and run the shadow report. This log is not financial recovery authority.
 """
 from __future__ import annotations
 
