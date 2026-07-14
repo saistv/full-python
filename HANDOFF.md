@@ -4,7 +4,7 @@ You are picking up an NQ/MNQ futures trading system (Python port of a
 historically profitable TradingView strategy). This document is self-contained:
 it does
 not assume any particular AI tool, skill set, or external memory. Read it
-fully before touching anything. Last updated 2026-07-13.
+fully before touching anything. Last updated 2026-07-14.
 
 ## 1. What this project is
 
@@ -171,6 +171,13 @@ Do not skip the review step, and do not merge red tests.
   runs stop at the configured ET end. This closes principal audit P1-03 in
   code; the attended DEMO outage/reconnect drills and three clean sessions are
   still missing. See `docs/decisions/2026-07-13-demo-observer-cold-start.md`.
+- **Broker authority foundation (Milestone 2 Slice A) — IMPLEMENTED OFFLINE**
+  (2026-07-14). Simulation and live orchestration now dispatch one
+  broker-produced strategy-feedback stream; Tradovate entry fills and closed
+  trades reach the strategy exactly once, and entries are blocked unless the
+  broker is stably flat. This closes principal-audit P0-02 in code only. See
+  `docs/decisions/2026-07-14-broker-authority-foundation.md` and the staged
+  lifecycle design in `docs/superpowers/specs/2026-07-14-broker-safe-execution-design.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -185,11 +192,13 @@ feature branch.
    sessions with independent reference bars, exact signal parity, risk probe,
    and redacted artifacts. A failed drill or unexplained session blocks the
    gate.
-2. **Redesign the order-capable broker path offline before any demo order.**
-   Required work includes broker-authoritative strategy feedback, duplicate
-   entry prevention, exact account/contract reconciliation, a real 15:59
-   flatten, valid `contractId` liquidation, user-event synchronization,
-   idempotency, and restart recovery. See principal audit P0-02 through P1-02.
+2. **Continue the order-capable broker redesign offline before any demo
+   order.** Slice A closed broker feedback and duplicate-entry P0-02. Next is
+   Slice B: exact account/contract identity and schema-valid `contractId`
+   liquidation, followed by durable idempotent intents, user-event
+   synchronization/startup recovery, confirmed 15:59/shutdown flatten, partial
+   quantities, and the complete adversarial failure matrix. See principal audit
+   P0-03 through P1-02 and the 2026-07-14 broker-safe execution design.
 3. **MNQ-first sizing is re-derived; execute operational gates only after the
    blockers above.** A 30-session funded pilot fails the `$500` risk gate
    (23-27% budget-breach probability). The research conclusion is at most a
@@ -198,8 +207,8 @@ feature branch.
    record. See `2026-07-13-mnq-pilot-sizing.md`.
 4. **Sub-project 4 - Gate 5/6/7 operational tooling:** demo observe -> demo
    order test -> paper -> reconciliation -> a tiny MNQ live pilot ($150/day,
-   $500 total, at most 10 funded sessions). The observe runner exists, but the
-   cold-start blocker is fixed offline, but its real DEMO drills and the
+   $500 total, at most 10 funded sessions). The observe runner exists and its
+   cold-start blocker is fixed offline, but the real DEMO drills and the
    three-session evidence run remain open. Demo credentials and network access
    remain operator-controlled and must never be committed. Halt consumers must
    read both `transition="execution_halt"` and its `reason` field.

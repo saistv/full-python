@@ -8,6 +8,10 @@ surface, offline-first (all tests run on fake transports). Safety model:
   manual intervention, stale message) raises TradovateStateError, which
   subclasses ExecutionInvariantError so LiveLoop halts WITHOUT flatten
   (position truth unknown). Duplicate fills likewise halt.
+- Entry authority: only a stable-flat broker state can submit an entry. A
+  working entry, open position, pending exit, or recovery state rejects later
+  signals before REST. Authoritative entry fills and fill-derived closed trades
+  reach the strategy once through the shared feedback stream.
 - Broker-held protective stop: submitted immediately on every entry fill
   at the entry's frozen stop_price, never modified afterwards (production
   policy freezes stops at entry; result.stop_updates are deliberately not
@@ -29,9 +33,9 @@ surface, offline-first (all tests run on fake transports). Safety model:
   MNQ=2.0). order_enabled requires flatten_enabled and daily_loss_limit
   at broker construction. Both live flags default False.
 
-The six 2026-07-10 tracked gaps are CLOSED as of the 2026-07-10 gap-
-closure spec (docs/superpowers/specs/2026-07-10-tradovate-gap-closure-
-design.md); each is pinned by the Failure Matrix tests listed there.
+The 2026-07-10 gap-closure spec is historical context, not a production
+readiness claim. The 2026-07-13 principal audit found additional protocol and
+recovery blockers; see the 2026-07-14 broker-safe execution design.
 Multi-contract live orders are prohibited until partial-fill recovery is
 modeled. Any partial-fill event is therefore an invariant breach that requires
 broker reconciliation before proceeding.
@@ -51,8 +55,9 @@ from full_python.execution.broker_protocol import (
     Filled,
     PartialFilled,
     Rejected,
+    StrategyFeedback,
 )
-from full_python.models import MarketBar, StrategyResult, Trade
+from full_python.models import Fill, MarketBar, StrategyResult, Trade
 from full_python.risk.daily_loss import is_daily_loss_breached
 from full_python.tradovate.config import TradovateAdapterConfig
 from full_python.tradovate.errors import (
@@ -77,6 +82,7 @@ ROLE_EXIT = "exit"
 
 class BrokerExecutionState(str, Enum):
     NORMAL = "normal"
+    ENTRY_PENDING_FILL = "entry_pending_fill"
     EXIT_PENDING_CANCEL = "exit_pending_cancel"
     EXIT_PENDING_FILL = "exit_pending_fill"
     RECOVERY_REQUIRED = "recovery_required"
@@ -121,6 +127,7 @@ class TradovateBroker:
         self._config = config
         self._rest_client = rest_client
         self._events: list[BrokerEvent] = []
+        self._strategy_feedback: list[StrategyFeedback] = []
         self._orders: dict[str, SubmittedOrder] = {}
         self._fill_ledger = FillPairingLedger(
             dollar_point_value=config.dollar_point_value,
@@ -224,6 +231,11 @@ class TradovateBroker:
                 raise TradovateOrderSafetyError(
                     "live quantity must equal 1 until partial-fill recovery is modeled"
                 )
+            if not self._entry_is_stable_flat():
+                self._events.append(
+                    Rejected(order_id="", reason="entry_not_stable_flat")
+                )
+                continue
             body = {
                 "accountSpec": self._config.account_spec,
                 "accountId": self._config.account_id,
@@ -236,6 +248,7 @@ class TradovateBroker:
             try:
                 response = self._rest_client.order_place(body)
             except TradovateError as exc:
+                self._recovery_required = True
                 self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
                 raise TradovateStateError(
                     "entry submission outcome unknown; broker reconciliation required"
@@ -252,6 +265,7 @@ class TradovateBroker:
                 stop_price=float(intent.metadata["stop_price"]),
                 reason=intent.reason,
             )
+            self._execution_state = BrokerExecutionState.ENTRY_PENDING_FILL
             self._events.append(Acked(order_id=order_id))
 
     def note_bar_processed(self, bar: MarketBar, session: SessionInfo) -> None:
@@ -297,6 +311,11 @@ class TradovateBroker:
         events = list(self._events)
         self._events.clear()
         return events
+
+    def poll_strategy_feedback(self) -> list[StrategyFeedback]:
+        feedback = list(self._strategy_feedback)
+        self._strategy_feedback.clear()
+        return feedback
 
     # -- raw event ingestion ----------------------------------------------
 
@@ -372,6 +391,17 @@ class TradovateBroker:
                 "emergency flatten requested"
             )
         self._submit_protective_stop(fill, order)
+        if not self._recovery_required:
+            self._execution_state = BrokerExecutionState.NORMAL
+        self._strategy_feedback.append(Fill(
+            timestamp_utc=fill.timestamp_utc,
+            symbol=order.symbol,
+            side=fill.side,
+            quantity=fill.quantity,
+            price=fill.price,
+            reason=order.reason,
+            metadata={"broker_order_id": fill.order_id},
+        ))
 
     def _submit_protective_stop(self, fill: Filled, entry_order: SubmittedOrder) -> None:
         action = "Sell" if fill.side == "buy" else "Buy"
@@ -535,11 +565,12 @@ class TradovateBroker:
         self._position = None
         if not self._recovery_required:
             self._execution_state = BrokerExecutionState.NORMAL
-        self._fill_ledger.close_leg(
+        trade = self._fill_ledger.close_leg(
             price=fill.price,
             timestamp_utc=fill.timestamp_utc,
             reason=order.reason or order.role,
         )
+        self._strategy_feedback.append(trade)
 
     def _ingest_reject(self, data: dict[str, Any]) -> None:
         order = self._known_order(str(data["orderId"]))
@@ -547,6 +578,10 @@ class TradovateBroker:
         self._events.append(
             Rejected(order_id=order.order_id, reason=str(data.get("reason", "")))
         )
+        if order.role == ROLE_ENTRY:
+            if not self._recovery_required:
+                self._execution_state = BrokerExecutionState.NORMAL
+            return
         if order.role == ROLE_PROTECTIVE_STOP:
             if order.order_id == self._working_stop_id:
                 self._working_stop_id = None
@@ -569,6 +604,10 @@ class TradovateBroker:
         if order.order_id == self._working_stop_id:
             self._working_stop_id = None
         self._events.append(Canceled(order_id=order.order_id))
+        if order.role == ROLE_ENTRY:
+            if not self._recovery_required:
+                self._execution_state = BrokerExecutionState.NORMAL
+            return
         if order.role == ROLE_PROTECTIVE_STOP and self._position is not None:
             pending = self._pending_exit
             if requested and pending is not None and pending.stop_order_id == order.order_id:
@@ -606,6 +645,15 @@ class TradovateBroker:
         if order.order_id in self._orders:
             raise TradovateStateError(f"duplicate broker order id {order.order_id}")
         self._orders[order.order_id] = order
+
+    def _entry_is_stable_flat(self) -> bool:
+        return (
+            self._execution_state == BrokerExecutionState.NORMAL
+            and not self._recovery_required
+            and self._position is None
+            and self._pending_exit is None
+            and not self._has_working_orders()
+        )
 
     def _reconcile_position_event(self, data: dict[str, Any]) -> None:
         reported = _position_from_data(data)

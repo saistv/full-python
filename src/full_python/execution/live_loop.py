@@ -1,11 +1,9 @@
 """The live execution conductor.
 
-Mirrors SimulationEngine.run's per-bar sequence exactly (that identity
-is test-enforced trade-for-trade and ledger-sequence-for-sequence);
-adds only observation and defense: OrderStateMachine shadow
-cross-check, RiskSupervisor marks, and flatten-and-halt on any
-invariant violation. With the supervisor disabled the additions are
-pure observation -- which is the identity argument.
+Uses the same per-bar orchestration and strategy-feedback contract as the
+simulation engine. PaperBroker identity is test-enforced because it shares
+PositionEngine; that does not prove independent Tradovate execution parity.
+LiveLoop adds the order-state shadow, supervisor marks, and halt handling.
 """
 from __future__ import annotations
 
@@ -20,6 +18,7 @@ from full_python.execution.state_machine import (
     ExecutionInvariantError,
     OrderStateMachine,
 )
+from full_python.execution.strategy_feedback import dispatch_strategy_feedback
 from full_python.execution.supervisor import RiskSupervisor
 from full_python.livedata.errors import LiveDataError
 from full_python.models import MarketBar, Trade
@@ -71,8 +70,7 @@ class LiveLoop:
                 )
 
                 session_pnl = self._broker.process_bar_open(bar, session)
-                self._drain_events()
-                self._cross_check()
+                self._synchronize_broker()
 
                 breach = self._supervisor.check_mark(
                     session_date=session_iso,
@@ -88,8 +86,7 @@ class LiveLoop:
                         payload={"transition": "execution_halt", "reason": breach},
                     )
                     self._broker.flatten(bar, breach)
-                    self._drain_events()
-                    self._cross_check()
+                    self._synchronize_broker()
 
                 on_bar_context = getattr(self._strategy, "on_bar_context", None)
                 if on_bar_context is not None:
@@ -101,10 +98,11 @@ class LiveLoop:
                 if not self._supervisor.entries_allowed():
                     result = dataclasses.replace(result, order_intents=())
                 self._broker.apply_strategy_result(bar, session, result)
+                self._synchronize_broker()
                 self._broker.note_bar_processed(bar, session)
 
             self._broker.close_end_of_data()
-            self._drain_events()
+            self._synchronize_broker()
         except ExecutionInvariantError as exc:
             halted_reason = f"execution_halt: {exc}"
             # Same "reason" key as the breach-halt path above, so a ledger
@@ -142,6 +140,13 @@ class LiveLoop:
     def _drain_events(self) -> None:
         for event in self._broker.poll_events():
             self._state_machine.on_event(event)
+
+    def _synchronize_broker(self) -> None:
+        self._drain_events()
+        self._cross_check()
+        dispatch_strategy_feedback(
+            self._strategy, self._broker.poll_strategy_feedback()
+        )
 
     def _cross_check(self) -> None:
         shadow = self._state_machine.position

@@ -91,6 +91,35 @@ class ScriptedStrategy:
         return StrategyResult()
 
 
+class FillAwareStrategy:
+    """Keeps requesting entry until broker-authoritative feedback arrives."""
+
+    def __init__(self) -> None:
+        self.position_side = None
+        self.fill_calls = []
+
+    def on_fill(self, fill) -> None:
+        self.fill_calls.append(fill)
+        self.position_side = "long" if fill.side == "buy" else "short"
+
+    def on_trade_closed(self, trade) -> None:
+        self.position_side = None
+
+    def on_bar(self, bar: MarketBar) -> StrategyResult:
+        if self.position_side is not None:
+            return StrategyResult()
+        return StrategyResult(order_intents=(
+            OrderIntent.market_entry(
+                timestamp_utc=bar.timestamp_utc,
+                symbol="NQ",
+                side="buy",
+                quantity=1,
+                reason="sr_breakout",
+                metadata={"stop_price": bar.close - 30.0},
+            ),
+        ))
+
+
 def _cfg() -> TradovateAdapterConfig:
     return TradovateAdapterConfig(
         environment=DEMO_ENVIRONMENT, account_spec="DEMO123", account_id=456,
@@ -147,3 +176,33 @@ def test_unknown_fill_halts_live_loop_without_flatten() -> None:
     halts = [r for r in ledger.records if r.event_type == EventType.STATE_TRANSITION]
     assert halts[-1].payload["reason"] == "invariant_violation"
     assert rest.liquidations == []   # invariant halt: no flatten, position truth unknown
+
+
+def test_authoritative_fill_reaches_strategy_before_next_bar_decision() -> None:
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(), rest)
+    strategy = FillAwareStrategy()
+    bars = [
+        _bar("2026-07-07T14:31:00Z", 100.0),
+        _bar("2026-07-07T14:32:00Z", 101.0),
+    ]
+    source = ScriptedBarSource(
+        broker,
+        bars,
+        {1: [_fill(101, "Buy", 100.5, "2026-07-07T14:31:30Z")]},
+    )
+    loop = LiveLoop(
+        source,
+        strategy,
+        broker,
+        RiskSupervisor(RiskSupervisorConfig(point_value=20.0)),
+        EventLedger(),
+    )
+
+    result = loop.run()
+
+    assert result.halted_reason is None
+    entry_orders = [body for body in rest.placed if body["orderType"] == "Market"]
+    assert len(entry_orders) == 1
+    assert len(strategy.fill_calls) == 1
+    assert strategy.fill_calls[0].reason == "sr_breakout"
