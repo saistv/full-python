@@ -9,7 +9,7 @@ from full_python.execution.broker_protocol import (
     PartialFilled,
     Rejected,
 )
-from full_python.models import MarketBar, OrderIntent, StrategyResult
+from full_python.models import Fill, MarketBar, OrderIntent, StrategyResult
 from full_python.tradovate.broker import (
     BrokerExecutionState,
     TradovateBroker,
@@ -144,6 +144,21 @@ def test_orders_enabled_places_automated_market_order_and_emits_ack():
     assert broker.poll_events() == [Acked(order_id="101")]
 
 
+def test_repeated_entry_while_first_entry_is_working_submits_once():
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+
+    market_entries = [body for body in rest.placed if body["orderType"] == "Market"]
+    assert len(market_entries) == 1
+    assert broker.execution_state == BrokerExecutionState.ENTRY_PENDING_FILL
+    rejects = [event for event in broker.poll_events() if isinstance(event, Rejected)]
+    assert rejects == [Rejected(order_id="", reason="entry_not_stable_flat")]
+
+
 def test_live_enabled_entry_requires_stop_price_metadata():
     rest = FakeRestClient()
     broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
@@ -168,6 +183,21 @@ def test_fill_raw_event_updates_position_and_emits_filled():
         timestamp_utc="2026-07-07T14:32:00Z",
         reason="",
     )]
+
+
+def test_entry_fill_emits_exactly_one_strategy_fill_with_intent_reason():
+    broker, _rest = _entered_broker()
+
+    assert broker.poll_strategy_feedback() == [Fill(
+        timestamp_utc="2026-07-07T14:32:00Z",
+        symbol="NQ",
+        side="buy",
+        quantity=1,
+        price=100.25,
+        reason="adaptive_trend",
+        metadata={"broker_order_id": "101"},
+    )]
+    assert broker.poll_strategy_feedback() == []
 
 
 def test_partial_fill_event_requires_reconciliation_and_halts():
@@ -261,16 +291,41 @@ def test_duplicate_fill_for_same_order_id_raises_state_error():
         broker.ingest_raw_event(_fill_event(101))
 
 
-def test_entry_fill_while_position_open_raises_state_error():
-    from full_python.tradovate.errors import TradovateStateError
-
-    broker, _rest = _entered_broker()
+def test_repeated_entry_after_fill_and_protection_is_rejected_before_rest():
+    broker, rest = _entered_broker()
     bar = _bar()
-    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))  # second entry order
-    acks = [e for e in broker.poll_events() if isinstance(e, Acked)]
 
-    with pytest.raises(TradovateStateError, match="position is already open"):
-        broker.ingest_raw_event(_fill_event(int(acks[-1].order_id)))
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+
+    market_entries = [body for body in rest.placed if body["orderType"] == "Market"]
+    assert len(market_entries) == 1
+    rejects = [event for event in broker.poll_events() if isinstance(event, Rejected)]
+    assert rejects == [Rejected(order_id="", reason="entry_not_stable_flat")]
+
+
+def test_entry_is_rejected_while_strategy_exit_waits_for_stop_cancel():
+    broker, rest = _entered_broker()
+    broker.apply_strategy_result(_bar(), _session(), _exit_result())
+    assert broker.execution_state == BrokerExecutionState.EXIT_PENDING_CANCEL
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    market_entries = [body for body in rest.placed if body["orderType"] == "Market"]
+    assert len(market_entries) == 1
+    rejects = [event for event in broker.poll_events() if isinstance(event, Rejected)]
+    assert rejects == [Rejected(order_id="", reason="entry_not_stable_flat")]
+
+
+def test_confirmed_entry_cancel_returns_to_stable_flat_for_later_signal():
+    rest = FakeRestClient()
+    broker = TradovateBroker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 101}))
+
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    assert len([body for body in rest.placed if body["orderType"] == "Market"]) == 2
 
 
 def test_reject_and_cancel_for_unknown_order_ids_raise_state_error():
@@ -358,6 +413,10 @@ def test_reject_event_for_known_entry_emits_rejected():
     assert rejects == [Rejected(order_id="101", reason="outside_market_hours")]
     assert broker.position is None
     assert rest.liquidations == []   # entry rejection needs no flatten
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    assert len([body for body in rest.placed if body["orderType"] == "Market"]) == 2
 
 
 def _exit_result(bar=None, reason="atf_flip"):
@@ -397,6 +456,26 @@ def test_strategy_exit_cancels_stop_then_market_closes():
                                         ts="2026-07-07T14:33:00Z"))
     assert broker.position is None
     assert broker.execution_state == BrokerExecutionState.NORMAL
+
+
+def test_exit_fill_emits_exactly_one_fill_derived_closed_trade_feedback():
+    broker, _rest = _entered_broker(price=100.0)
+    broker.poll_strategy_feedback()  # consume the entry fill feedback
+    broker.apply_strategy_result(_bar(), _session(), _exit_result(reason="atf_flip"))
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+    broker.ingest_raw_event(_fill_event(
+        103,
+        action="Sell",
+        price=101.25,
+        ts="2026-07-07T14:33:00Z",
+    ))
+
+    feedback = broker.poll_strategy_feedback()
+    assert len(feedback) == 1
+    trade = feedback[0]
+    assert trade == broker.trades[-1]
+    assert trade.exit_reason == "atf_flip"
+    assert broker.poll_strategy_feedback() == []
 
 
 def test_strategy_exit_while_flat_is_a_no_op():
@@ -521,6 +600,13 @@ def test_entry_transport_error_maps_to_halting_state_error():
 
     with pytest.raises(TradovateStateError, match="outcome unknown"):
         broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    assert rest.placed == []
+    assert broker.poll_events() == [
+        Rejected(order_id="", reason="entry_not_stable_flat")
+    ]
 
 
 def test_flatten_while_short_cancels_stop_then_liquidates():
