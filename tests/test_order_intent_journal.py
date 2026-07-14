@@ -17,6 +17,7 @@ def _begin(journal: OrderIntentJournal):
         role="entry",
         account_id=456,
         contract_id=789,
+        client_operation_id="fp-test-entry-1",
         body={"accountId": 456, "symbol": "NQU6", "orderQty": 1},
     )
 
@@ -31,6 +32,7 @@ def test_pending_is_durable_and_reopens_as_unresolved(tmp_path):
     reopened = OrderIntentJournal(path, run_id="run-a")
     assert pending.state == IntentState.SUBMISSION_PENDING
     assert pending.intent_id == "run-a:intent:00000001"
+    assert pending.client_operation_id == "fp-test-entry-1"
     assert reopened.records == [pending]
     assert reopened.unresolved_intents == {pending.intent_id: pending}
 
@@ -75,6 +77,7 @@ def test_cancel_request_stays_unresolved_until_confirmed(tmp_path):
         role="cancel",
         account_id=456,
         contract_id=789,
+        client_operation_id="fp-test-cancel-1",
         body={"orderId": 102},
     )
     accepted = journal.transition(
@@ -183,12 +186,14 @@ def test_body_digest_is_canonical_and_body_is_not_persisted(tmp_path):
         role="entry",
         account_id=456,
         contract_id=789,
+        client_operation_id="fp-test-entry-1",
         body={"b": 2, "a": 1},
     )
     second = journal.begin(
         role="entry",
         account_id=456,
         contract_id=789,
+        client_operation_id="fp-test-entry-2",
         body={"a": 1, "b": 2},
     )
 
@@ -196,3 +201,83 @@ def test_body_digest_is_canonical_and_body_is_not_persisted(tmp_path):
     persisted = path.read_text()
     assert '"body"' not in persisted
     assert '"a": 1' not in persisted
+
+
+def test_client_operation_id_is_hash_covered_and_survives_reopen(tmp_path):
+    path = tmp_path / "orders.jsonl"
+    journal = OrderIntentJournal(path, run_id="run-a")
+    pending = _begin(journal)
+    journal.close()
+
+    reopened = OrderIntentJournal(path, run_id="run-a")
+    assert reopened.records[0].client_operation_id == pending.client_operation_id
+    reopened.close()
+
+    record = json.loads(path.read_text())
+    record["client_operation_id"] = "fp-tampered"
+    path.write_text(json.dumps(record, sort_keys=True) + "\n")
+    with pytest.raises(IntentJournalError, match="hash"):
+        OrderIntentJournal(path, run_id="run-a")
+
+
+@pytest.mark.parametrize("value", ["", "x" * 65])
+def test_client_operation_id_must_fit_tradovate_limit(tmp_path, value):
+    journal = OrderIntentJournal(tmp_path / "orders.jsonl", run_id="run-a")
+    with pytest.raises(IntentJournalError, match="client_operation_id"):
+        journal.begin(
+            role="entry",
+            account_id=456,
+            contract_id=789,
+            client_operation_id=value,
+            body={"clOrdId": value},
+        )
+
+
+def test_schema_one_history_reopens_and_continues_with_schema_two(tmp_path):
+    path = tmp_path / "orders.jsonl"
+    records = []
+    previous_hash = journal_module.GENESIS_HASH
+    for sequence, state in enumerate(
+        (
+            IntentState.SUBMISSION_PENDING,
+            IntentState.ACKNOWLEDGED,
+            IntentState.RECONCILED,
+        ),
+        start=1,
+    ):
+        fields = {
+            "schema_version": 1,
+            "run_id": "run-a",
+            "sequence": sequence,
+            "intent_id": "run-a:intent:00000001",
+            "role": "entry",
+            "account_id": 456,
+            "contract_id": 789,
+            "body_digest": "a" * 64,
+            "state": state.value,
+            "previous_hash": previous_hash,
+            "broker_order_id": (
+                "101" if state == IntentState.ACKNOWLEDGED else None
+            ),
+            "detail": "legacy",
+        }
+        record = {
+            **fields,
+            "record_hash": journal_module._record_hash(fields),
+        }
+        records.append(record)
+        previous_hash = record["record_hash"]
+    path.write_text("".join(
+        json.dumps(record, sort_keys=True) + "\n" for record in records
+    ))
+
+    journal = OrderIntentJournal(path, run_id="run-a")
+    assert journal.records[0].schema_version == 1
+    assert journal.records[0].client_operation_id is None
+    current = _begin(journal)
+    assert current.schema_version == 2
+    journal.close()
+
+    reopened = OrderIntentJournal(path, run_id="run-a")
+    assert [item.schema_version for item in reopened.records] == [1, 1, 1, 2]
+    assert reopened.records[3].previous_hash == reopened.records[2].record_hash

@@ -239,7 +239,9 @@ Do not skip the review step, and do not merge red tests.
   (2026-07-14). Every flatten-capable adapter now requires one exact
   `contract_symbol` and `contract_id`; order decisions and broker position/fill
   events are account/contract scoped; ambiguous REST snapshots halt; and
-  liquidation requests use exactly `accountId + contractId + admin`. This
+  liquidation targets use exact `accountId + contractId + admin` identity.
+  Slice D1 subsequently adds the documented `isAutomated` and correlation
+  fields without changing that target authority. This
   closes P1-02's unsafe position-netting path and fixes the request-schema
   prerequisite for P0-04. The full P1-02 remains open until runtime identity
   resolution and REST working-order reconciliation are wired with startup
@@ -256,6 +258,22 @@ Do not skip the review step, and do not merge red tests.
   P0-05, not closure: account user sync must associate journal history with
   broker orders/fills before recovery. See
   `docs/decisions/2026-07-14-durable-order-intents.md`.
+- **Stable-flat account startup hydration (Milestone 2 Slice D1) — IMPLEMENTED
+  OFFLINE** (2026-07-14). Every order-capable broker now starts closed. An
+  exact Tradovate `user/syncrequest` snapshot must agree with independent REST
+  accounts, contract, positions, orders, commands, command reports, order
+  versions, fills, cash balance, and account-risk state before entries reopen.
+  Cash realized P&L is bound to the expected `tradeDate`; arbitrary statuses,
+  malformed identities, foreign exposure, working orders, and source
+  disagreement fail closed. New order/cancel/liquidation mutations carry a
+  hash-covered broker-visible client ID, and acknowledged restart history is
+  reconciled only through the same automated command and terminal order;
+  accepted cancels require their exact terminal canceled order. Hydrated daily
+  loss state also blocks entries before REST. This
+  is stable-flat startup evidence only: inherited positions, unresolved
+  outcomes, incremental sync, reconnect/token renewal, and periodic REST
+  reconciliation remain open. See
+  `docs/decisions/2026-07-14-account-state-hydration.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -264,22 +282,20 @@ feature branch.
 
 ## 6. Open tasks (ranked)
 
-1. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
+1. **Continue the order-capable broker redesign offline before any demo
+   order.** Slice D1 now provides exact stable-flat startup hydration. Next
+   add the incremental user-event cache, disconnect invalidation, reconnect and
+   token-client replacement, heartbeat supervision, and periodic REST
+   reconciliation. Then implement broker-confirmed 15:59/shutdown flatten,
+   partial quantities, and the complete adversarial failure matrix. P0-04,
+   P0-05, P1-01, and the broader P1-02 remain open. See the 2026-07-14
+   broker-safe execution and account-hydration designs.
+2. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
    code blocker is fixed; now execute the outage/disconnect drills in
    `docs/live-observe-runbook.md`, then preserve three nonconsecutive clean
    sessions with independent reference bars, exact signal parity, risk probe,
    and redacted artifacts. A failed drill or unexplained session blocks the
    gate.
-2. **Continue the order-capable broker redesign offline before any demo
-   order.** Slice A closed duplicate-entry/feedback P0-02; Slice B removed
-   unscoped position netting and corrected the liquidation schema; Slice C made
-   logical submission intents durable and non-retryable while unknown. Next is
-   Slice D: account user-event synchronization/startup hydration that resolves
-   runtime identity, REST working orders, fills, protection, and prior journal
-   history. Then implement broker-confirmed 15:59/shutdown flatten, partial
-   quantities, and the complete adversarial failure matrix. P0-04, P0-05,
-   P1-01, and the broader P1-02 remain open. See the 2026-07-14 broker-safe
-   execution design.
 3. **MNQ-first sizing is re-derived; execute operational gates only after the
    blockers above.** A 30-session funded pilot fails the `$500` risk gate
    (23-27% budget-breach probability). The research conclusion is at most a

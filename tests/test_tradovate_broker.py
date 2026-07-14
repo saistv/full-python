@@ -14,6 +14,7 @@ from full_python.execution.broker_protocol import (
 )
 from full_python.execution.order_intent_journal import IntentState, OrderIntentJournal
 from full_python.models import Fill, MarketBar, OrderIntent, StrategyResult
+from full_python.tradovate.account_sync import AccountHydrationSnapshot
 from full_python.tradovate.broker import (
     BrokerExecutionState,
     TradovateBroker,
@@ -28,6 +29,7 @@ class RecordedIntent:
     intent_id: str
     role: str
     state: IntentState
+    client_operation_id: Optional[str] = None
     broker_order_id: Optional[str] = None
     detail: Optional[str] = None
 
@@ -54,11 +56,14 @@ class RecordingIntentJournal:
     def has_history(self):
         return bool(self.records)
 
-    def begin(self, *, role, account_id, contract_id, body):
+    def begin(
+        self, *, role, account_id, contract_id, body, client_operation_id=None
+    ):
         record = RecordedIntent(
             intent_id=f"test:intent:{len(self.latest_by_intent) + 1:08d}",
             role=role,
             state=IntentState.SUBMISSION_PENDING,
+            client_operation_id=client_operation_id,
         )
         self.records.append(record)
         self.latest_by_intent[record.intent_id] = record
@@ -70,6 +75,7 @@ class RecordingIntentJournal:
             intent_id=intent_id,
             role=previous.role,
             state=state,
+            client_operation_id=previous.client_operation_id,
             broker_order_id=broker_order_id,
             detail=detail,
         )
@@ -121,7 +127,9 @@ class FakeRestClient:
         if self.liquidate_error is not None:
             error, self.liquidate_error = self.liquidate_error, None
             raise error
-        assert set(body) == {"accountId", "contractId", "admin"}
+        assert set(body) == {
+            "accountId", "contractId", "admin", "isAutomated", "customTag50",
+        }
         self.liquidations.append(body)
         self._auto_id += 1
         return {"orderId": self._auto_id}
@@ -147,7 +155,84 @@ def _new_broker(config, rest=None, journal=None):
     journal = journal or RecordingIntentJournal()
     rest = rest or FakeRestClient(journal)
     rest.journal = journal
-    return TradovateBroker(config, rest, intent_journal=journal)
+    broker = TradovateBroker(config, rest, intent_journal=journal)
+    if config.order_enabled and not journal.has_history:
+        broker.hydrate_account_state(_flat_hydration_snapshot())
+    return broker
+
+
+def _flat_hydration_snapshot(*, daily_realized_pnl=0.0, trade_date="2026-07-07"):
+    return AccountHydrationSnapshot(
+        account_id=456,
+        account_spec="DEMO123",
+        contract_id=789,
+        contract_symbol="NQU6",
+        position=None,
+        working_orders=(),
+        orders_by_id={},
+        commands_by_client_id={},
+        trade_date=trade_date,
+        daily_realized_pnl=daily_realized_pnl,
+        entry_permitted=True,
+    )
+
+
+def _terminal_snapshot_for_journal(
+    journal, *, daily_realized_pnl=0.0, canceled_requests=()
+):
+    commands_by_client_id = {}
+    orders_by_id = {}
+    for record in journal.latest_by_intent.values():
+        if record.state != IntentState.ACKNOWLEDGED:
+            continue
+        orders_by_id[record.broker_order_id] = {
+            "id": int(record.broker_order_id),
+            "ordStatus": "Filled",
+        }
+        commands_by_client_id[record.client_operation_id] = {
+            "id": int(record.broker_order_id) + 1000,
+            "orderId": int(record.broker_order_id),
+            "isAutomated": True,
+        }
+    for body in canceled_requests:
+        order_id = int(body["orderId"])
+        orders_by_id[str(order_id)] = {
+            "id": order_id,
+            "ordStatus": "Canceled",
+        }
+        commands_by_client_id[body["clOrdId"]] = {
+            "id": order_id + 2000,
+            "orderId": order_id,
+            "isAutomated": True,
+        }
+    return replace(
+        _flat_hydration_snapshot(daily_realized_pnl=daily_realized_pnl),
+        orders_by_id=orders_by_id,
+        commands_by_client_id=commands_by_client_id,
+    )
+
+
+def _without_client_operation_id(body, field):
+    value = body[field]
+    assert value.startswith("fp-")
+    assert len(value) <= 64
+    return {key: item for key, item in body.items() if key != field}
+
+
+def _assert_cancel_request(body, order_id):
+    assert _without_client_operation_id(body, "clOrdId") == {
+        "orderId": order_id,
+        "isAutomated": True,
+    }
+
+
+def _assert_liquidation_request(body):
+    assert _without_client_operation_id(body, "customTag50") == {
+        "accountId": 456,
+        "contractId": 789,
+        "admin": False,
+        "isAutomated": True,
+    }
 
 
 def _bar():
@@ -219,7 +304,8 @@ def test_orders_enabled_places_automated_market_order_and_emits_ack():
 
     broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
 
-    assert rest.placed == [{
+    assert len(rest.placed) == 1
+    assert _without_client_operation_id(rest.placed[0], "clOrdId") == {
         "accountSpec": "DEMO123",
         "accountId": 456,
         "action": "Buy",
@@ -227,7 +313,7 @@ def test_orders_enabled_places_automated_market_order_and_emits_ack():
         "orderQty": 1,
         "orderType": "Market",
         "isAutomated": True,
-    }]
+    }
     assert broker.poll_events() == [Acked(order_id="101")]
 
 
@@ -255,6 +341,45 @@ def test_live_enabled_entry_requires_stop_price_metadata():
         broker.apply_strategy_result(bar, _session(bar), _entry_result(bar, metadata={}))
 
     assert rest.placed == []
+
+
+def test_stale_hydration_blocks_direct_strategy_submission():
+    from full_python.tradovate.errors import TradovateStateError
+
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    next_day = replace(_bar(), timestamp_utc="2026-07-08T14:32:00Z")
+
+    with pytest.raises(TradovateStateError, match="active session"):
+        broker.apply_strategy_result(
+            next_day,
+            _session(next_day),
+            _entry_result(next_day),
+        )
+
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    assert rest.placed == []
+
+
+def test_hydrated_account_daily_loss_blocks_entry_before_rest():
+    rest = FakeRestClient()
+    journal = RecordingIntentJournal()
+    broker = TradovateBroker(
+        _cfg(order_enabled=True, flatten_enabled=True),
+        rest,
+        intent_journal=journal,
+    )
+    broker.hydrate_account_state(_flat_hydration_snapshot(
+        daily_realized_pnl=-1000.0,
+    ))
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    assert broker.daily_limit_hit is True
+    assert rest.placed == []
+    assert broker.poll_events() == [
+        Rejected(order_id="", reason="entry_not_stable_flat")
+    ]
 
 
 def test_fill_raw_event_updates_position_and_emits_filled():
@@ -350,12 +475,10 @@ def test_flatten_enabled_with_position_calls_liquidate_position():
 
     broker.flatten(_bar(), "supervisor_halt")
 
-    assert rest.canceled == [{"orderId": 102}]
-    assert rest.liquidations == [{
-        "accountId": 456,
-        "contractId": 789,
-        "admin": False,
-    }]
+    assert len(rest.canceled) == 1
+    _assert_cancel_request(rest.canceled[0], 102)
+    assert len(rest.liquidations) == 1
+    _assert_liquidation_request(rest.liquidations[0])
     liquidation_records = [r for r in rest.journal.records if r.role == "liquidation"]
     assert [r.state for r in liquidation_records] == [
         IntentState.SUBMISSION_PENDING,
@@ -369,11 +492,8 @@ def test_flatten_contract_cannot_be_retargeted_by_current_bar_symbol():
 
     broker.flatten(wrong_contract_bar, "supervisor_halt")
 
-    assert rest.liquidations == [{
-        "accountId": 456,
-        "contractId": 789,
-        "admin": False,
-    }]
+    assert len(rest.liquidations) == 1
+    _assert_liquidation_request(rest.liquidations[0])
 
 
 def test_repeated_flatten_does_not_duplicate_working_liquidation():
@@ -528,6 +648,8 @@ def test_entry_intent_is_pending_before_rest_and_acknowledged_before_mapping():
         ("entry", IntentState.SUBMISSION_PENDING, None),
         ("entry", IntentState.ACKNOWLEDGED, "101"),
     ]
+    assert journal.records[0].client_operation_id == rest.placed[0]["clOrdId"]
+    assert journal.records[1].client_operation_id == rest.placed[0]["clOrdId"]
 
 
 def test_preexisting_unresolved_intent_starts_recovery_latched_and_cannot_post():
@@ -629,7 +751,8 @@ def test_entry_fill_submits_protective_stop_at_frozen_price():
     broker, rest = _entered_broker()
 
     stop_bodies = [b for b in rest.placed if b.get("orderType") == "Stop"]
-    assert stop_bodies == [{
+    assert len(stop_bodies) == 1
+    assert _without_client_operation_id(stop_bodies[0], "clOrdId") == {
         "accountSpec": "DEMO123",
         "accountId": 456,
         "action": "Sell",           # opposite of the long entry
@@ -638,7 +761,7 @@ def test_entry_fill_submits_protective_stop_at_frozen_price():
         "orderType": "Stop",
         "stopPrice": 95.0,          # frozen at the entry intent's stop_price
         "isAutomated": True,
-    }]
+    }
     acks = [e for e in broker.poll_events() if isinstance(e, Acked)]
     assert [a.order_id for a in acks] == ["101", "102"]  # entry, then stop
 
@@ -705,7 +828,8 @@ def test_strategy_exit_cancels_stop_then_market_closes():
 
     broker.apply_strategy_result(bar, _session(bar), _exit_result(bar))
 
-    assert rest.canceled == [{"orderId": 102}]
+    assert len(rest.canceled) == 1
+    _assert_cancel_request(rest.canceled[0], 102)
     assert broker.execution_state == BrokerExecutionState.EXIT_PENDING_CANCEL
     cancel_records = [r for r in rest.journal.records if r.role == "cancel"]
     assert [r.state for r in cancel_records] == [
@@ -726,7 +850,8 @@ def test_strategy_exit_cancels_stop_then_market_closes():
         IntentState.ACKNOWLEDGED,
     ]
     close_bodies = [b for b in rest.placed if b["orderType"] == "Market"][1:]
-    assert close_bodies == [{
+    assert len(close_bodies) == 1
+    assert _without_client_operation_id(close_bodies[0], "clOrdId") == {
         "accountSpec": "DEMO123",
         "accountId": 456,
         "action": "Sell",
@@ -734,7 +859,7 @@ def test_strategy_exit_cancels_stop_then_market_closes():
         "orderQty": 1,
         "orderType": "Market",
         "isAutomated": True,
-    }]
+    }
     # exit fill closes the trade with the strategy's reason
     broker.ingest_raw_event(_fill_event(103, action="Sell", price=101.25,
                                         ts="2026-07-07T14:33:00Z"))
@@ -855,7 +980,8 @@ def test_flatten_while_flat_cancels_working_entry_and_late_fill_recovers():
     broker.apply_strategy_result(_bar(), _session(), _entry_result())
 
     broker.flatten(_bar(), "supervisor_halt")
-    assert rest.canceled == [{"orderId": 101}]
+    assert len(rest.canceled) == 1
+    _assert_cancel_request(rest.canceled[0], 101)
     assert rest.liquidations == []
 
     with pytest.raises(TradovateStateError, match="filled after flatten cancellation"):
@@ -871,7 +997,8 @@ def test_repeated_flatten_while_entry_cancel_pending_does_not_cancel_twice():
     broker.flatten(_bar(), "supervisor_halt")
     broker.flatten(_bar(), "supervisor_halt")
 
-    assert rest.canceled == [{"orderId": 101}]
+    assert len(rest.canceled) == 1
+    _assert_cancel_request(rest.canceled[0], 101)
 
 
 def test_entry_failure_response_is_rejected_without_key_error():
@@ -940,7 +1067,8 @@ def test_flatten_while_short_cancels_stop_then_liquidates():
 
     broker.flatten(_bar(), "daily_limit")
 
-    assert rest.canceled == [{"orderId": 102}]
+    assert len(rest.canceled) == 1
+    _assert_cancel_request(rest.canceled[0], 102)
     assert len(rest.liquidations) == 1
     # the liquidation order is registered: its fill is a KNOWN id
     liq_id = 103
@@ -976,6 +1104,49 @@ def test_realized_losses_accumulate_into_session_pnl_and_trades():
     assert broker.daily_limit_hit is False  # -601 > -1000
 
 
+def test_rehydration_does_not_double_count_locally_paired_realized_pnl():
+    broker, rest = _entered_broker(price=100.0)
+    broker.ingest_raw_event(_fill_event(
+        102,
+        action="Sell",
+        price=70.0,
+        ts="2026-07-07T14:35:00Z",
+    ))
+    snapshot = _terminal_snapshot_for_journal(
+        rest.journal,
+        daily_realized_pnl=-601.0,
+    )
+
+    broker.hydrate_account_state(snapshot)
+
+    assert broker.account_realized_pnl == pytest.approx(-601.0)
+    assert broker.process_bar_open(_bar(), _session()) == pytest.approx(-601.0)
+
+
+def test_stable_flat_rehydration_clears_terminal_liquidation_state():
+    broker, rest = _entered_broker(price=100.25)
+    broker.flatten(_bar(), "operator_flatten")
+    broker.ingest_raw_event(_fill_event(
+        103,
+        action="Sell",
+        price=99.0,
+        ts="2026-07-07T14:35:00Z",
+    ))
+    broker.hydrate_account_state(_terminal_snapshot_for_journal(
+        rest.journal,
+        daily_realized_pnl=-26.0,
+        canceled_requests=rest.canceled,
+    ))
+
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+
+    market_entries = [
+        body for body in rest.placed if body["orderType"] == "Market"
+    ]
+    assert len(market_entries) == 2
+    assert broker.execution_state == BrokerExecutionState.ENTRY_PENDING_FILL
+
+
 def test_daily_loss_breach_sets_flag_and_flattens_open_position():
     broker, rest = _entered_broker(price=100.0)
     # first round trip: -601 net realized
@@ -994,7 +1165,7 @@ def test_daily_loss_breach_sets_flag_and_flattens_open_position():
     assert session_pnl == pytest.approx(-601.0 - 500.0)
     assert broker.daily_limit_hit is True
     assert len(rest.liquidations) == 1          # DLL breach flattened
-    assert {"orderId": 104} in rest.canceled    # stop canceled first
+    assert any(body["orderId"] == 104 for body in rest.canceled)
 
 
 def test_daily_loss_breach_with_flatten_disabled_halts():
@@ -1019,7 +1190,9 @@ def test_daily_loss_breach_with_flatten_disabled_halts():
         broker.process_bar_open(losing_bar, _session(losing_bar))
 
 
-def test_session_rollover_resets_daily_limit_when_flat():
+def test_session_rollover_requires_fresh_account_hydration_when_flat():
+    from full_python.tradovate.errors import TradovateStateError
+
     broker, rest = _entered_broker(price=100.0)
     # lose big enough to breach: stop fill 60pts against = -1201 net
     broker.ingest_raw_event(_fill_event(102, action="Sell", price=40.0,
@@ -1031,10 +1204,40 @@ def test_session_rollover_resets_daily_limit_when_flat():
 
     next_day = MarketBar(timestamp_utc="2026-07-08T14:31:00Z", symbol="NQU6",
                          open=100.0, high=100.0, low=100.0, close=100.0, volume=1.0)
-    session_pnl = broker.process_bar_open(next_day, _session(next_day))
+    with pytest.raises(TradovateStateError, match="fresh broker account hydration"):
+        broker.process_bar_open(next_day, _session(next_day))
 
+    assert broker.daily_limit_hit is True
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
+def test_session_rollover_accepts_hydration_for_incoming_session():
+    broker = _new_broker(
+        _cfg(order_enabled=True, flatten_enabled=True),
+        FakeRestClient(),
+    )
+    first_day = _bar()
+    broker.process_bar_open(first_day, _session(first_day))
+    broker.note_bar_processed(first_day, _session(first_day))
+    broker._daily_limit_hit = True
+
+    next_day = MarketBar(
+        timestamp_utc="2026-07-08T14:31:00Z",
+        symbol="NQU6",
+        open=100.0,
+        high=100.0,
+        low=100.0,
+        close=100.0,
+        volume=1.0,
+    )
+    broker.hydrate_account_state(_flat_hydration_snapshot(
+        trade_date="2026-07-08",
+        daily_realized_pnl=0.0,
+    ))
+
+    assert broker.process_bar_open(next_day, _session(next_day)) == 0.0
     assert broker.daily_limit_hit is False
-    assert session_pnl == 0.0  # yesterday's realized loss does not carry over
+    assert broker.execution_state == BrokerExecutionState.NORMAL
 
 
 def test_session_rollover_with_open_position_halts():

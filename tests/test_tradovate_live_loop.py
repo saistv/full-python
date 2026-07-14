@@ -15,6 +15,7 @@ from full_python.execution.live_loop import LiveLoop
 from full_python.execution.order_intent_journal import IntentState
 from full_python.execution.supervisor import RiskSupervisor, RiskSupervisorConfig
 from full_python.models import MarketBar, OrderIntent, StrategyResult
+from full_python.tradovate.account_sync import AccountHydrationSnapshot
 from full_python.tradovate.broker import TradovateBroker, TradovateRawEvent
 from full_python.tradovate.config import DEMO_ENVIRONMENT, TradovateAdapterConfig
 
@@ -38,7 +39,9 @@ class FakeRestClient:
         return {}
 
     def order_liquidate_position(self, body):
-        assert set(body) == {"accountId", "contractId", "admin"}
+        assert set(body) == {
+            "accountId", "contractId", "admin", "isAutomated", "customTag50",
+        }
         self.liquidations.append(body)
         self._auto_id += 1
         return {"orderId": self._auto_id}
@@ -63,11 +66,14 @@ class MemoryIntentJournal:
     def has_history(self):
         return bool(self.records)
 
-    def begin(self, *, role, account_id, contract_id, body):
+    def begin(
+        self, *, role, account_id, contract_id, body, client_operation_id=None
+    ):
         record = SimpleNamespace(
             intent_id=f"live-test:{len(self.latest_by_intent) + 1}",
             role=role,
             state=IntentState.SUBMISSION_PENDING,
+            client_operation_id=client_operation_id,
         )
         self.records.append(record)
         self.latest_by_intent[record.intent_id] = record
@@ -79,6 +85,7 @@ class MemoryIntentJournal:
             intent_id=intent_id,
             role=prior.role,
             state=state,
+            client_operation_id=prior.client_operation_id,
             broker_order_id=broker_order_id,
             detail=detail,
         )
@@ -177,7 +184,21 @@ def _cfg() -> TradovateAdapterConfig:
 
 
 def _broker(rest: FakeRestClient) -> TradovateBroker:
-    return TradovateBroker(_cfg(), rest, intent_journal=MemoryIntentJournal())
+    broker = TradovateBroker(_cfg(), rest, intent_journal=MemoryIntentJournal())
+    broker.hydrate_account_state(AccountHydrationSnapshot(
+        account_id=456,
+        account_spec="DEMO123",
+        contract_id=789,
+        contract_symbol="NQU6",
+        position=None,
+        working_orders=(),
+        orders_by_id={},
+        commands_by_client_id={},
+        trade_date="2026-07-07",
+        daily_realized_pnl=0.0,
+        entry_permitted=True,
+    ))
+    return broker
 
 
 def test_losing_round_trips_trip_dll_and_supervisor_through_live_loop() -> None:
