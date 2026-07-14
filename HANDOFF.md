@@ -3,7 +3,13 @@
 You are picking up an NQ/MNQ futures trading system (Python port of a
 validated TradingView strategy). This document is self-contained: it does
 not assume any particular AI tool, skill set, or external memory. Read it
-fully before touching anything. Last updated 2026-07-13.
+fully before touching anything. Last updated 2026-07-14.
+
+> **If you read nothing else:** `main`'s exchange calendar is wrong and its
+> TradingView parity is 103/106. **Merge PR #25 first** — it restores 106/106 and
+> corrects the calendar. Then run the 3 observe sessions (the live feed is now
+> protocol-correct). The order path is NOT built and must not be enabled; see
+> `docs/audits/2026-07-13-adversarial-audit.md` for what remains open.
 
 ## 1. What this project is
 
@@ -19,6 +25,18 @@ smoother equity curve, good Sharpe, shorter losing streaks — but NOT at
 the cost of the validated core, which no analysis this year has beaten.
 
 ## 2. Non-negotiable guardrails (violating these loses money or wastes weeks)
+
+0. **The exchange calendar is DATA, not strategy.** CME equity-index futures
+   trade an abbreviated 09:30-13:00 ET session on seven US holidays (MLK,
+   Presidents, Memorial, Juneteenth, Independence, Labor, Thanksgiving) — the
+   entry window is open and the system trades them. Only Good Friday, Christmas
+   and New Year are full closures. **Declining to trade a session the market is
+   open for is a FILTER, and filters go through Gate 1 like anything else.** This
+   guardrail exists because it was violated: a cash-equity calendar shipped as a
+   "correctness fix", deleted TradingView-matched trades, and broke trade-level
+   parity (106/106 → 103/106) undetected for a day. Calendar rules are pinned to
+   `tests/fixtures/cme_equity_rth_close.json` — 1,379 weekdays of the exchange's
+   own record. Do not edit the calendar to match a belief; check the fixture.
 
 1. **Python is the performance authority.** The historical
    `$251K / PF 2.071 / 448 trades` TradingView claim is unreproducible and
@@ -78,16 +96,50 @@ Do not skip the review step, and do not merge red tests.
   it set, all pass and prove the live path reproduces the backtester
   trade-for-trade.
 
-## 5. Current state (2026-07-13)
+## 5. Current state (2026-07-14)
 
-- **Adversarial Phase 0 correctness remediation — COMPLETE.** Tradovate
-  progressive bars now finalize correctly; shadow parity requires an
-  independent bar CSV; exits wait for confirmed stop cancellation; reject and
-  unsolicited-cancel paths enter explicit recovery; holiday/early-close logic
-  is shared by sim/live; NQ/MNQ point value has one authority; RTH gaps fail
-  closed; dirty source changes run identity; stop-bar MFE/MAE is bounded and
-  flagged. See
-  `docs/decisions/2026-07-12-phase0-correctness-remediation.md`.
+- **⚠️ READ THIS FIRST: `main` currently carries a WRONG exchange calendar.**
+  The fix is on `claude/restore-research-authority` (**PR #25**) and is not yet
+  merged. Until it lands, every number produced from `main` is computed on a
+  baseline that refuses to trade seven open market sessions per year, and the
+  engine reconciles **103/106** against TradingView, not 106/106. Merge PR #25
+  before running any research on `main`.
+
+- **Exchange calendar corrected; research authority restored (PR #25).** The
+  2026-07-12 "holiday fix" applied a US **cash-equity** calendar to a **futures**
+  market. CME equity-index futures trade an abbreviated **09:30-13:00 ET** session
+  on MLK, Presidents, Memorial, Juneteenth, Independence, Labor and Thanksgiving —
+  the 09:30-10:00 entry window is fully open, with real volume. Only Good Friday,
+  Christmas and New Year are full closures. Declaring those seven days closed
+  deleted trades TradingView had actually taken (parity fell 106/106 → 103/106,
+  undetected because the golden fixture was regenerated from the engine's own
+  output) and shipped an unregistered strategy filter — worth **+$965 / 5yr**,
+  which FAILS the $10,000 materiality bar and would be rejected by Gate 1.
+  Calendar rules are now pinned to a **1,379-weekday fixture derived from the
+  exchange's own data**. Parity restored: **106/106, $0.00 entry-price delta**.
+  See `docs/decisions/2026-07-13-exchange-calendar-correction.md`.
+
+  **Standing rule:** the exchange calendar is *data*, not strategy. Declining to
+  trade a session the market is open for is a *filter*, and filters go through
+  Gate 1 like anything else.
+
+- **Live feed made protocol-correct (PR #25).** Three defects, each of which
+  silently destroys a session, all reproduced-then-fixed: forming-bar snapshots
+  were counted as "ignored events" (killing the feed at the 09:30 open, the only
+  minute this strategy trades); a single realtime snapshot arriving before the
+  historical batch discarded **all** warmup history (`eoh` was not handled
+  anywhere, though the protocol requires gather-and-sort); and `TradovateFeedError`
+  escaped the halt protocol entirely. The shadow report now asserts bar
+  **coverage** (warmup + full entry window), not merely agreement inside whatever
+  range happened to be captured — a session that could not have warmed up can no
+  longer read as PARITY.
+
+- **Phase 0 remediation (2026-07-12) — partially superseded.** Its broker work
+  (cancel-confirmed exits, reject/cancel recovery, placement-error mapping,
+  multi-contract prohibition) stands and is good. Its holiday/early-close logic
+  and its "progressive bars finalize correctly" claim were **wrong** and are
+  replaced by PR #25. See `docs/decisions/2026-07-12-phase0-correctness-remediation.md`
+  (stamped superseded).
 - **Phase 1 evidence migration — COMPLETE.** Standard reports now include
   deterministic session-block bootstrap bands and top-trade/day dependency.
   The old TradingView headline, old MNQ sizing verdict, and unsupported prop
@@ -111,7 +163,12 @@ Do not skip the review step, and do not merge red tests.
   sequence data. See `2026-07-13-phase2-intrabar-bounds.md`.
 
 - **Baseline frozen & TV-reconciled** — Python engine matches TradingView
-  106/106 trades at $0.00 entry-price delta on the 9-month anchor.
+  106/106 trades at $0.00 entry-price delta on the 9-month anchor. **This holds
+  only with PR #25's calendar; on `main` today it is 103/106.** The reconciliation
+  is now guarded by a test (`tests/test_tv_reconciliation.py`) rather than by a
+  sim-generated fixture — a golden file produced from the engine's own output can
+  never detect a sim-vs-TradingView regression, which is exactly how the last one
+  went unnoticed.
 - **5-year dataset assembled** (2021-03-16 → 2026-06-26, 1.87M bars).
 - **Gate 1 config audit COMPLETE — zero changes promoted.** Prior-vol gate
   rejected (holdout sign reversal); MA-length and S/R-interaction sweeps
@@ -157,22 +214,51 @@ merge. Start new work from `main` on a fresh feature branch.
 
 ## 6. Open tasks (ranked)
 
-1. **MNQ-first sizing is re-derived; execute the operational gates, not more
-   sizing research.** A 30-session funded pilot fails the `$500` risk gate
-   (23-27% budget-breach probability). The approved research conclusion is at
-   most a 10-session flat-1-MNQ funded operational pilot after demo observe,
-   demo order, paper, and reconciliation pass; keep a 30-session paper/shadow
-   record. See `2026-07-13-mnq-pilot-sizing.md`.
-2. **Sub-project 4 — Gate 5/6/7 operational tooling:** demo observe →
-   demo order test → paper → reconciliation → a tiny MNQ live pilot
-   ($150/day, $500 total, at most 10 funded sessions). Slice 1 (Gate 5 observe
-   runner) is BUILT — see `docs/live-observe-runbook.md`; next action is
-   running the 3 observe sessions, then the demo-order-test spec. This step
-   requires the operator's Tradovate demo credentials and network access;
-   credentials must remain local and must never be committed. Includes
-   dashboards; note that data_outage and invariant_violation halts share
-   `transition="execution_halt"` and differ by the `reason` field —
-   consumers must read `reason`.
+0. **MERGE PR #25 FIRST.** Until it lands, `main`'s calendar is wrong, its
+   TradingView parity is 103/106, and every research number on `main` is computed
+   on a baseline containing an unregistered filter. Nothing below is trustworthy
+   until this merges.
+
+1. **Run the 3 Gate 5 observe sessions — now that the feed can be trusted.**
+   `docs/live-observe-runbook.md`. Requires the operator's Tradovate demo
+   credentials and network access; credentials stay local and are never committed.
+   **A PARITY verdict now requires `--reference-bars`** (an independent bar CSV);
+   without it the report returns `BAR-UNVERIFIED` and a nonzero exit. Databento
+   publishes next day, so run the bar check post-hoc with `--report-only`. Note
+   that `data_outage` and `invariant_violation` halts share
+   `transition="execution_halt"` and differ by the `reason` field — consumers must
+   read `reason`.
+
+2. **Sub-project 5 — BUILD the order path.** This is the real remaining work and
+   it is build, not patch: the hardened order lifecycle in `tradovate/broker.py`
+   currently has **no production caller** at all. Every item blocks
+   `order_enabled`. Full evidence and executable reproductions in
+   `docs/audits/2026-07-13-adversarial-audit.md`:
+   - **account-event pump** — nothing calls `ingest_raw_event`; wire the WS
+     account feed to it (P1-6);
+   - **risk veto** — `TradovateBroker` applies no `RiskManager`, so it will submit
+     orders the simulator refuses (P1-7);
+   - **restart reconciliation** — the adapter starts flat and will double a live
+     position; GET `/position/list` + `/order/list` at startup and refuse to trade
+     until acked (P1-8);
+   - **flatten cancel-confirmation** — the discipline applied to `result.exits`
+     was never applied to `flatten()`; a stop filling during a DLL flatten can
+     leave two closing orders live (P0-2);
+   - **enforce `execution_state`** — `RECOVERY_REQUIRED` is set by the *routine*
+     DLL flatten, never cleared, and read by nothing (P1-5);
+   - persistent client order ids; broker writes FILL/TRADE to the ledger.
+
+   Exit criteria: the Failure Matrix re-run **through the pump** (not by calling
+   `ingest_raw_event` by hand, which is all the current tests do), plus a
+   kill-9-and-restart drill with an open demo position.
+
+3. **MNQ-first sizing is settled; execute the operational gates, not more sizing
+   research.** A 30-session funded pilot FAILS the `$500` risk gate (23.7%
+   budget-breach probability against a 5% bar). The approved conclusion is at most
+   a **10-session flat-1-MNQ operational pilot** after demo observe, demo order,
+   paper and reconciliation pass — judged on order integrity, not P&L. Keep a
+   30-session paper/shadow record. See `2026-07-13-mnq-pilot-sizing.md` (numbers
+   superseded by the calendar correction; the **decision stands**).
 3. **Resolve the account-level DLL open question** (see the Open
    Operational Decisions list in the adapter spec): does Tradovate/the
    prop firm enforce an account-level daily-loss limit, and does it
