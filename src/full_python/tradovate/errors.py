@@ -64,3 +64,9 @@ class TradovateStateError(TradovateError, ExecutionInvariantError):
     invariant-halt path catches it: halt WITHOUT flatten (position truth
     unknown). Never catch-and-continue this in adapter code.
     """
+
+
+class TradovateOrderRejectedError(TradovateStateError):
+    """A mutation was DEFINITIVELY rejected by the broker (journaled
+    REJECTED; no order exists). Distinct from unknown outcomes, where the
+    order may exist and a retry could double-act."""

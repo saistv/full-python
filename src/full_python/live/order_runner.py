@@ -171,17 +171,61 @@ def run_startup_flatten(
     flatten unresolved, the Slice E per-bar deadline would halt on the first
     bar regardless.)
     """
+    _drive_flatten(
+        broker, pump,
+        monotonic_clock=monotonic_clock,
+        timeout_seconds=timeout_seconds,
+        wait_seconds=wait_seconds,
+        context="startup flatten",
+    )
+
+
+def run_flatten_rundown(
+    broker: TradovateBroker,
+    pump: OrderEventPump,
+    *,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    timeout_seconds: float = 30.0,
+    wait_seconds: float = 0.25,
+) -> None:
+    """Drive an unresolved flatten to confirmation AFTER bars stop (P0-3).
+
+    The broker's one-bar deadline needs a next bar to fire; a flatten begun
+    on the final bar of a session, or during a data outage, has no further
+    driver inside LiveLoop. The session owner calls this when `run()`
+    returns (or the outage path halts) with `broker.flatten_in_progress`
+    still true: pump until the flatten confirms flat, or halt for operator
+    review at the wall-clock deadline.
+    """
+    _drive_flatten(
+        broker, pump,
+        monotonic_clock=monotonic_clock,
+        timeout_seconds=timeout_seconds,
+        wait_seconds=wait_seconds,
+        context="flatten run-down",
+    )
+
+
+def _drive_flatten(
+    broker: TradovateBroker,
+    pump: OrderEventPump,
+    *,
+    monotonic_clock: Callable[[], float],
+    timeout_seconds: float,
+    wait_seconds: float,
+    context: str,
+) -> None:
     deadline = monotonic_clock() + timeout_seconds
     while broker.flatten_in_progress:
         if monotonic_clock() > deadline:
             raise TradovateStateError(
-                "startup flatten unresolved within the deadline; "
+                f"{context} unresolved within the deadline; "
                 "halting for operator review"
             )
         pump.pump(max_wait_seconds=wait_seconds)
     # The recovery's order events belong to this driver, not to the trading
-    # session: LiveLoop's fresh order-state shadow must not replay them (a
-    # startup liquidation fill would read as a phantom short).
+    # session: a fresh order-state shadow must not replay them (a recovery
+    # liquidation fill would read as a phantom position).
     broker.poll_events()
 
 

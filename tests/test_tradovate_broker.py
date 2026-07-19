@@ -100,6 +100,7 @@ class FakeRestClient:
         self.order_place_error = None      # set to an exception to make order_place raise
         self.order_cancel_error = None     # set to an exception to make order_cancel raise
         self.liquidate_error = None
+        self.liquidation_responses = []    # queue; each call pops one when present
         self.journal = journal
         self.post_boundaries = []
 
@@ -136,6 +137,8 @@ class FakeRestClient:
             "accountId", "contractId", "admin", "isAutomated", "customTag50",
         }
         self.liquidations.append(body)
+        if self.liquidation_responses:
+            return self.liquidation_responses.pop(0)
         self._auto_id += 1
         return {"orderId": self._auto_id}
 
@@ -1930,3 +1933,25 @@ def test_review_2026_07_19_p0_2c_exit_rejection_during_flatten_emergency_flatten
     # the position has no working close; the emergency MUST liquidate
     assert len(rest.liquidations) == liq_before + 1
     assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
+def test_review_2026_07_19_p0_3_rejected_liquidation_clears_for_explicit_retry():
+    broker, rest = _entered_broker()
+    rest.liquidation_responses = [{"failureReason": "market_closed"}]
+    broker.flatten(_bar(), "daily_limit")
+
+    with pytest.raises(TradovateStateError, match="liquidation response rejected"):
+        broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+
+    assert broker.flatten_in_progress is False   # latches cleared for retry
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    assert len(rest.liquidations) == 1
+
+    # explicit operator retry is now possible and completes
+    broker.flatten(_bar(), "daily_limit")
+    assert len(rest.liquidations) == 2
+    broker.ingest_raw_event(_fill_event(
+        103, action="Sell", price=99.0, ts="2026-07-07T14:35:00Z"
+    ))
+    assert broker.position is None
+    assert broker.flatten_in_progress is False

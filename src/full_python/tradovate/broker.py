@@ -73,6 +73,7 @@ from full_python.risk.risk_manager import RiskManager
 from full_python.tradovate.config import TradovateAdapterConfig
 from full_python.tradovate.account_sync import AccountHydrationSnapshot
 from full_python.tradovate.errors import (
+    TradovateOrderRejectedError,
     TradovateConfigError,
     TradovateError,
     TradovateOrderSafetyError,
@@ -705,8 +706,19 @@ class TradovateBroker:
         }
         self._liquidation_in_flight = True
         try:
-            order_id, logical_intent_id = self._journaled_liquidation(body)
+            receipt = self._journaled_liquidation(body)
+        except TradovateOrderRejectedError:
+            # Review 2026-07-19 P0-3: definitively rejected -- no order
+            # exists. Clear the latches so a later explicit flatten retry is
+            # possible after operator review; still halt now.
+            self._liquidation_in_flight = False
+            self._pending_flatten = None
+            self._pending_flatten_liquidation_id = None
+            self._latch_recovery()
+            raise
         except TradovateStateError:
+            # Unknown outcome: the liquidation MAY exist at the broker.
+            # Keep the in-flight latch -- a retry could double-close.
             self._latch_recovery()
             raise
         except Exception as exc:
@@ -714,6 +726,12 @@ class TradovateBroker:
             raise TradovateStateError(
                 "liquidation submission outcome unknown; broker reconciliation required"
             ) from exc
+        if receipt is None:
+            # Unreachable for the liquidation role (rejection raises), kept
+            # as a defensive guard against interpreter changes.
+            self._latch_recovery()
+            raise TradovateStateError("liquidation returned no receipt")
+        order_id, logical_intent_id = receipt
         self._register_order(SubmittedOrder(
             order_id=order_id,
             role=ROLE_EXIT,
@@ -909,9 +927,12 @@ class TradovateBroker:
         }
         self._liquidation_in_flight = True
         try:
-            order_id, logical_intent_id = self._journaled_liquidation(body)
+            receipt = self._journaled_liquidation(body)
         except TradovateError:
             return
+        if receipt is None:
+            return  # definitively rejected; the halt at the call site owns it
+        order_id, logical_intent_id = receipt
         position = self._position
         self._register_order(SubmittedOrder(
             order_id=order_id,
@@ -1201,14 +1222,11 @@ class TradovateBroker:
             raise TradovateStateError(
                 "liquidation submission outcome unknown; reconciliation required"
             ) from exc
-        receipt = self._interpret_order_response(
+        return self._interpret_order_response(
             pending.intent_id,
             response,
             role="liquidation",
         )
-        if receipt is None:
-            raise TradovateStateError("liquidation response rejected")
-        return receipt
 
     def _journaled_cancel(self, order_id: str) -> None:
         journal = self._journal()
@@ -1292,7 +1310,9 @@ class TradovateBroker:
                 self._events.append(Rejected(order_id="", reason=str(reason)))
                 return None
             self._latch_recovery()
-            raise TradovateStateError(f"{role} response rejected: {reason}")
+            raise TradovateOrderRejectedError(
+                f"{role} response rejected: {reason}"
+            )
         journal.transition(
             intent_id,
             IntentState.SUBMISSION_UNKNOWN,
