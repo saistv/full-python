@@ -7,10 +7,10 @@ name = "full-python"
 version = "0.1.0"
 description = "Python-first NQ/MNQ research, replay, and eventual execution system."
 requires-python = ">=3.9"
-dependencies = [
-    "numpy>=1.26",
-    "pandas>=2.2",
-]
+# Stdlib-only by design (HANDOFF §3 working method; audit P2-4 removed the
+# declared-but-never-imported numpy/pandas). Add a runtime dependency only
+# with an actual import that uses it.
+dependencies = []
 
 [project.optional-dependencies]
 dev = [

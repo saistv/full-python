@@ -1,0 +1,32 @@
+name: CI
+
+# Closes principal-audit P2-3 (no CI). Runs the offline suite exactly as a
+# fresh operator machine would: no market data, no credentials, no network
+# fixtures. Operator-data tests skip themselves without FULL_PYTHON_BASELINE_DATA /
+# FULL_PYTHON_TV_EXPORT, so a green run here is the offline executable spec,
+# not broker or TV parity evidence (HANDOFF §4).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the operator floor (guardrailed; the local machine runs 3.9.6).
+        # 3.12 guards against silent forward-compat rot in the stdlib-only code.
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package and test runner
+        run: python -m pip install -e ".[dev]"
+      - name: Run offline suite
+        run: python -m pytest -q
