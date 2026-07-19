@@ -77,6 +77,23 @@ def test_authorize_sends_token_frame_and_accepts_success_response() -> None:
     assert transport.sent_frames == ["authorize\n0\n\ntoken"]
 
 
+def test_client_can_send_required_application_heartbeat() -> None:
+    transport = FakeWebSocketTransport([])
+    client = TradovateWebSocketClient(transport)
+
+    client.send_heartbeat()
+
+    assert transport.sent_frames == ["[]"]
+
+
+def test_client_exposes_transport_activity_when_available() -> None:
+    transport = FakeWebSocketTransport([])
+    transport.last_received_monotonic = 12.5
+    client = TradovateWebSocketClient(transport)
+
+    assert client.last_transport_activity == 12.5
+
+
 def test_request_sends_next_id_correlates_response_and_returns_payload() -> None:
     transport = FakeWebSocketTransport(
         ['a[{"s":200,"i":1,"d":{"historicalId":5,"realtimeId":6}}]']

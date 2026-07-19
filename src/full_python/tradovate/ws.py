@@ -80,6 +80,16 @@ class TradovateWebSocketClient:
         self._raise_for_status(response, request_id)
         return response.get("d")
 
+    def send_heartbeat(self) -> None:
+        self.transport.send("[]")
+
+    @property
+    def last_transport_activity(self) -> Optional[float]:
+        value = getattr(self.transport, "last_received_monotonic", None)
+        if value is None:
+            return None
+        return float(value)
+
     def receive_event(self, timeout_seconds: float) -> Optional[dict]:
         if self._pending_events:
             return self._pending_events.popleft()

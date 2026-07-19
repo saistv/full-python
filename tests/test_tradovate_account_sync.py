@@ -6,7 +6,10 @@ from datetime import date
 import pytest
 
 from full_python.execution.order_intent_journal import IntentState, OrderIntentJournal
-from full_python.tradovate.account_sync import TradovateAccountHydrator
+from full_python.tradovate.account_sync import (
+    REQUIRED_SYNC_ENTITY_TYPES,
+    TradovateAccountHydrator,
+)
 from full_python.tradovate.broker import BrokerExecutionState, TradovateBroker
 from full_python.tradovate.config import DEMO_ENVIRONMENT, TradovateAdapterConfig
 from full_python.tradovate.errors import TradovateStateError
@@ -127,7 +130,14 @@ def _hydrate(values=None):
 def test_exact_stable_flat_snapshot_is_requested_and_normalized():
     snapshot, ws, _rest = _hydrate()
 
-    assert ws.requests == [("user/syncrequest", {"users": [42]})]
+    assert ws.requests == [(
+        "user/syncrequest",
+        {
+            "splitResponses": True,
+            "accounts": [456],
+            "entityTypes": list(REQUIRED_SYNC_ENTITY_TYPES),
+        },
+    )]
     assert snapshot.account_id == 456
     assert snapshot.contract_id == 789
     assert snapshot.position is None
@@ -135,6 +145,58 @@ def test_exact_stable_flat_snapshot_is_requested_and_normalized():
     assert snapshot.trade_date == "2026-07-07"
     assert snapshot.daily_realized_pnl == -25.0
     assert snapshot.entry_permitted is True
+
+
+def test_hydration_result_exposes_complete_detached_sync_state():
+    values = _collections()
+    ws = FakeWebSocket(values)
+    hydrator = TradovateAccountHydrator(
+        _config(), user_id=42, expected_trade_date=date(2026, 7, 7),
+        websocket=ws, rest_client=NoMutationRest(values),
+    )
+
+    result = hydrator.hydrate_with_state()
+    values["accounts"][0]["name"] = "MUTATED"
+
+    assert result.snapshot.entry_permitted is True
+    assert result.collections["accounts"] == ({
+        "id": 456,
+        "name": "DEMO123",
+        "closed": False,
+        "readonly": False,
+        "futuresDisabled": False,
+    },)
+
+
+def test_existing_sync_state_can_be_reverified_against_fresh_rest():
+    values = _collections()
+    rest = NoMutationRest(values)
+    hydrator = TradovateAccountHydrator(
+        _config(), user_id=42, expected_trade_date=date(2026, 7, 7),
+        websocket=FakeWebSocket(values), rest_client=rest,
+    )
+    initial = hydrator.hydrate_with_state()
+
+    snapshot = hydrator.verify_sync_state(initial.collections)
+
+    assert snapshot == initial.snapshot
+
+
+def test_reverification_detects_rest_drift():
+    values = _collections()
+    rest = NoMutationRest(values)
+    hydrator = TradovateAccountHydrator(
+        _config(), user_id=42, expected_trade_date=date(2026, 7, 7),
+        websocket=FakeWebSocket(values), rest_client=rest,
+    )
+    initial = hydrator.hydrate_with_state()
+    rest.values = _collections(positions=[{
+        "id": 701, "accountId": 456, "contractId": 789,
+        "netPos": 1, "netPrice": 20100.25,
+    }])
+
+    with pytest.raises(TradovateStateError, match="positions disagree"):
+        hydrator.verify_sync_state(initial.collections)
 
 
 def test_order_enabled_broker_starts_closed_then_exact_flat_hydration_opens(tmp_path):
@@ -149,6 +211,28 @@ def test_order_enabled_broker_starts_closed_then_exact_flat_hydration_opens(tmp_
     assert broker.execution_state == BrokerExecutionState.NORMAL
     assert broker.position is None
     assert broker.account_realized_pnl == -25.0
+
+
+def test_explicit_account_state_invalidation_closes_hydrated_broker(tmp_path):
+    snapshot, _ws, rest = _hydrate()
+    journal = OrderIntentJournal(tmp_path / "orders.jsonl", run_id="run-a")
+    broker = TradovateBroker(_config(), rest, intent_journal=journal)
+    broker.hydrate_account_state(snapshot)
+
+    broker.invalidate_account_state("user sync property update")
+
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    assert broker.account_realized_pnl == 0.0
+
+
+def test_account_state_invalidation_requires_nonblank_reason(tmp_path):
+    snapshot, _ws, rest = _hydrate()
+    journal = OrderIntentJournal(tmp_path / "orders.jsonl", run_id="run-a")
+    broker = TradovateBroker(_config(), rest, intent_journal=journal)
+    broker.hydrate_account_state(snapshot)
+
+    with pytest.raises(TradovateStateError, match="reason"):
+        broker.invalidate_account_state("  ")
 
 
 @pytest.mark.parametrize(

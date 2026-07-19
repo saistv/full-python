@@ -221,6 +221,26 @@ def test_receive_skips_sockjs_open_and_answers_heartbeat() -> None:
     assert frames == [(OPCODE_TEXT, b"[]")]  # heartbeat answered, hidden
 
 
+def test_receive_records_activity_for_every_complete_inbound_frame() -> None:
+    class ScriptedClock:
+        def __init__(self):
+            self.values = iter([0.0, 0.0, 1.0, 1.0, 2.0])
+
+        def __call__(self):
+            return next(self.values)
+
+    conn = WebSocketConnection(
+        FakeSocket([
+            _server_text("h"),
+            _server_text('a[{"e":"chart","d":{}}]'),
+        ]),
+        monotonic_clock=ScriptedClock(),
+    )
+
+    assert conn.receive(5.0) == 'a[{"e":"chart","d":{}}]'
+    assert conn.last_received_monotonic == 2.0
+
+
 def test_receive_answers_ping_with_pong_same_payload() -> None:
     ping = bytes([0x89, 0x02]) + b"hi"
     conn = WebSocketConnection(FakeSocket([ping, _server_text("a[]")]))
