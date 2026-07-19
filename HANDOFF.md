@@ -332,6 +332,17 @@ Do not skip the review step, and do not merge red tests.
   boundary). The stable-flat D2 runtime remains startup hydrator/flat-idle
   verifier; during trades the broker is authoritative and the pump feeds it.
   See `docs/decisions/2026-07-19-order-pump-and-veto.md`.
+- **Startup inherited-state flatten (P1-8) — IMPLEMENTED OFFLINE**
+  (2026-07-19). **Operator policy: FLATTEN, never adopt.** `startup_flatten`
+  routes an inherited position/working-order set through the Slice E
+  confirmed-flatten protocol (cancels confirm before liquidation; flat plus
+  no working orders verified; races and failures halt latched). No strategy
+  trade is fabricated; resolution stays RECOVERY_REQUIRED and entries reopen
+  only through a fresh stable-flat hydration. `run_startup_flatten` drives
+  it via the OrderEventPump with a wall-clock deadline before LiveLoop
+  starts. P1-8's doubling hazard was already structurally closed by D1
+  stable-flat startup; this adds the recovery flow. See
+  `docs/decisions/2026-07-19-startup-flatten.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -344,15 +355,15 @@ feature branch.
    order.** Slices D1-D2 provide stable-flat startup plus incremental
    invalidation/reconciliation; Slice E the confirmed flatten and
    calendar-driven session-close backstop; Slice G the composition root,
-   account-event pump, and the shared sim/live risk veto. Next implement
-   restart/inherited-position recovery (P1-8), partial quantities,
-   unknown-outcome recovery, and the complete adversarial failure matrix
-   (Slice F); fix the observe runner's `accounts[0]` (P3-4 is closed only in
-   the order runner). Capture the real DEMO split-sync envelope and prove
-   heartbeat/reconnect behavior before any order session. P0-04's REST leg,
-   P0-05, P1-01, P2-5, and the broader P1-02 remain open. See the 2026-07-14
-   broker-safe execution design and the 2026-07-19 order-pump-and-veto
-   decision.
+   account-event pump, and the shared sim/live risk veto; P1-8's startup
+   flatten closes the restart-recovery gap (operator policy: FLATTEN).
+   Remaining offline: partial quantities, unknown-outcome recovery, and the
+   complete adversarial failure matrix (Slice F); fix the observe runner's
+   `accounts[0]` (P3-4 is closed only in the order runner). Capture the real
+   DEMO split-sync envelope and prove heartbeat/reconnect behavior before
+   any order session. P0-04's REST leg, P0-05, P1-01, P2-5, and the broader
+   P1-02 remain open. See the 2026-07-14 broker-safe execution design and
+   the 2026-07-19 order-pump-and-veto + startup-flatten decisions.
 2. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
    code blocker is fixed; now execute the outage/disconnect drills in
    `docs/live-observe-runbook.md`, then preserve three nonconsecutive clean
