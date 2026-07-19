@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
 
 from full_python.execution.live_loop import LiveLoop
+from full_python.execution.state_machine import ExecutionInvariantError
 from full_python.execution.supervisor import RiskSupervisor
 from full_python.risk.limits import RiskLimits
 from full_python.tradovate.broker import TradovateBroker
@@ -136,7 +137,15 @@ def build_order_session(
     )
 
     def maintenance() -> None:
-        pump.pump()
+        try:
+            pump.pump()
+        except ExecutionInvariantError:
+            raise
+        except Exception as exc:
+            # Route pump/broker failures into LiveLoop's invariant-halt path:
+            # durable execution_halt ledger entry, halt WITHOUT flatten
+            # (position state unknown -- guardrail 5's invariant arm).
+            raise ExecutionInvariantError(str(exc)) from exc
 
     bar_source = bar_source_factory(maintenance)
     loop = LiveLoop(bar_source, strategy, broker, supervisor, ledger)
@@ -168,6 +177,10 @@ def run_startup_flatten(
                 "halting for operator review"
             )
         pump.pump(max_wait_seconds=wait_seconds)
+    # The recovery's order events belong to this driver, not to the trading
+    # session: LiveLoop's fresh order-state shadow must not replay them (a
+    # startup liquidation fill would read as a phantom short).
+    broker.poll_events()
 
 
 def main(argv: Optional[list] = None) -> int:

@@ -47,6 +47,11 @@ Note: a second run on the same day writes `events-2.jsonl` / `report-2.html` (an
 - `account_risk.json` — GET-only risk probe (autoLiq = the DLL evidence)
 - `report.html` — shadow parity report (verdict, signals, halts, sim info)
 
+> Account selection (audit P3-4): with one demo account visible the runner
+> uses it; with several, export `TRADOVATE_ACCOUNT_ID` and
+> `TRADOVATE_ACCOUNT_SPEC` to choose explicitly -- the runner refuses to guess.
+
+
 ## Gate 5 pass criteria (pre-registered in the spec)
 
 3 clean sessions, each with: a **PARITY** verdict; every disconnect/outage

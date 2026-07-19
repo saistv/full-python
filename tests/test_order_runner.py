@@ -112,6 +112,11 @@ class FakeFlattenBroker:
     def __init__(self, resolve_after_pumps):
         self.remaining = resolve_after_pumps
         self.flatten_in_progress = True
+        self.drained = 0
+
+    def poll_events(self):
+        self.drained += 1
+        return []
 
 
 class CountingPump:
@@ -165,3 +170,27 @@ def test_run_startup_flatten_deadline_halts():
             broker, pump, monotonic_clock=clock, timeout_seconds=30.0
         )
     assert pump.calls == 1
+
+
+def test_select_observe_account_explicit_single_and_ambiguous():
+    from full_python.live.order_runner import require_account  # noqa: F401
+    from full_python.live.runner import select_observe_account
+
+    accounts = [{"id": 456, "name": "DEMO123"}, {"id": 999, "name": "OTHER"}]
+
+    picked = select_observe_account(
+        accounts, account_id="456", account_spec="DEMO123"
+    )
+    assert picked == {"id": 456, "name": "DEMO123"}
+
+    only = select_observe_account([{"id": 7, "name": "SOLO"}])
+    assert only == {"id": 7, "name": "SOLO"}
+
+    with pytest.raises(SystemExit, match="multiple Tradovate accounts"):
+        select_observe_account(accounts)
+    with pytest.raises(SystemExit, match="BOTH"):
+        select_observe_account(accounts, account_id="456")
+    with pytest.raises(SystemExit, match="no Tradovate accounts"):
+        select_observe_account([])
+    with pytest.raises(TradovateStateError, match="named"):
+        select_observe_account(accounts, account_id="456", account_spec="WRONG")
