@@ -477,6 +477,8 @@ def test_flatten_enabled_with_position_calls_liquidate_position():
 
     assert len(rest.canceled) == 1
     _assert_cancel_request(rest.canceled[0], 102)
+    assert rest.liquidations == []  # staged (P0-2): cancel confirms first
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
     assert len(rest.liquidations) == 1
     _assert_liquidation_request(rest.liquidations[0])
     liquidation_records = [r for r in rest.journal.records if r.role == "liquidation"]
@@ -491,6 +493,7 @@ def test_flatten_contract_cannot_be_retargeted_by_current_bar_symbol():
     wrong_contract_bar = replace(_bar(), symbol="NQZ6")
 
     broker.flatten(wrong_contract_bar, "supervisor_halt")
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
 
     assert len(rest.liquidations) == 1
     _assert_liquidation_request(rest.liquidations[0])
@@ -500,6 +503,10 @@ def test_repeated_flatten_does_not_duplicate_working_liquidation():
     broker, rest = _entered_broker()
 
     broker.flatten(_bar(), "supervisor_halt")
+    broker.flatten(_bar(), "supervisor_halt")
+
+    assert len(rest.canceled) == 1  # staged: one cancel, no duplicate flatten
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
     broker.flatten(_bar(), "supervisor_halt")
 
     assert len(rest.liquidations) == 1
@@ -516,8 +523,9 @@ def test_unknown_liquidation_outcome_cannot_retry():
     broker, rest = _entered_broker()
     rest.liquidate_error = TradovateRequestError("timeout_after_acceptance")
 
+    broker.flatten(_bar(), "supervisor_halt")
     with pytest.raises(TradovateStateError, match="outcome unknown"):
-        broker.flatten(_bar(), "supervisor_halt")
+        broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
     broker.flatten(_bar(), "supervisor_halt")
 
     assert len(rest.liquidations) == 0
@@ -1069,6 +1077,7 @@ def test_flatten_while_short_cancels_stop_then_liquidates():
 
     assert len(rest.canceled) == 1
     _assert_cancel_request(rest.canceled[0], 102)
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
     assert len(rest.liquidations) == 1
     # the liquidation order is registered: its fill is a KNOWN id
     liq_id = 103
@@ -1126,6 +1135,7 @@ def test_rehydration_does_not_double_count_locally_paired_realized_pnl():
 def test_stable_flat_rehydration_clears_terminal_liquidation_state():
     broker, rest = _entered_broker(price=100.25)
     broker.flatten(_bar(), "operator_flatten")
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
     broker.ingest_raw_event(_fill_event(
         103,
         action="Sell",
@@ -1164,8 +1174,10 @@ def test_daily_loss_breach_sets_flag_and_flattens_open_position():
 
     assert session_pnl == pytest.approx(-601.0 - 500.0)
     assert broker.daily_limit_hit is True
-    assert len(rest.liquidations) == 1          # DLL breach flattened
     assert any(body["orderId"] == 104 for body in rest.canceled)
+    assert rest.liquidations == []              # staged (P0-2): cancel confirms first
+    broker.ingest_raw_event(_cancel_event(104))
+    assert len(rest.liquidations) == 1          # DLL breach flattened after confirmation
 
 
 def test_daily_loss_breach_with_flatten_disabled_halts():
@@ -1405,3 +1417,202 @@ def test_flat_position_snapshot_while_flat_passes():
         kind="position",
         data={"accountId": 456, "contractId": 789, "side": "flat", "qty": 0},
     ))
+
+
+# ---------------------------------------------------------------------------
+# Slice E: confirmed flatten protocol and session-close backstop
+# (P0-2, P0-04, P1-5, P0-03 —
+#  docs/decisions/2026-07-19-confirmed-flatten-session-boundaries.md)
+# ---------------------------------------------------------------------------
+
+
+def _cancel_event(order_id):
+    return TradovateRawEvent(kind="cancel", data={"orderId": order_id})
+
+
+def _bar_at(ts, **overrides):
+    return replace(_bar(), timestamp_utc=ts, **overrides)
+
+
+def _session_with_close(bar, *, minutes, close):
+    return replace(
+        _session(bar),
+        minutes_from_midnight_et=minutes,
+        rth_close_minutes_et=close,
+    )
+
+
+def test_flatten_with_working_stop_requests_cancel_and_defers_liquidation():
+    broker, rest = _entered_broker()
+
+    broker.flatten(_bar(), "daily_limit")
+
+    assert len(rest.canceled) == 1
+    _assert_cancel_request(rest.canceled[0], 102)
+    assert rest.liquidations == []
+    assert broker.execution_state == BrokerExecutionState.FLATTEN_PENDING_CANCEL
+
+
+def test_flatten_cancel_failure_halts_and_keeps_stop_protection():
+    from full_python.tradovate.errors import TradovateRequestError, TradovateStateError
+
+    broker, rest = _entered_broker()
+    rest.order_cancel_error = TradovateRequestError("cancel refused")
+
+    with pytest.raises(TradovateStateError, match="could not cancel"):
+        broker.flatten(_bar(), "daily_limit")
+
+    assert rest.liquidations == []
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
+def test_confirmed_cancel_then_liquidation_then_flat_ends_normal():
+    broker, rest = _entered_broker()
+    broker.flatten(_bar(), "daily_limit")
+
+    broker.ingest_raw_event(_cancel_event(102))
+
+    assert len(rest.liquidations) == 1
+    _assert_liquidation_request(rest.liquidations[0])
+    assert broker.execution_state == BrokerExecutionState.FLATTEN_PENDING_FILL
+
+    broker.ingest_raw_event(
+        _fill_event(103, action="Sell", price=99.0, ts="2026-07-07T14:33:00Z")
+    )
+
+    assert broker.position is None
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+    feedback = broker.poll_strategy_feedback()
+    assert any(
+        getattr(item, "exit_reason", None) == "daily_limit" for item in feedback
+    )
+
+
+def test_stop_fill_during_pending_cancel_never_double_closes():
+    # P0-2's exact race: the protective stop fills before the cancel lands.
+    broker, rest = _entered_broker()
+    broker.flatten(_bar(), "daily_limit")
+
+    broker.ingest_raw_event(
+        _fill_event(102, action="Sell", price=95.0, ts="2026-07-07T14:33:00Z")
+    )
+
+    assert rest.liquidations == []  # liquidation never submitted: no reversal
+    assert broker.position is None
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+
+
+def test_flatten_liquidation_rejection_latches_without_second_liquidation():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, rest = _entered_broker()
+    broker.flatten(_bar(), "daily_limit")
+    broker.ingest_raw_event(_cancel_event(102))
+    assert len(rest.liquidations) == 1
+
+    with pytest.raises(TradovateStateError, match="rejected"):
+        broker.ingest_raw_event(TradovateRawEvent(kind="reject", data={
+            "orderId": 103, "reason": "liquidation rejected",
+        }))
+
+    assert len(rest.liquidations) == 1  # no emergency re-attempt
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
+def test_flatten_resolution_with_residual_working_order_latches():
+    from full_python.tradovate.broker import ROLE_EXIT, SubmittedOrder
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, rest = _entered_broker()
+    broker.flatten(_bar(), "daily_limit")
+    broker.ingest_raw_event(_cancel_event(102))
+    # Adversarial injection: an unknown working order appears before the
+    # liquidation fill. Resolution must refuse to declare the account flat.
+    broker._orders["999"] = SubmittedOrder(
+        order_id="999", role=ROLE_EXIT, side="sell", quantity=1, symbol="NQU6",
+    )
+
+    with pytest.raises(TradovateStateError, match="residual working order"):
+        broker.ingest_raw_event(
+            _fill_event(103, action="Sell", price=99.0, ts="2026-07-07T14:33:00Z")
+        )
+
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
+def test_unresolved_flatten_on_a_later_bar_halts():
+    from full_python.tradovate.errors import TradovateStateError
+
+    broker, _rest = _entered_broker()
+    broker.flatten(_bar(), "daily_limit")  # cancel requested, never confirmed
+
+    later = _bar_at("2026-07-07T14:33:00Z")
+    with pytest.raises(TradovateStateError, match="unresolved flatten"):
+        broker.process_bar_open(later, _session(later))
+
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
+def test_dll_breach_runs_staged_flatten_and_blocks_entries_after_normal():
+    broker, rest = _entered_broker()  # long 1 @ 100.25, DLL $1000, $20/pt
+    adverse = _bar_at(
+        "2026-07-07T14:33:00Z", open=51.0, high=51.0, low=49.0, close=50.0
+    )
+
+    broker.process_bar_open(adverse, _session(adverse))
+
+    assert len(rest.canceled) == 1 and rest.liquidations == []
+    broker.ingest_raw_event(_cancel_event(102))
+    assert len(rest.liquidations) == 1
+    broker.ingest_raw_event(
+        _fill_event(103, action="Sell", price=50.0, ts="2026-07-07T14:34:00Z")
+    )
+
+    assert broker.position is None
+    # P1-5: a routine confirmed flatten ends NORMAL, not RECOVERY_REQUIRED...
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+    # ...while the DLL latch still blocks entries for the session.
+    broker.poll_events()
+    broker.apply_strategy_result(adverse, _session(adverse), _entry_result(adverse))
+    assert broker.poll_events() == [
+        Rejected(order_id="", reason="entry_not_stable_flat")
+    ]
+
+
+def test_early_close_day_triggers_backstop_flatten_at_close_minus_one():
+    broker, rest = _entered_broker()
+    bar = _bar_at("2026-07-07T17:14:00Z")
+    session = _session_with_close(bar, minutes=13 * 60 + 14, close=13 * 60 + 15)
+
+    broker.process_bar_open(bar, session)
+
+    assert len(rest.canceled) == 1  # staged flatten began: stop cancel requested
+    assert broker.execution_state == BrokerExecutionState.FLATTEN_PENDING_CANCEL
+
+
+def test_normal_day_triggers_backstop_flatten_at_1559():
+    broker, rest = _entered_broker()
+    bar = _bar_at("2026-07-07T19:59:00Z")
+    session = _session(bar)
+    assert session.minutes_from_midnight_et == 15 * 60 + 59
+    assert session.rth_close_minutes_et == 16 * 60
+
+    broker.process_bar_open(bar, session)
+
+    assert len(rest.canceled) == 1
+    assert broker.execution_state == BrokerExecutionState.FLATTEN_PENDING_CANCEL
+
+
+def test_backstop_does_not_fire_before_close_minus_one_or_when_flat():
+    broker, rest = _entered_broker()
+    early = _bar_at("2026-07-07T19:58:00Z")
+    broker.process_bar_open(early, _session(early))
+    assert rest.canceled == [] and rest.liquidations == []
+
+    flat_rest = FakeRestClient()
+    flat_broker = _new_broker(
+        _cfg(order_enabled=True, flatten_enabled=True), flat_rest
+    )
+    late = _bar_at("2026-07-07T19:59:00Z")
+    flat_broker.process_bar_open(late, _session(late))
+    assert flat_rest.canceled == [] and flat_rest.liquidations == []
