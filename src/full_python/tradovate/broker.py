@@ -90,6 +90,10 @@ class TradovateRawEvent:
 ROLE_ENTRY = "entry"
 ROLE_PROTECTIVE_STOP = "protective_stop"
 ROLE_EXIT = "exit"
+# Working orders inherited from a previous run (P1-8). Never adopted for
+# trading: they exist only so the startup flatten can cancel them and
+# recognize their late fills.
+ROLE_INHERITED = "inherited"
 
 
 class BrokerExecutionState(str, Enum):
@@ -214,8 +218,7 @@ class TradovateBroker:
         self._account_realized_pnl = 0.0
         self._hydrated_trade_date: Optional[str] = None
 
-    def hydrate_account_state(self, snapshot: AccountHydrationSnapshot) -> None:
-        """Open the entry latch only from exact, reconciled stable-flat truth."""
+    def _require_snapshot_identity(self, snapshot: AccountHydrationSnapshot) -> None:
         if snapshot.account_id != self._config.account_id:
             self._latch_recovery()
             raise TradovateStateError("hydration snapshot account identity mismatch")
@@ -228,6 +231,10 @@ class TradovateBroker:
         if snapshot.contract_symbol != self._active_contract_symbol():
             self._latch_recovery()
             raise TradovateStateError("hydration snapshot contract symbol mismatch")
+
+    def hydrate_account_state(self, snapshot: AccountHydrationSnapshot) -> None:
+        """Open the entry latch only from exact, reconciled stable-flat truth."""
+        self._require_snapshot_identity(snapshot)
 
         local_realized = self._fill_ledger.realized_session_pnl(
             snapshot.trade_date
@@ -594,9 +601,55 @@ class TradovateBroker:
             raise TradovateOrderSafetyError("flatten_disabled")
         if self._pending_flatten is not None or self._liquidation_in_flight:
             return
-        working = [o for o in self._orders.values() if o.status == "working"]
-        if self._position is None and not working:
+        if self._position is None and not self._has_working_orders():
             return  # routine no-op: nothing to cancel, nothing to close
+        self._begin_flatten(reason, requested_on_bar=bar.timestamp_utc)
+
+    @property
+    def flatten_in_progress(self) -> bool:
+        return self._pending_flatten is not None or self._liquidation_in_flight
+
+    def startup_flatten(
+        self, snapshot: AccountHydrationSnapshot, *, timestamp_utc: str
+    ) -> None:
+        """Close inherited state via the confirmed-flatten protocol (P1-8).
+
+        Operator policy (2026-07-19): an inherited position or working order
+        set is FLATTENED, never adopted for trading. Resolution deliberately
+        stays RECOVERY_REQUIRED; entries reopen only through a fresh
+        stable-flat hydration against new sync+REST agreement.
+        """
+        if not self._config.flatten_enabled:
+            raise TradovateStateError(
+                "inherited state requires flatten_enabled for the startup flatten"
+            )
+        self._require_snapshot_identity(snapshot)
+        if self._pending_flatten is not None or self._liquidation_in_flight:
+            return
+        if snapshot.position is None and not snapshot.working_orders:
+            raise TradovateStateError(
+                "startup flatten called for a stable-flat snapshot; "
+                "use hydrate_account_state"
+            )
+        for row in snapshot.working_orders:
+            order_id = str(row.get("id"))
+            if order_id in self._orders:
+                continue
+            self._register_order(SubmittedOrder(
+                order_id=order_id,
+                role=ROLE_INHERITED,
+                side=str(row.get("action") or "").lower(),
+                quantity=int(row.get("orderQty") or 0),
+                symbol=self._active_contract_symbol(),
+                reason="inherited",
+            ))
+        self._position = snapshot.position
+        self._begin_flatten(
+            "inherited_state_flatten", requested_on_bar=timestamp_utc
+        )
+
+    def _begin_flatten(self, reason: str, *, requested_on_bar: str) -> None:
+        working = [o for o in self._orders.values() if o.status == "working"]
         to_cancel = []
         for order in working:
             if order.order_id in self._requested_cancel_ids:
@@ -618,7 +671,7 @@ class TradovateBroker:
         self._pending_flatten = PendingFlatten(
             reason=reason,
             awaiting_cancel_ids=frozenset(to_cancel),
-            requested_on_bar=bar.timestamp_utc,
+            requested_on_bar=requested_on_bar,
         )
         if to_cancel:
             self._execution_state = BrokerExecutionState.FLATTEN_PENDING_CANCEL
@@ -683,6 +736,10 @@ class TradovateBroker:
             )
         if not self._recovery_required:
             self._execution_state = BrokerExecutionState.NORMAL
+        else:
+            # A latched resolve (the P1-8 startup flatten) must not leave a
+            # stale FLATTEN_* state behind.
+            self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
 
     def poll_events(self) -> list[BrokerEvent]:
         events = list(self._events)
@@ -957,6 +1014,14 @@ class TradovateBroker:
         self._position = None
         if not self._recovery_required:
             self._execution_state = BrokerExecutionState.NORMAL
+        if not self._fill_ledger.has_open_leg:
+            # Only an inherited position (P1-8 startup flatten) can close
+            # without an open ledger leg: no strategy trade exists for it and
+            # none is fabricated. Realized P&L re-enters through the
+            # account's own records at the next stable-flat hydration.
+            if self._pending_flatten is not None:
+                self._resolve_pending_flatten()
+            return
         trade = self._fill_ledger.close_leg(
             price=fill.price,
             timestamp_utc=fill.timestamp_utc,

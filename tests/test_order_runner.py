@@ -106,3 +106,62 @@ def test_default_risk_limits_match_production_envelope():
     assert DEFAULT_RISK_LIMITS == RiskLimits(
         max_contracts=1, flatten_minutes_et=959, rth_entries_only=True
     )
+
+
+class FakeFlattenBroker:
+    def __init__(self, resolve_after_pumps):
+        self.remaining = resolve_after_pumps
+        self.flatten_in_progress = True
+
+
+class CountingPump:
+    def __init__(self, broker, clock=None, advance=0.0):
+        self.broker = broker
+        self.calls = 0
+        self.clock = clock
+        self.advance = advance
+
+    def pump(self, max_wait_seconds=0.0):
+        self.calls += 1
+        if self.clock is not None:
+            self.clock.value += self.advance
+        self.broker.remaining -= 1
+        if self.broker.remaining <= 0:
+            self.broker.flatten_in_progress = False
+        return 0
+
+
+class ManualClock:
+    def __init__(self, value=0.0):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+
+def test_run_startup_flatten_pumps_until_resolved():
+    from full_python.live.order_runner import run_startup_flatten
+
+    broker = FakeFlattenBroker(resolve_after_pumps=3)
+    pump = CountingPump(broker)
+
+    run_startup_flatten(
+        broker, pump, monotonic_clock=ManualClock(), timeout_seconds=30.0
+    )
+
+    assert pump.calls == 3
+    assert broker.flatten_in_progress is False
+
+
+def test_run_startup_flatten_deadline_halts():
+    from full_python.live.order_runner import run_startup_flatten
+
+    broker = FakeFlattenBroker(resolve_after_pumps=10_000)
+    clock = ManualClock()
+    pump = CountingPump(broker, clock=clock, advance=31.0)
+
+    with pytest.raises(TradovateStateError, match="deadline"):
+        run_startup_flatten(
+            broker, pump, monotonic_clock=clock, timeout_seconds=30.0
+        )
+    assert pump.calls == 1

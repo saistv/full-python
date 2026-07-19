@@ -143,6 +143,33 @@ def build_order_session(
     return OrderSession(loop=loop, pump=pump, broker=broker)
 
 
+def run_startup_flatten(
+    broker: TradovateBroker,
+    pump: OrderEventPump,
+    *,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    timeout_seconds: float = 30.0,
+    wait_seconds: float = 0.5,
+) -> None:
+    """Drive an in-progress startup flatten to confirmed resolution (P1-8).
+
+    Operator policy (2026-07-19): inherited state is flattened, never traded.
+    Called after `broker.startup_flatten(...)` and BEFORE LiveLoop starts;
+    pumps account events until the flatten confirms flat or the wall-clock
+    deadline halts for operator review. (If LiveLoop ever started with the
+    flatten unresolved, the Slice E per-bar deadline would halt on the first
+    bar regardless.)
+    """
+    deadline = monotonic_clock() + timeout_seconds
+    while broker.flatten_in_progress:
+        if monotonic_clock() > deadline:
+            raise TradovateStateError(
+                "startup flatten unresolved within the deadline; "
+                "halting for operator review"
+            )
+        pump.pump(max_wait_seconds=wait_seconds)
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m full_python.live.order_runner",
