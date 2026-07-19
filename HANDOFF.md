@@ -4,13 +4,18 @@ You are picking up an NQ/MNQ futures trading system (Python port of a
 historically profitable TradingView strategy). This document is self-contained:
 it does
 not assume any particular AI tool, skill set, or external memory. Read it
-fully before touching anything. Last updated 2026-07-15.
+fully before touching anything. Last updated 2026-07-19.
 
-> **Start here.** PR #25's exchange-calendar/feed correction and PR #26's
-> stable-flat account hydration are merged on `main`. The current broker/order
-> work adds Slice D2's incremental account-sync runtime, disconnect/liveness
-> invalidation, token-client replacement, and periodic REST reconciliation.
-> This is still offline protocol evidence. Nothing may trade live: see
+> **Start here.** The Milestone 2 broker redesign slices A-D2 are landed
+> (PR #22-#27; D2 = the fail-closed incremental account-sync runtime with
+> disconnect/liveness invalidation, token-client replacement, and periodic
+> REST reconciliation). The July 17-18 research burst is recorded (PR #28):
+> the permanent automation-worthiness standard is active, and all three new
+> pre-registered candidates (opening-auction v1, level-retest v2,
+> overnight-displacement v3) were REJECTED at frozen T1 with rescue
+> forbidden. GitHub Actions now runs the offline suite on every push/PR
+> (audit P2-3 closed; P2-4 phantom deps removed). Everything remains
+> offline protocol evidence. Nothing may trade live: see
 > `docs/audits/2026-07-13-adversarial-audit.md` for the open P0/P1 backlog.
 
 ## 1. What this project is
@@ -120,9 +125,13 @@ Do not skip the review step, and do not merge red tests.
   Calendar rules are now pinned to **1,379 weekdays of the exchange's own record**
   (`tests/fixtures/cme_equity_rth_close.json`). Parity restored: **106/106, $0.00
   entry-price delta**, and now guarded by `tests/test_tv_reconciliation.py` rather
-  than by a self-referential fixture. Corrected 5-yr authority: **NQ 829 trades /
-  $159,160 / PF 1.412 / bootstrap p95 DD -$43,080**. Every qualitative conclusion
-  of Phase 1 and Phase 2 survives, including the MNQ pilot's rejection. See
+  than by a self-referential fixture. Corrected 5-yr authority (canonical replay
+  after the same-day fill-time stop correction): **NQ 813 trades / $160,125 /
+  PF 1.420 / observed max DD -$18,570** — see §7 for the bootstrap adverse bands
+  and `docs/decisions/2026-07-13-phase0-audit-follow-up.md` for the canonical
+  numbers (the calendar-correction doc's interim 829/$159,160 row was superseded
+  the same day). Every qualitative conclusion of Phase 1 and Phase 2 survives,
+  including the MNQ pilot's rejection. See
   `docs/decisions/2026-07-13-exchange-calendar-correction.md`.
 
 - **Live market-data feed made protocol-correct (PR #25).** Three defects, each
@@ -181,6 +190,17 @@ Do not skip the review step, and do not merge red tests.
   only with PR #25's calendar; before it, `main` reconciled 103/106.** The
   reconciliation is now guarded by a test against the operator's TV export
   (`FULL_PYTHON_TV_EXPORT`), not by a fixture the engine generated itself.
+- **Automation-worthiness standard active; three candidates rejected at T1
+  (2026-07-17/18, PR #28).** `docs/specs/2026-07-17-automation-worthiness-standard.md`
+  is the permanent promotion contract for every new automated strategy: freeze
+  the hypothesis, rules, costs, gates and trial budget before the first scored
+  run; a failed gate consumes the trial and cannot be rescued by re-searching
+  the same sample. Under it, opening-auction-regime v1, opening-auction
+  level-retest v2, and overnight-displacement-reversal v3 each failed their
+  frozen T1 primary trial and are CLOSED (v3's seven reconciliation flags were
+  forensically shown to be evaluator false positives; the rejection stands and
+  the sealed reports were not amended). Do not port, shadow, or re-run any of
+  them. Verdicts in `docs/research/`.
 - **5-year dataset assembled** (2021-03-16 → 2026-06-26, 1.87M bars).
 - **Gate 1 config audit COMPLETE — zero changes promoted.** Prior-vol gate
   rejected (holdout sign reversal); MA-length and S/R-interaction sweeps
