@@ -215,7 +215,10 @@ class ScriptedStrategy:
                 OrderIntent.market_entry(
                     timestamp_utc=bar.timestamp_utc, symbol="NQU6", side="buy",
                     quantity=1, reason="matrix",
-                    metadata={"stop_price": bar.close - self._stop_offset},
+                    metadata={
+                        "stop_price": bar.close - self._stop_offset,
+                        "signal_price": bar.close,
+                    },
                 ),
             ))
         if self._index in self._exits:

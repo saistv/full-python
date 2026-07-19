@@ -531,6 +531,14 @@ class TradovateBroker:
                 raise TradovateOrderSafetyError(
                     "live quantity must equal 1 until partial-fill recovery is modeled"
                 )
+            if "signal_price" not in intent.metadata:
+                # Review 2026-07-19 P1-2: without signal_price the sim and
+                # live veto would use DIFFERENT fallback reference bars.
+                # Live narrows the contract: missing signal_price is
+                # malformed strategy output, same tier as a missing stop.
+                raise TradovateOrderSafetyError(
+                    "signal_price metadata required for live entries"
+                )
             if self._risk_manager is not None:
                 # The exact veto the simulator applies (audit P1-7): identical
                 # module, identical reason strings, evaluated before any
@@ -548,9 +556,7 @@ class TradovateBroker:
                     daily_limit_hit=self._daily_limit_hit,
                     session=session,
                     intent=intent,
-                    reference_price=float(
-                        intent.metadata.get("signal_price", bar.close)
-                    ),
+                    reference_price=float(intent.metadata["signal_price"]),
                 )
                 if veto is not None:
                     self._events.append(Rejected(order_id="", reason=veto))

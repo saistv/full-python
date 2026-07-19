@@ -193,3 +193,25 @@ def test_review_2026_07_19_p0_1_default_pump_reads_the_socket():
     assert delivered == 1
     assert [raw.kind for raw in broker.raw_events] == ["fill"]
     assert ws.receive_waits[0] > 0
+
+
+def test_review_2026_07_19_p1_1_pump_enforces_transport_liveness():
+    clock = ManualClock()
+    pump, ws, _broker, _rest = _pump([], clock=clock)
+    ws.last_transport_activity = 0.0
+
+    clock.value = 5.0
+    pump.pump()  # 5.0 - 0.0 <= 7.5: alive
+
+    clock.value = 8.0
+    with pytest.raises(TradovateStateError, match="liveness"):
+        pump.pump()
+
+
+def test_review_2026_07_19_p1_1_fresh_activity_keeps_the_pump_alive():
+    clock = ManualClock()
+    pump, ws, _broker, _rest = _pump([], clock=clock)
+    ws.last_transport_activity = 6.0
+    clock.value = 9.0
+
+    pump.pump()  # 9.0 - 6.0 = 3.0 <= 7.5: alive

@@ -271,8 +271,11 @@ def _entry_result(bar=None, side="buy", metadata=None, quantity=1):
     bar = bar or _bar()
     if metadata is None:
         # A protective stop must sit on the adverse side of the reference
-        # price or the shared RiskManager veto (correctly) rejects it.
-        metadata = {"stop_price": 95.0 if side == "buy" else 105.5}
+        # price; signal_price is REQUIRED for live entries (H6).
+        metadata = {
+            "stop_price": 95.0 if side == "buy" else 105.5,
+            "signal_price": bar.close,
+        }
     return StrategyResult(order_intents=(
         OrderIntent.market_entry(
             timestamp_utc=bar.timestamp_utc,
@@ -2041,3 +2044,16 @@ def test_review_2026_07_19_p1_3_stop_wins_race_then_fresh_hydration_reopens():
     )
     broker.hydrate_account_state(snapshot)
     assert broker.execution_state == BrokerExecutionState.NORMAL
+
+
+
+def test_review_2026_07_19_p1_2_missing_signal_price_is_loudly_malformed():
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+    result = _entry_result(bar, metadata={"stop_price": 95.0})
+
+    with pytest.raises(TradovateOrderSafetyError, match="signal_price"):
+        broker.apply_strategy_result(bar, _session(bar), result)
+
+    assert rest.placed == []

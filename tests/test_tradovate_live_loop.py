@@ -139,7 +139,7 @@ class ScriptedStrategy:
             return StrategyResult(order_intents=(
                 OrderIntent.market_entry(
                     timestamp_utc=bar.timestamp_utc, symbol="NQU6", side="buy",
-                    quantity=1, reason="scripted", metadata={"stop_price": bar.close - 30.0},
+                    quantity=1, reason="scripted", metadata={"stop_price": bar.close - 30.0, "signal_price": bar.close},
                 ),
             ))
         return StrategyResult()
@@ -169,7 +169,7 @@ class FillAwareStrategy:
                 side="buy",
                 quantity=1,
                 reason="sr_breakout",
-                metadata={"stop_price": bar.close - 30.0},
+                metadata={"stop_price": bar.close - 30.0, "signal_price": bar.close},
             ),
         ))
 

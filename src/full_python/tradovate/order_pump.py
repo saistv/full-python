@@ -46,6 +46,7 @@ class OrderEventPump:
         contract_id: int,
         monotonic_clock: Callable[[], float] = time.monotonic,
         reconciliation_interval_seconds: float = 30.0,
+        liveness_timeout_seconds: float = 7.5,
     ) -> None:
         if (
             isinstance(reconciliation_interval_seconds, bool)
@@ -63,7 +64,18 @@ class OrderEventPump:
         self._contract_id = int(contract_id)
         self._clock = monotonic_clock
         self._reconciliation_interval = float(reconciliation_interval_seconds)
+        if (
+            isinstance(liveness_timeout_seconds, bool)
+            or not isinstance(liveness_timeout_seconds, (int, float))
+            or not math.isfinite(float(liveness_timeout_seconds))
+            or float(liveness_timeout_seconds) <= 0
+        ):
+            raise TradovateStateError(
+                "order pump liveness timeout must be positive and finite"
+            )
+        self._liveness_timeout = float(liveness_timeout_seconds)
         now = self._clock()
+        self._started = now
         self._last_heartbeat_sent: Optional[float] = None
         self._next_reconciliation = now + self._reconciliation_interval
 
@@ -111,6 +123,16 @@ class OrderEventPump:
                 delivered += 1
 
         now = self._clock()
+        # Review 2026-07-19 P1-1: liveness. Enforced whenever the client
+        # exposes transport activity (the real TradovateWebSocketClient
+        # does); the D2 runtime's 7.5s no-inbound rule applies here too.
+        activity = getattr(self._websocket, "last_transport_activity", None)
+        if activity is not None:
+            baseline = max(float(activity), self._started)
+            if now - baseline > self._liveness_timeout:
+                raise TradovateStateError(
+                    "user-sync transport liveness deadline exceeded"
+                )
         if now >= self._next_reconciliation:
             positions = self._rest.position_list()
             if not isinstance(positions, list):
