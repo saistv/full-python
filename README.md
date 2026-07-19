@@ -91,3 +91,115 @@ Reconciliation protocol (the authority gate):
 2. Feed the same session coverage to the CLI that the TV chart used (warmup counts bars, so ETH-inclusive charts need ETH-inclusive data).
 3. Use `--fill-timing signal_bar_close` only if the TV run filled on signal-bar close; the default matches `process_orders_on_close=false`.
 4. Every missing/extra trade must be explained (fill timing, intrabar ambiguity, roll boundary, data gap) or fixed before the Python engine is treated as authoritative. Aggregate P&L agreement alone is not evidence — the legacy Python backtester agreed in aggregate while being +23% wrong.
+
+## Opening Auction Regime v1 Research
+
+The opening-auction candidate is a separate preregistered strategy, not a
+revision of Adaptive Trend and not a revival of the rejected generic VWAP/OR
+fades. Its first authoritative command is intentionally train-only:
+
+```bash
+PYTHONPATH=src:. python3 scripts/run_opening_auction_experiment.py \
+  --data runs/multi-year/nq1_2021-03-16_2026-06-26.csv \
+  --output-dir runs/opening-auction-regime-v1/train-t1 \
+  --registry runs/opening-auction-regime-v1/experiments.sqlite
+```
+
+The runner physically stops before the CME session dated 2025-01-01, registers
+T1 before the first strategy decision, freezes NQ costs/fill timing, and writes:
+
+- `report.json` — gates, branch/side/calendar results, feature distributions,
+  fill-relative R, cost drag, and the explicit proceed/reject decision;
+- `events.jsonl` and `trades.csv` — canonical execution evidence;
+- `auction_sessions.csv` — every frozen classification, including no-trade;
+- `auction_diagnostics.csv` — arm/cancel/confirm/fill/exit funnel events;
+- `experiments.sqlite` — the insert-only 11-trial budget.
+
+Do not use the normal all-history CLI to make a research claim for this
+candidate. T2-T11 are forbidden unless frozen T1 passes its primary gates, and
+the historical result can never replace the required prospective 126-session
+shadow window. Full contract:
+`docs/research/2026-07-17-opening-auction-regime-v1-hypothesis.md`.
+
+## Opening Auction Level-Retest v2
+
+V1 was rejected on its frozen train trial. V2 is a new external-level
+acceptance/rejection hypothesis, not a threshold rescue: the 09:44 auction state
+is context only, and an entry requires the first later retest to hold plus a
+separate confirmation bar. Run the one registered train trial with:
+
+```bash
+PYTHONPATH=src:. python3 scripts/run_opening_auction_retest_experiment.py \
+  --data runs/multi-year/nq1_2021-03-16_2026-06-26.csv \
+  --output-dir runs/opening-auction-retest-v2/train-t1 \
+  --registry runs/opening-auction-retest-v2/experiments.sqlite
+```
+
+The runner refuses to overwrite either artifact location, validates monotonic
+timestamps, never constructs a bar at or after the 2025-01-01 session boundary,
+and hashes the code, data, hypothesis, configuration, simulation, and permanent
+promotion standard, plus the evaluation policy, emitted artifacts, canonical
+replay cores, and research result. Optional `--allocated-capital` and
+`--hard-loss-limit` values must be supplied together as finite positive dollar
+amounts. They evaluate the p99 drawdown budget; omitting them permits the T1
+primary decision but blocks permanent capital promotion without changing strategy
+behavior.
+
+The frozen rules are in
+`docs/research/2026-07-17-opening-auction-retest-v2-hypothesis.md`. The permanent
+pass/fail contract for every strategy is
+`docs/specs/2026-07-17-automation-worthiness-standard.md`. A failed T1 closes v2;
+no side, branch, threshold, or date slice may be changed to rescue it.
+
+T1 was executed once and rejected: 11 trades, -$1,655 net, PF 0.636, daily
+Sharpe -0.289, and 71.45% block-bootstrap probability of nonpositive total P&L.
+The registry is closed; do not rerun T1 or run T2-T9. The immutable decision is in
+`docs/research/2026-07-17-opening-auction-retest-v2-verdict.md`.
+
+## Overnight Displacement Reversal v3
+
+V3 is an independent, mirrored overnight-displacement hypothesis. It does not
+reuse Adaptive Trend momentum, v1's opening-auction classifier, or v2's external
+level retest. The one-minute OHLCV signal measures a price-based displacement
+proxy, not actual dealer or trader inventory. Its only historical composition
+root is the sealed runner:
+
+```bash
+PYTHONPATH=src:. python3 scripts/run_overnight_displacement_reversal_experiment.py \
+  --data runs/multi-year/nq1_2021-03-16_2026-06-26.csv \
+  --output-dir runs/overnight-displacement-reversal-v3/train-t1 \
+  --registry runs/overnight-displacement-reversal-v3/experiments.sqlite
+```
+
+The runner is deliberately absent from the general CLI. It accepts no strategy
+threshold overrides, refuses to overwrite either artifact location, requires
+canonical minute-aligned UTC timestamps, and constructs no market bar at or after
+the CME session beginning 2025-01-01. T1 is registered before the first strategy
+bar and then executed twice with fresh objects. Ledger, trades, session sequence,
+session snapshots, diagnostics, and the research core must hash identically.
+
+It writes:
+
+- `events.jsonl` and `trades.csv` — canonical execution evidence;
+- `displacement_sessions.csv` — every frozen displacement classification, including
+  fail-closed and no-trade sessions;
+- `displacement_diagnostics.csv` — extension, rejection, cancellation, bracket,
+  fill, and exit funnel events;
+- `report.json` — the complete scorecard, provenance, replay hashes, and frozen
+  proceed/reject decision; and
+- `experiments.sqlite` — the insert-only nine-trial registry.
+
+Optional `--allocated-capital` and `--hard-loss-limit` values must be supplied
+together as finite positive dollar amounts. They report the p99 drawdown capital
+policy but do not change strategy behavior or rescue a failed T1. T2-T9 remain
+forbidden unless every normal-cost T1 primary gate passes. The complete frozen
+contract is
+`docs/research/2026-07-18-overnight-displacement-reversal-v3-hypothesis.md`.
+
+T1 was executed once and rejected: 155 trades, +$3,865 net, PF 1.060,
+daily Sharpe 0.165, -0.0165R per calendar week, and 37.885% block-bootstrap
+probability of nonpositive total P&L. The small positive dollar result was
+concentrated in a few trades and the long book lost money. The registry is closed;
+do not rerun T1, run T2-T9, tune v3, or port it to Pine. The immutable result and
+the post-run explanation of seven evaluator false positives are in
+`docs/research/2026-07-18-overnight-displacement-reversal-v3-verdict.md`.
