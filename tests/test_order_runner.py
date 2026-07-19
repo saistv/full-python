@@ -112,6 +112,11 @@ class FakeFlattenBroker:
     def __init__(self, resolve_after_pumps):
         self.remaining = resolve_after_pumps
         self.flatten_in_progress = True
+        self.drained = 0
+
+    def poll_events(self):
+        self.drained += 1
+        return []
 
 
 class CountingPump:

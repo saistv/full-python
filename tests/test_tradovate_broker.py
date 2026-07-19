@@ -1824,3 +1824,45 @@ def test_non_closing_inherited_fill_halts():
         broker.ingest_raw_event(_fill_event(
             "555", action="Buy", price=20150.0, ts="2026-07-20T13:31:02Z"
         ))
+
+
+# ---------------------------------------------------------------------------
+# P2-5: session rollover vs cancel confirmation (row 19)
+# ---------------------------------------------------------------------------
+
+
+def test_rollover_with_confirmed_canceled_order_is_clean():
+    from full_python.tradovate.broker import ROLE_PROTECTIVE_STOP, SubmittedOrder
+
+    journal = RecordingIntentJournal()
+    rest = FakeRestClient(journal)
+    broker = TradovateBroker(_cfg(flatten_enabled=True), rest, intent_journal=journal)
+    broker._orders["77"] = SubmittedOrder(
+        order_id="77", role=ROLE_PROTECTIVE_STOP, side="sell", quantity=1,
+        symbol="NQU6", status="canceled",
+    )
+    day1 = _bar()
+    broker.process_bar_open(day1, _session(day1))
+    broker.note_bar_processed(day1, _session(day1))
+
+    day2 = _bar_at("2026-07-08T13:31:00Z")
+    broker.process_bar_open(day2, _session(day2))  # no halt: cancel confirmed
+
+
+def test_rollover_with_unconfirmed_cancel_still_halts_fail_closed():
+    from full_python.tradovate.broker import ROLE_PROTECTIVE_STOP, SubmittedOrder
+
+    journal = RecordingIntentJournal()
+    rest = FakeRestClient(journal)
+    broker = TradovateBroker(_cfg(flatten_enabled=True), rest, intent_journal=journal)
+    broker._orders["77"] = SubmittedOrder(
+        order_id="77", role=ROLE_PROTECTIVE_STOP, side="sell", quantity=1,
+        symbol="NQU6", status="working",
+    )
+    day1 = _bar()
+    broker.process_bar_open(day1, _session(day1))
+    broker.note_bar_processed(day1, _session(day1))
+
+    day2 = _bar_at("2026-07-08T13:31:00Z")
+    with pytest.raises(TradovateStateError, match="backstop should have flattened"):
+        broker.process_bar_open(day2, _session(day2))
