@@ -14,6 +14,7 @@ from full_python.execution.broker_protocol import (
 )
 from full_python.execution.order_intent_journal import IntentState, OrderIntentJournal
 from full_python.models import Fill, MarketBar, OrderIntent, StrategyResult
+from full_python.risk.limits import RiskLimits
 from full_python.tradovate.account_sync import AccountHydrationSnapshot
 from full_python.tradovate.broker import (
     BrokerExecutionState,
@@ -21,7 +22,10 @@ from full_python.tradovate.broker import (
     TradovateRawEvent,
 )
 from full_python.tradovate.config import DEMO_ENVIRONMENT, TradovateAdapterConfig
-from full_python.tradovate.errors import TradovateOrderSafetyError
+from full_python.tradovate.errors import (
+    TradovateConfigError,
+    TradovateOrderSafetyError,
+)
 
 
 @dataclass(frozen=True)
@@ -151,11 +155,19 @@ def _cfg(order_enabled=False, flatten_enabled=False, daily_loss_limit=1000.0):
     )
 
 
+_RISK_LIMITS = RiskLimits(max_contracts=1, flatten_minutes_et=959, rth_entries_only=True)
+
+
 def _new_broker(config, rest=None, journal=None):
     journal = journal or RecordingIntentJournal()
     rest = rest or FakeRestClient(journal)
     rest.journal = journal
-    broker = TradovateBroker(config, rest, intent_journal=journal)
+    broker = TradovateBroker(
+        config,
+        rest,
+        intent_journal=journal,
+        risk_limits=_RISK_LIMITS if config.order_enabled else None,
+    )
     if config.order_enabled and not journal.has_history:
         broker.hydrate_account_state(_flat_hydration_snapshot())
     return broker
@@ -253,6 +265,10 @@ def _session(bar=None):
 
 def _entry_result(bar=None, side="buy", metadata=None, quantity=1):
     bar = bar or _bar()
+    if metadata is None:
+        # A protective stop must sit on the adverse side of the reference
+        # price or the shared RiskManager veto (correctly) rejects it.
+        metadata = {"stop_price": 95.0 if side == "buy" else 105.5}
     return StrategyResult(order_intents=(
         OrderIntent.market_entry(
             timestamp_utc=bar.timestamp_utc,
@@ -260,7 +276,7 @@ def _entry_result(bar=None, side="buy", metadata=None, quantity=1):
             side=side,
             quantity=quantity,
             reason="adaptive_trend",
-            metadata={"stop_price": 95.0} if metadata is None else metadata,
+            metadata=metadata,
         ),
     ))
 
@@ -329,7 +345,9 @@ def test_repeated_entry_while_first_entry_is_working_submits_once():
     assert len(market_entries) == 1
     assert broker.execution_state == BrokerExecutionState.ENTRY_PENDING_FILL
     rejects = [event for event in broker.poll_events() if isinstance(event, Rejected)]
-    assert rejects == [Rejected(order_id="", reason="entry_not_stable_flat")]
+    assert rejects == [
+        Rejected(order_id="", reason="position_already_open")  # sim-identical veto
+    ]
 
 
 def test_live_enabled_entry_requires_stop_price_metadata():
@@ -368,6 +386,7 @@ def test_hydrated_account_daily_loss_blocks_entry_before_rest():
         _cfg(order_enabled=True, flatten_enabled=True),
         rest,
         intent_journal=journal,
+        risk_limits=_RISK_LIMITS,
     )
     broker.hydrate_account_state(_flat_hydration_snapshot(
         daily_realized_pnl=-1000.0,
@@ -378,7 +397,7 @@ def test_hydrated_account_daily_loss_blocks_entry_before_rest():
     assert broker.daily_limit_hit is True
     assert rest.placed == []
     assert broker.poll_events() == [
-        Rejected(order_id="", reason="entry_not_stable_flat")
+        Rejected(order_id="", reason="daily_limit")  # sim-identical veto (P1-7)
     ]
 
 
@@ -569,7 +588,9 @@ def test_repeated_entry_after_fill_and_protection_is_rejected_before_rest():
     market_entries = [body for body in rest.placed if body["orderType"] == "Market"]
     assert len(market_entries) == 1
     rejects = [event for event in broker.poll_events() if isinstance(event, Rejected)]
-    assert rejects == [Rejected(order_id="", reason="entry_not_stable_flat")]
+    assert rejects == [
+        Rejected(order_id="", reason="position_already_open")  # sim-identical veto
+    ]
 
 
 def test_entry_is_rejected_while_strategy_exit_waits_for_stop_cancel():
@@ -582,7 +603,9 @@ def test_entry_is_rejected_while_strategy_exit_waits_for_stop_cancel():
     market_entries = [body for body in rest.placed if body["orderType"] == "Market"]
     assert len(market_entries) == 1
     rejects = [event for event in broker.poll_events() if isinstance(event, Rejected)]
-    assert rejects == [Rejected(order_id="", reason="entry_not_stable_flat")]
+    assert rejects == [
+        Rejected(order_id="", reason="position_already_open")  # sim-identical veto
+    ]
 
 
 def test_confirmed_entry_cancel_returns_to_stable_flat_for_later_signal():
@@ -726,6 +749,7 @@ def test_reopened_real_journal_keeps_broker_entry_latch_closed(tmp_path):
         _cfg(order_enabled=True, flatten_enabled=True),
         rest,
         intent_journal=reopened,
+        risk_limits=_RISK_LIMITS,
     )
 
     broker.apply_strategy_result(_bar(), _session(), _entry_result())
@@ -1575,7 +1599,7 @@ def test_dll_breach_runs_staged_flatten_and_blocks_entries_after_normal():
     broker.poll_events()
     broker.apply_strategy_result(adverse, _session(adverse), _entry_result(adverse))
     assert broker.poll_events() == [
-        Rejected(order_id="", reason="entry_not_stable_flat")
+        Rejected(order_id="", reason="daily_limit")  # sim-identical veto (P1-7)
     ]
 
 
@@ -1616,3 +1640,55 @@ def test_backstop_does_not_fire_before_close_minus_one_or_when_flat():
     late = _bar_at("2026-07-07T19:59:00Z")
     flat_broker.process_bar_open(late, _session(late))
     assert flat_rest.canceled == [] and flat_rest.liquidations == []
+
+
+# ---------------------------------------------------------------------------
+# Slice G1: shared RiskManager veto (audit P1-7) -- live refuses what sim refuses
+# ---------------------------------------------------------------------------
+
+
+def test_order_enabled_requires_risk_limits():
+    with pytest.raises(TradovateConfigError, match="risk_limits"):
+        TradovateBroker(
+            _cfg(order_enabled=True, flatten_enabled=True),
+            FakeRestClient(),
+            intent_journal=RecordingIntentJournal(),
+        )
+
+
+def test_market_closed_session_vetoes_entry_before_any_post():
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+    closed_session = replace(_session(bar), rth_close_minutes_et=None)
+
+    broker.apply_strategy_result(bar, closed_session, _entry_result(bar))
+
+    assert rest.placed == []
+    assert rest.journal.records == []  # vetoed before any journal activity
+    assert broker.poll_events() == [Rejected(order_id="", reason="market_closed")]
+
+
+def test_after_flatten_window_vetoes_entry_with_sim_reason():
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar_at("2026-07-07T19:59:00Z")  # 15:59 ET
+
+    broker.apply_strategy_result(bar, _session(bar), _entry_result(bar))
+
+    assert rest.placed == []
+    assert broker.poll_events() == [Rejected(order_id="", reason="after_flatten")]
+
+
+def test_invalid_stop_vetoes_before_any_post():
+    rest = FakeRestClient()
+    broker = _new_broker(_cfg(order_enabled=True, flatten_enabled=True), rest)
+    bar = _bar()
+    result = _entry_result(
+        bar, metadata={"stop_price": 100.5, "signal_price": 100.25}
+    )
+
+    broker.apply_strategy_result(bar, _session(bar), result)
+
+    assert rest.placed == []
+    assert broker.poll_events() == [Rejected(order_id="", reason="invalid_stop")]

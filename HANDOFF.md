@@ -317,6 +317,21 @@ Do not skip the review step, and do not merge red tests.
   closes (P0-03) — strategy-independent. P0-2/P1-5/P0-03 closed in offline
   code; P0-04's REST leg and the attended DEMO liquidation drill remain open.
   See `docs/decisions/2026-07-19-confirmed-flatten-session-boundaries.md`.
+- **Order-event pump and broker risk veto (Milestone 2 Slice G) — IMPLEMENTED
+  OFFLINE** (2026-07-19). P1-7 closed: `order_enabled` requires `risk_limits`
+  and every entry intent passes the exact shared `risk/risk_manager.py` veto
+  the simulator uses, with sim-identical reason strings, before any journal or
+  REST activity — live can no longer submit an order sim refuses (matrix row
+  16 class). P1-6 closed in code: `tradovate/order_events.py` (pure fail-closed
+  translation of user-sync props to raw fill/cancel/reject/position events) +
+  `tradovate/order_pump.py` (drains events into `ingest_raw_event` from the
+  bar-source maintenance hook, heartbeats, interval REST position
+  reconciliation) + `live/order_runner.py` (`build_order_session` composition
+  root; explicit account selection closes P3-4 in the new runner; `main()`
+  pins `order_enabled`/`flatten_enabled` False as literals — the Gate 5
+  boundary). The stable-flat D2 runtime remains startup hydrator/flat-idle
+  verifier; during trades the broker is authoritative and the pump feeds it.
+  See `docs/decisions/2026-07-19-order-pump-and-veto.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -327,16 +342,17 @@ feature branch.
 
 1. **Continue the order-capable broker redesign offline before any demo
    order.** Slices D1-D2 provide stable-flat startup plus incremental
-   invalidation/reconciliation; Slice E provides the confirmed flatten and
-   the calendar-driven session-close backstop. Next implement the production
-   composition root / account-event pump (P1-6), the broker-side RiskManager
-   veto (P1-7), restart/inherited-position recovery (P1-8), partial
-   quantities, unknown-outcome recovery, and the complete adversarial failure
-   matrix (Slice F). Capture the real DEMO split-sync envelope and prove
-   heartbeat/reconnect behavior before composing any order runner. P0-04's
-   REST leg, P0-05, P1-01, and the broader P1-02 remain open. See the
-   2026-07-14 broker-safe execution design, the 2026-07-15 account-sync
-   runtime design, and the 2026-07-19 confirmed-flatten decision.
+   invalidation/reconciliation; Slice E the confirmed flatten and
+   calendar-driven session-close backstop; Slice G the composition root,
+   account-event pump, and the shared sim/live risk veto. Next implement
+   restart/inherited-position recovery (P1-8), partial quantities,
+   unknown-outcome recovery, and the complete adversarial failure matrix
+   (Slice F); fix the observe runner's `accounts[0]` (P3-4 is closed only in
+   the order runner). Capture the real DEMO split-sync envelope and prove
+   heartbeat/reconnect behavior before any order session. P0-04's REST leg,
+   P0-05, P1-01, P2-5, and the broader P1-02 remain open. See the 2026-07-14
+   broker-safe execution design and the 2026-07-19 order-pump-and-veto
+   decision.
 2. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
    code blocker is fixed; now execute the outage/disconnect drills in
    `docs/live-observe-runbook.md`, then preserve three nonconsecutive clean
