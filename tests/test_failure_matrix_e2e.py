@@ -97,6 +97,7 @@ class ServerSim:
         self.mark_price = 20100.25
         self._next_id = 100
         self._net_pos = 0
+        self.liquidation_responses = []  # adversarial knob: scripted rejects
 
     # -- user-sync websocket seam ----------------------------------------
     def send_heartbeat(self):
@@ -160,6 +161,8 @@ class ServerSim:
         }, body
         assert body["accountId"] == 456 and body["contractId"] == 789
         self.liquidations.append(dict(body))
+        if self.liquidation_responses:
+            return self.liquidation_responses.pop(0)
         self._next_id += 1
         action = "Sell" if self._net_pos > 0 else "Buy"
         self._queue_fill(self._next_id, action, abs(self._net_pos) or 1,
@@ -463,3 +466,34 @@ def test_review_2026_07_19_p0_3_final_bar_flatten_rundown(tmp_path):
     assert session.broker.position is None
     assert session.broker.flatten_in_progress is False
     assert len(server.liquidations) == 1
+
+
+
+# Review 2026-07-19 (ServerSim fidelity): duplicate terminal delivery through
+# the composed stack must be survivable (H2A idempotency at composition level).
+def test_review_2026_07_19_duplicate_cancel_delivery_survives_e2e(tmp_path):
+    server = ServerSim()
+    strategy = ScriptedStrategy(entries={0}, exits={2})
+    bars = _bars([
+        "2026-07-07T14:32:00Z", "2026-07-07T14:33:00Z",
+        "2026-07-07T14:34:00Z", "2026-07-07T14:35:00Z",
+        "2026-07-07T14:36:00Z",
+    ])
+    session, _ = _session_pieces(tmp_path, server, strategy, bars)
+    session.broker.hydrate_account_state(_flat_snapshot("2026-07-07"))
+
+    # adversarial: every cancel confirmation is delivered TWICE
+    original = server.queue_order_canceled
+
+    def duplicated(order_id):
+        original(order_id)
+        original(order_id)
+
+    server.queue_order_canceled = duplicated
+
+    result = session.loop.run()
+
+    assert result.halted_reason is None
+    assert len(result.trades) == 1
+    assert session.broker.position is None
+    assert len(server.liquidations) == 0  # duplicates never triggered emergency

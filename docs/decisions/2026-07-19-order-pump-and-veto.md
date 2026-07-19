@@ -64,3 +64,21 @@ connection is the experiment), P1-8 (restart/inherited-position recovery),
 Slice F (partial quantities + full adversarial failure matrix), P2-5
 (rollover cancel confirmation), the observe runner's own `accounts[0]`,
 and every attended Gate 5+ drill. Nothing may trade live.
+
+
+---
+
+## CORRECTION (2026-07-19, after the independent review — PR #35)
+
+Two claims were overstated. (1) "P1-6 closed by a production caller": the
+composed pump's default zero-second wait meant the real websocket client
+returned before reading the transport — the pump performed no real socket
+reads — and no source-wired runnable entry point invoked the composition.
+Fixed in Slice H (H1: positive-wait contract, faithful fakes; H9:
+`--compose-check` makes the root source-wired) — PRs #37/#38. (2) "the
+exact veto the simulator applies": the missing-`signal_price` fallback used
+different reference bars in sim and live. Fixed by contract in H6:
+`signal_price` is required for live entries. Heartbeat cadence was also
+bar-bound, not the documented 2.5s; H7 adds sub-bar maintenance slicing and
+transport liveness. The precise vendor socket threshold remains a P1-01
+demo-capture item.

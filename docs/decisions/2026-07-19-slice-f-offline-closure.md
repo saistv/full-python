@@ -69,3 +69,21 @@ the broader P1-02, P2-1/P2-2 (research characterization), P3-1..P3-3
 (documentation/config notes), partial-fill lifecycle (post-pilot), and
 every attended Gate 5+ drill. Nothing may trade live; the Gate 5 boundary
 literals are unchanged.
+
+
+---
+
+## CORRECTION (2026-07-19, after the independent review — PR #35)
+
+"Proven through the REAL composed stack" was overstated: real classes were
+composed, but the fake server's timing model (events delivered at zero
+wait, same-call confirmations, strict FIFO, always-successful full fills)
+removed exactly the races the matrix rows claimed to cover — and masked the
+P0-1 zero-read defect outright. Slice H makes the fakes faithful (fixes
+were only accepted against honest fakes), adds adversarial knobs
+(duplicate delivery, scripted liquidation rejection), and closes the CI
+evidence gap this record left open: the five anchor/parity evidence files
+now run in CI against committed fixtures (H8), so the review's mutation
+experiment turns CI red. The one deliberately deferred item (multi-contract
+partial-fill lifecycle) is unchanged and is now also ENFORCED at the
+startup boundary rather than assumed.

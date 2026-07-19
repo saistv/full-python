@@ -243,6 +243,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--point-value", type=float, required=True,
                         help="per-instrument: NQ=20.0, MNQ=2.0")
     parser.add_argument("--daily-loss-limit", type=float, default=1000.0)
+    parser.add_argument(
+        "--compose-check", action="store_true",
+        help="build the full order session against in-process sentinels "
+             "(no network, no credentials) and exit 0 -- proves the "
+             "composition root is source-wired (review 2026-07-19 P2-1)",
+    )
     args = parser.parse_args(argv)
 
     account_id_raw = os.environ.get("TRADOVATE_ACCOUNT_ID")
@@ -261,6 +267,50 @@ def main(argv: Optional[list] = None) -> int:
         dollar_point_value=args.point_value,
         daily_loss_limit=args.daily_loss_limit,
     )
+    if args.compose_check:
+        # Review 2026-07-19 P2-1: the composition root must be reachable
+        # from source, not only from tests. Sentinels, no network.
+        class _SentinelWs:
+            def send_heartbeat(self):
+                return None
+
+            def receive_event(self, wait_seconds):
+                return None
+
+        class _SentinelRest:
+            def position_list(self):
+                return []
+
+        class _IdleStrategy:
+            def on_bar(self, bar):
+                raise AssertionError("compose-check never feeds bars")
+
+        from full_python.events import EventLedger
+        from full_python.execution.supervisor import (
+            RiskSupervisor,
+            RiskSupervisorConfig,
+        )
+
+        session = build_order_session(
+            config=config,
+            rest_client=_SentinelRest(),
+            user_sync_ws=_SentinelWs(),
+            strategy=_IdleStrategy(),
+            supervisor=RiskSupervisor(
+                RiskSupervisorConfig(point_value=args.point_value)
+            ),
+            ledger=EventLedger(),
+            bar_source_factory=lambda maintenance: [],
+        )
+        print(
+            "compose-check OK: broker/pump/loop constructed for "
+            f"{config.account_spec} (id {config.account_id}); "
+            f"order_enabled={config.order_enabled} "
+            f"flatten_enabled={config.flatten_enabled}"
+        )
+        assert session.loop is not None
+        return 0
+
     raise SystemExit(
         "composition validated for account "
         f"{config.account_spec} (id {config.account_id}); demo order sessions "
