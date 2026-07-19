@@ -1816,17 +1816,56 @@ def test_startup_flatten_cancel_failure_halts_latched():
     assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
 
 
-def test_non_closing_inherited_fill_halts():
+def test_review_2026_07_19_p0_4_exposure_increasing_inherited_order_refused():
+    # An inherited BUY against an inherited long could ADD exposure: refused
+    # at the boundary, before any cancel race can put it in flight.
+    broker, _rest = _unhydrated_order_broker()
+    with pytest.raises(TradovateStateError, match="increase exposure"):
+        broker.startup_flatten(
+            _inherited_snapshot(order_action="Buy"),
+            timestamp_utc="2026-07-20T13:31:00Z",
+        )
+
+    # Orders with NO inherited position are refused outright: any fill
+    # would create exposure from flat.
+    broker2, _rest2 = _unhydrated_order_broker()
+    with pytest.raises(TradovateStateError, match="increase exposure"):
+        broker2.startup_flatten(
+            _inherited_snapshot(position=False),
+            timestamp_utc="2026-07-20T13:31:00Z",
+        )
+
+
+def test_review_2026_07_19_p0_4_multi_contract_inherited_position_refused():
+    from full_python.execution.broker_protocol import BrokerPosition
+
+    broker, _rest = _unhydrated_order_broker()
+    snapshot = replace(
+        _inherited_snapshot(orders=False),
+        position=BrokerPosition(side="long", quantity=3, entry_price=20100.25),
+    )
+    with pytest.raises(TradovateStateError, match="MANUAL flatten"):
+        broker.startup_flatten(snapshot, timestamp_utc="2026-07-20T13:31:00Z")
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
+def test_review_2026_07_19_p0_4a_inherited_fill_while_flat_adopts_then_flattens():
+    from full_python.tradovate.broker import ROLE_INHERITED, SubmittedOrder
+
     broker, rest = _unhydrated_order_broker()
-    broker.startup_flatten(
-        _inherited_snapshot(order_action="Buy"),
-        timestamp_utc="2026-07-20T13:31:00Z",
+    broker._orders["555"] = SubmittedOrder(
+        order_id="555", role=ROLE_INHERITED, side="buy", quantity=1,
+        symbol="NQU6", reason="inherited",
     )
 
-    with pytest.raises(TradovateStateError, match="wrong side"):
+    with pytest.raises(TradovateStateError, match="filled while locally flat"):
         broker.ingest_raw_event(_fill_event(
             "555", action="Buy", price=20150.0, ts="2026-07-20T13:31:02Z"
         ))
+
+    # the REAL exposure was adopted and an emergency liquidation submitted
+    assert len(rest.liquidations) == 1
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
 
 
 # ---------------------------------------------------------------------------
@@ -1955,3 +1994,50 @@ def test_review_2026_07_19_p0_3_rejected_liquidation_clears_for_explicit_retry()
     ))
     assert broker.position is None
     assert broker.flatten_in_progress is False
+
+
+def test_review_2026_07_19_p1_3_resolved_flatten_clears_stale_pending_exit():
+    broker, rest = _entered_broker()
+    broker.apply_strategy_result(_bar(), _session(), _exit_result())
+    assert broker.execution_state == BrokerExecutionState.EXIT_PENDING_CANCEL
+
+    broker.flatten(_bar(), "supervisor_halt")  # reuses the requested cancel
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+    liq_id = 103
+    broker.ingest_raw_event(_fill_event(
+        liq_id, action="Sell", price=99.0, ts="2026-07-07T14:35:00Z"
+    ))
+
+    assert broker.position is None
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+    broker.poll_events()
+
+    # the resolved state must be USABLE: a fresh entry places
+    entries_before = len([b for b in rest.placed if b["orderType"] == "Market"])
+    broker.apply_strategy_result(_bar(), _session(), _entry_result())
+    entries_after = len([b for b in rest.placed if b["orderType"] == "Market"])
+    assert entries_after == entries_before + 1
+
+
+def test_review_2026_07_19_p1_3_stop_wins_race_then_fresh_hydration_reopens():
+    broker, rest = _unhydrated_order_broker()
+    broker.startup_flatten(
+        _inherited_snapshot(), timestamp_utc="2026-07-20T13:31:00Z"
+    )
+    broker.ingest_raw_event(_fill_event(
+        "555", action="Sell", price=20050.0, ts="2026-07-20T13:31:02Z"
+    ))
+    assert broker.position is None
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+    # the cancel raced and LOST to the fill: order 555 is terminally Filled.
+    cancel_body = rest.canceled[0]
+    snapshot = replace(
+        _flat_hydration_snapshot(),
+        orders_by_id={"555": {"id": 555, "ordStatus": "Filled"}},
+        commands_by_client_id={cancel_body["clOrdId"]: {
+            "id": 2555, "orderId": 555, "isAutomated": True,
+        }},
+    )
+    broker.hydrate_account_state(snapshot)
+    assert broker.execution_state == BrokerExecutionState.NORMAL

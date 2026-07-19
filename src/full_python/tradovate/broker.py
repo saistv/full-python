@@ -296,7 +296,9 @@ class TradovateBroker:
                         or command.get("isAutomated") is not True
                         or order is None
                         or str(order.get("ordStatus"))
-                        not in {"Canceled", "Expired"}
+                        not in {"Canceled", "Expired", "Filled"}
+                        # "Filled": a cancel that raced and LOST to a fill is
+                        # legitimately terminal (review 2026-07-19 P1-3).
                     ):
                         self._latch_recovery()
                         raise TradovateStateError(
@@ -641,6 +643,30 @@ class TradovateBroker:
                 "startup flatten called for a stable-flat snapshot; "
                 "use hydrate_account_state"
             )
+        # Review 2026-07-19 P0-4: the supported inherited state space is
+        # enforced HERE, not discovered mid-race. Multi-contract partial
+        # lifecycle is deferred; an order that could create or increase
+        # exposure has no safe automated close.
+        position = snapshot.position
+        if position is not None and position.quantity != 1:
+            self._latch_recovery()
+            raise TradovateStateError(
+                f"inherited position quantity {position.quantity} requires "
+                "MANUAL flatten -- multi-contract partial-fill lifecycle is "
+                "deferred"
+            )
+        reducing_side = (
+            None if position is None
+            else ("sell" if position.side == "long" else "buy")
+        )
+        for row in snapshot.working_orders:
+            side = str(row.get("action") or "").lower()
+            if reducing_side is None or side != reducing_side:
+                self._latch_recovery()
+                raise TradovateStateError(
+                    f"inherited working order {row.get('id')!r} could create "
+                    "or increase exposure; manual intervention required"
+                )
         for row in snapshot.working_orders:
             order_id = str(row.get("id"))
             if order_id in self._orders:
@@ -751,6 +777,10 @@ class TradovateBroker:
         pending = self._pending_flatten
         self._pending_flatten = None
         self._pending_flatten_liquidation_id = None
+        # Review 2026-07-19 P1-3: the flatten consumed every close path; a
+        # stale pending exit would make the resolved NORMAL state unusable
+        # (its next entry vetoes position_already_open).
+        self._pending_exit = None
         if pending is None:
             return
         if self._position is not None:
@@ -823,6 +853,21 @@ class TradovateBroker:
                 f"fill for {order.status} order {fill.order_id}"
             )
         order.status = "filled"
+        if order.role == ROLE_INHERITED and self._position is None:
+            # Review 2026-07-19 P0-4A (defense in depth behind the boundary
+            # validation): an inherited order filling while locally flat has
+            # just created REAL exposure. Adopt it so the emergency
+            # liquidation covers it, then halt.
+            self._position = BrokerPosition(
+                side="long" if fill.side == "buy" else "short",
+                quantity=fill.quantity,
+                entry_price=fill.price,
+            )
+            self._emergency_flatten()
+            raise TradovateStateError(
+                f"inherited order {fill.order_id} filled while locally flat; "
+                "emergency flatten requested"
+            )
         if order.role == ROLE_ENTRY:
             self._on_entry_fill(fill, order)
         else:
