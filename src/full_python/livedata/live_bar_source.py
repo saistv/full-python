@@ -48,6 +48,8 @@ class LiveBarSource:
         position_provider: Callable[[], bool],
         grace_seconds: float = 25.0,
         session_end_minutes_et: Optional[int] = None,
+        on_wait: Optional[Callable[[], None]] = None,
+        wait_slice_seconds: float = 2.0,
     ) -> None:
         self._feed = feed
         self._clock = clock
@@ -57,6 +59,13 @@ class LiveBarSource:
         self._grace = grace_seconds
         self._session_end_minutes_et = session_end_minutes_et
         self._last_emitted_ts: Optional[str] = None
+        # Review 2026-07-19 P1-1: the single blocking feed wait starved the
+        # order pump's heartbeat/event cadence for up to a full bar. Waits
+        # are now sliced, invoking on_wait between slices so maintenance
+        # (heartbeats, account events, reconciliation) runs at sub-bar
+        # cadence instead of bar cadence.
+        self._on_wait = on_wait
+        self._wait_slice = max(0.1, float(wait_slice_seconds))
 
     def __iter__(self) -> Iterator[MarketBar]:
         return self
@@ -71,10 +80,21 @@ class LiveBarSource:
                 else _parse(self._last_emitted_ts) + timedelta(minutes=1)
             )
             deadline = self._poll_deadline(expected)
-            timeout_seconds = max(
-                0.0, (deadline - self._clock.now()).total_seconds()
-            )
-            vbar = self._feed.next_bar(timeout_seconds)
+            vbar = None
+            while True:
+                remaining = max(
+                    0.0, (deadline - self._clock.now()).total_seconds()
+                )
+                slice_seconds = (
+                    remaining if self._on_wait is None
+                    else min(remaining, self._wait_slice)
+                )
+                vbar = self._feed.next_bar(slice_seconds)
+                if vbar is not None:
+                    break
+                if remaining <= slice_seconds:
+                    break  # the full deadline budget is spent
+                self._on_wait()
             if vbar is None:
                 if self._armed(expected):
                     expected_label = _to_iso_z(expected)

@@ -103,6 +103,10 @@ class ServerSim:
         self.heartbeats += 1
 
     def receive_event(self, wait_seconds):
+        # Faithful to the real client: nonpositive wait never reads the
+        # transport (review 2026-07-19, P0-1).
+        if wait_seconds <= 0:
+            return None
         if self.ws_queue:
             return self.ws_queue.pop(0)
         return None
@@ -211,7 +215,10 @@ class ScriptedStrategy:
                 OrderIntent.market_entry(
                     timestamp_utc=bar.timestamp_utc, symbol="NQU6", side="buy",
                     quantity=1, reason="matrix",
-                    metadata={"stop_price": bar.close - self._stop_offset},
+                    metadata={
+                        "stop_price": bar.close - self._stop_offset,
+                        "signal_price": bar.close,
+                    },
                 ),
             ))
         if self._index in self._exits:
@@ -415,7 +422,7 @@ def test_e2e_startup_flatten_then_clean_session(tmp_path):
     )
     session.broker.startup_flatten(inherited, timestamp_utc="2026-07-07T14:30:00Z")
     run_startup_flatten(session.broker, session.pump, timeout_seconds=5.0,
-                        wait_seconds=0.0)
+                        wait_seconds=0.25)
 
     assert session.broker.position is None
     assert session.broker.flatten_in_progress is False
@@ -428,3 +435,31 @@ def test_e2e_startup_flatten_then_clean_session(tmp_path):
     result = session.loop.run()
     assert result.halted_reason is None
     assert result.trades == ()
+
+
+# Review 2026-07-19 P0-3: a flatten begun on the FINAL bar has no next-bar
+# deadline driver; the session owner's run-down must complete it.
+def test_review_2026_07_19_p0_3_final_bar_flatten_rundown(tmp_path):
+    from full_python.live.order_runner import run_flatten_rundown
+
+    server = ServerSim()
+    strategy = ScriptedStrategy(entries={0})
+    bars = _bars([
+        "2025-11-28T17:50:00Z",
+        "2025-11-28T17:51:00Z",
+        "2025-11-28T18:14:00Z",  # close-1 backstop fires on the LAST bar
+    ])
+    session, _ = _session_pieces(tmp_path, server, strategy, bars)
+    session.broker.hydrate_account_state(_flat_snapshot("2025-11-28"))
+
+    result = session.loop.run()
+
+    assert result.halted_reason is None
+    assert session.broker.flatten_in_progress is True  # no further bar drove it
+
+    run_flatten_rundown(session.broker, session.pump, timeout_seconds=5.0,
+                        wait_seconds=0.25)
+
+    assert session.broker.position is None
+    assert session.broker.flatten_in_progress is False
+    assert len(server.liquidations) == 1

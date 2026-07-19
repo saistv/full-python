@@ -73,6 +73,7 @@ from full_python.risk.risk_manager import RiskManager
 from full_python.tradovate.config import TradovateAdapterConfig
 from full_python.tradovate.account_sync import AccountHydrationSnapshot
 from full_python.tradovate.errors import (
+    TradovateOrderRejectedError,
     TradovateConfigError,
     TradovateError,
     TradovateOrderSafetyError,
@@ -199,6 +200,7 @@ class TradovateBroker:
         self._working_stop_id: Optional[str] = None
         self._pending_exit: Optional[PendingExit] = None
         self._pending_flatten: Optional[PendingFlatten] = None
+        self._pending_flatten_liquidation_id: Optional[str] = None
         self._requested_cancel_ids: set[str] = set()
         self._cancel_intent_ids: dict[str, str] = {}
         self._liquidation_in_flight = False
@@ -294,7 +296,9 @@ class TradovateBroker:
                         or command.get("isAutomated") is not True
                         or order is None
                         or str(order.get("ordStatus"))
-                        not in {"Canceled", "Expired"}
+                        not in {"Canceled", "Expired", "Filled"}
+                        # "Filled": a cancel that raced and LOST to a fill is
+                        # legitimately terminal (review 2026-07-19 P1-3).
                     ):
                         self._latch_recovery()
                         raise TradovateStateError(
@@ -492,6 +496,14 @@ class TradovateBroker:
                 self._events.append(Rejected(order_id="", reason="order_disabled"))
                 continue
             self._require_active_symbol(exit_decision.symbol)
+            if self._pending_flatten is not None or self._liquidation_in_flight:
+                # Review 2026-07-19 P0-2B: the flatten owns the close; a
+                # same-bar strategy exit must not start a second closing path
+                # or re-request the same cancel.
+                self._events.append(
+                    Rejected(order_id="", reason="flatten_in_progress")
+                )
+                continue
             if self._pending_exit is not None:
                 continue
             stop_id = self._working_stop_id
@@ -519,6 +531,14 @@ class TradovateBroker:
                 raise TradovateOrderSafetyError(
                     "live quantity must equal 1 until partial-fill recovery is modeled"
                 )
+            if "signal_price" not in intent.metadata:
+                # Review 2026-07-19 P1-2: without signal_price the sim and
+                # live veto would use DIFFERENT fallback reference bars.
+                # Live narrows the contract: missing signal_price is
+                # malformed strategy output, same tier as a missing stop.
+                raise TradovateOrderSafetyError(
+                    "signal_price metadata required for live entries"
+                )
             if self._risk_manager is not None:
                 # The exact veto the simulator applies (audit P1-7): identical
                 # module, identical reason strings, evaluated before any
@@ -536,9 +556,7 @@ class TradovateBroker:
                     daily_limit_hit=self._daily_limit_hit,
                     session=session,
                     intent=intent,
-                    reference_price=float(
-                        intent.metadata.get("signal_price", bar.close)
-                    ),
+                    reference_price=float(intent.metadata["signal_price"]),
                 )
                 if veto is not None:
                     self._events.append(Rejected(order_id="", reason=veto))
@@ -631,6 +649,30 @@ class TradovateBroker:
                 "startup flatten called for a stable-flat snapshot; "
                 "use hydrate_account_state"
             )
+        # Review 2026-07-19 P0-4: the supported inherited state space is
+        # enforced HERE, not discovered mid-race. Multi-contract partial
+        # lifecycle is deferred; an order that could create or increase
+        # exposure has no safe automated close.
+        position = snapshot.position
+        if position is not None and position.quantity != 1:
+            self._latch_recovery()
+            raise TradovateStateError(
+                f"inherited position quantity {position.quantity} requires "
+                "MANUAL flatten -- multi-contract partial-fill lifecycle is "
+                "deferred"
+            )
+        reducing_side = (
+            None if position is None
+            else ("sell" if position.side == "long" else "buy")
+        )
+        for row in snapshot.working_orders:
+            side = str(row.get("action") or "").lower()
+            if reducing_side is None or side != reducing_side:
+                self._latch_recovery()
+                raise TradovateStateError(
+                    f"inherited working order {row.get('id')!r} could create "
+                    "or increase exposure; manual intervention required"
+                )
         for row in snapshot.working_orders:
             order_id = str(row.get("id"))
             if order_id in self._orders:
@@ -696,8 +738,19 @@ class TradovateBroker:
         }
         self._liquidation_in_flight = True
         try:
-            order_id, logical_intent_id = self._journaled_liquidation(body)
+            receipt = self._journaled_liquidation(body)
+        except TradovateOrderRejectedError:
+            # Review 2026-07-19 P0-3: definitively rejected -- no order
+            # exists. Clear the latches so a later explicit flatten retry is
+            # possible after operator review; still halt now.
+            self._liquidation_in_flight = False
+            self._pending_flatten = None
+            self._pending_flatten_liquidation_id = None
+            self._latch_recovery()
+            raise
         except TradovateStateError:
+            # Unknown outcome: the liquidation MAY exist at the broker.
+            # Keep the in-flight latch -- a retry could double-close.
             self._latch_recovery()
             raise
         except Exception as exc:
@@ -705,6 +758,12 @@ class TradovateBroker:
             raise TradovateStateError(
                 "liquidation submission outcome unknown; broker reconciliation required"
             ) from exc
+        if receipt is None:
+            # Unreachable for the liquidation role (rejection raises), kept
+            # as a defensive guard against interpreter changes.
+            self._latch_recovery()
+            raise TradovateStateError("liquidation returned no receipt")
+        order_id, logical_intent_id = receipt
         self._register_order(SubmittedOrder(
             order_id=order_id,
             role=ROLE_EXIT,
@@ -714,6 +773,7 @@ class TradovateBroker:
             reason=pending.reason,
             logical_intent_id=logical_intent_id,
         ))
+        self._pending_flatten_liquidation_id = order_id
         self._execution_state = BrokerExecutionState.FLATTEN_PENDING_FILL
         self._events.append(Acked(order_id=order_id))
 
@@ -722,6 +782,11 @@ class TradovateBroker:
         self._liquidation_in_flight = False
         pending = self._pending_flatten
         self._pending_flatten = None
+        self._pending_flatten_liquidation_id = None
+        # Review 2026-07-19 P1-3: the flatten consumed every close path; a
+        # stale pending exit would make the resolved NORMAL state unusable
+        # (its next entry vetoes position_already_open).
+        self._pending_exit = None
         if pending is None:
             return
         if self._position is not None:
@@ -794,6 +859,21 @@ class TradovateBroker:
                 f"fill for {order.status} order {fill.order_id}"
             )
         order.status = "filled"
+        if order.role == ROLE_INHERITED and self._position is None:
+            # Review 2026-07-19 P0-4A (defense in depth behind the boundary
+            # validation): an inherited order filling while locally flat has
+            # just created REAL exposure. Adopt it so the emergency
+            # liquidation covers it, then halt.
+            self._position = BrokerPosition(
+                side="long" if fill.side == "buy" else "short",
+                quantity=fill.quantity,
+                entry_price=fill.price,
+            )
+            self._emergency_flatten()
+            raise TradovateStateError(
+                f"inherited order {fill.order_id} filled while locally flat; "
+                "emergency flatten requested"
+            )
         if order.role == ROLE_ENTRY:
             self._on_entry_fill(fill, order)
         else:
@@ -898,9 +978,12 @@ class TradovateBroker:
         }
         self._liquidation_in_flight = True
         try:
-            order_id, logical_intent_id = self._journaled_liquidation(body)
+            receipt = self._journaled_liquidation(body)
         except TradovateError:
             return
+        if receipt is None:
+            return  # definitively rejected; the halt at the call site owns it
+        order_id, logical_intent_id = receipt
         position = self._position
         self._register_order(SubmittedOrder(
             order_id=order_id,
@@ -928,6 +1011,10 @@ class TradovateBroker:
                 continue
 
     def _request_cancel_or_halt(self, stop_id: str) -> None:
+        if stop_id in self._requested_cancel_ids:
+            # Review 2026-07-19 P0-2B: never re-POST a cancel already in
+            # flight -- a duplicate would orphan the first journal intent.
+            return
         try:
             self._journaled_cancel(stop_id)
         except Exception as exc:
@@ -1051,7 +1138,21 @@ class TradovateBroker:
                 f"protective stop {order.order_id} rejected; emergency flatten requested"
             )
         if order.role == ROLE_EXIT:
-            if order.reason != "emergency_flatten" and self._pending_flatten is None:
+            is_flatten_liquidation = (
+                order.order_id == self._pending_flatten_liquidation_id
+            )
+            if is_flatten_liquidation:
+                # Review 2026-07-19 P0-3: a rejected flatten liquidation must
+                # clear the in-flight/pending latches so a later explicit
+                # retry is possible after operator review; no second
+                # liquidation is attempted here.
+                self._liquidation_in_flight = False
+                self._pending_flatten = None
+                self._pending_flatten_liquidation_id = None
+            elif order.reason != "emergency_flatten":
+                # Review 2026-07-19 P0-2C: ANY other exit rejection -- even
+                # while a flatten awaits that exit's cancel -- leaves the
+                # position without a working close and must emergency-flatten.
                 self._emergency_flatten()
             self._latch_recovery()
             raise TradovateStateError(
@@ -1060,6 +1161,15 @@ class TradovateBroker:
 
     def _ingest_cancel(self, data: dict[str, Any]) -> None:
         order = self._known_order(str(data["orderId"]))
+        if order.status != "working":
+            # Review 2026-07-19 P0-2A: a duplicate terminal event must be
+            # idempotent -- confirm any outstanding cancel intent once and
+            # drop it. It must never reach the emergency branch.
+            duplicate_intent = self._cancel_intent_ids.pop(order.order_id, None)
+            if duplicate_intent is not None:
+                self._journal().transition(duplicate_intent, IntentState.CONFIRMED)
+            self._requested_cancel_ids.discard(order.order_id)
+            return
         cancel_intent_id = self._cancel_intent_ids.pop(order.order_id, None)
         if cancel_intent_id is not None:
             self._journal().transition(cancel_intent_id, IntentState.CONFIRMED)
@@ -1163,14 +1273,11 @@ class TradovateBroker:
             raise TradovateStateError(
                 "liquidation submission outcome unknown; reconciliation required"
             ) from exc
-        receipt = self._interpret_order_response(
+        return self._interpret_order_response(
             pending.intent_id,
             response,
             role="liquidation",
         )
-        if receipt is None:
-            raise TradovateStateError("liquidation response rejected")
-        return receipt
 
     def _journaled_cancel(self, order_id: str) -> None:
         journal = self._journal()
@@ -1254,7 +1361,9 @@ class TradovateBroker:
                 self._events.append(Rejected(order_id="", reason=str(reason)))
                 return None
             self._latch_recovery()
-            raise TradovateStateError(f"{role} response rejected: {reason}")
+            raise TradovateOrderRejectedError(
+                f"{role} response rejected: {reason}"
+            )
         journal.transition(
             intent_id,
             IntentState.SUBMISSION_UNKNOWN,

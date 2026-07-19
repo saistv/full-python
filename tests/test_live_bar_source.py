@@ -332,3 +332,38 @@ def test_abbreviated_holiday_session_IS_armed_inside_the_entry_window():
     assert next(it).timestamp_utc == "2025-11-27T14:35:00Z"
     with pytest.raises(DataOutageError):
         next(it)
+
+
+def test_review_2026_07_19_p1_1_on_wait_runs_between_wait_slices():
+    clock = FakeClock(datetime(2025, 11, 3, 15, 0, 30, tzinfo=timezone.utc))
+    feed = AdvancingFeed(
+        [None, None, None, _vbar("2025-11-03T15:01:00Z")], clock
+    )
+    waits = []
+    source = LiveBarSource(
+        feed, clock, AUTH, RTH_WINDOW, FLAT,
+        on_wait=lambda: waits.append(clock.now()),
+        wait_slice_seconds=2.0,
+    )
+
+    bar = next(iter(source))
+
+    assert bar.timestamp_utc == "2025-11-03T15:01:00Z"
+    # three empty slices -> maintenance ran between them, sub-bar cadence
+    assert len(waits) >= 3
+    # slices were bounded: no single feed wait consumed the whole minute
+    assert feed.calls >= 4
+
+
+def test_review_2026_07_19_p1_1_sliced_waits_still_hit_the_outage_deadline():
+    clock = FakeClock(datetime(2025, 11, 3, 15, 0, 30, tzinfo=timezone.utc))
+    feed = AdvancingFeed([None] * 200, clock)
+    source = LiveBarSource(
+        feed, clock, AUTH, RTH_WINDOW, IN_POSITION,
+        on_wait=lambda: None,
+        wait_slice_seconds=2.0,
+    )
+    source._last_emitted_ts = "2025-11-03T15:00:00Z"  # armed expectation
+
+    with pytest.raises(DataOutageError, match="armed"):
+        next(iter(source))
