@@ -138,7 +138,9 @@ def build_order_session(
 
     def maintenance() -> None:
         try:
-            pump.pump()
+            # Explicit positive wait: a zero-wait pump never reads the real
+            # transport (review 2026-07-19, P0-1).
+            pump.pump(max_wait_seconds=0.25)
         except ExecutionInvariantError:
             raise
         except Exception as exc:

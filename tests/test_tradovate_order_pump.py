@@ -21,7 +21,11 @@ class FakeWebSocket:
         self.heartbeats += 1
 
     def receive_event(self, wait_seconds):
+        # Faithful to TradovateWebSocketClient: a nonpositive wait returns
+        # before touching the transport (review 2026-07-19, P0-1).
         self.receive_waits.append(wait_seconds)
+        if wait_seconds <= 0:
+            return None
         if not self.events:
             return None
         return self.events.pop(0)
@@ -90,9 +94,10 @@ def test_pump_translates_and_delivers_events_in_order():
 
     assert delivered == 2
     assert [raw.kind for raw in broker.raw_events] == ["fill", "cancel"]
-    # only the first receive may block; the rest poll
+    # the first receive uses the caller's budget; follow-ups use the
+    # positive drain wait so fresh frames are still read (P0-1)
     assert ws.receive_waits[0] == 1.0
-    assert all(wait == 0.0 for wait in ws.receive_waits[1:])
+    assert all(wait > 0 for wait in ws.receive_waits[1:])
 
 
 def test_heartbeat_sent_on_cadence_not_every_pump():
@@ -171,6 +176,20 @@ def test_constructor_and_pump_validate_numeric_arguments():
         with pytest.raises(TradovateStateError, match="interval"):
             _pump([], interval=bad_interval)
     pump, _ws, _broker, _rest = _pump([])
-    for bad_wait in (-1.0, float("nan"), float("inf"), True):
+    for bad_wait in (0.0, -1.0, float("nan"), float("inf"), True):
         with pytest.raises(TradovateStateError, match="max_wait_seconds"):
             pump.pump(max_wait_seconds=bad_wait)
+
+
+def test_review_2026_07_19_p0_1_default_pump_reads_the_socket():
+    """A default pump() must deliver a waiting fill (zero-wait was a no-op)."""
+    events = [_props("fill", "Created", {
+        "orderId": 101, "timestamp": "t", "action": "Buy", "qty": 1, "price": 1.0,
+    })]
+    pump, ws, broker, _rest = _pump(events)
+
+    delivered = pump.pump()  # default wait must be positive and must read
+
+    assert delivered == 1
+    assert [raw.kind for raw in broker.raw_events] == ["fill"]
+    assert ws.receive_waits[0] > 0

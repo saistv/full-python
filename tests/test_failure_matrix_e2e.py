@@ -103,6 +103,10 @@ class ServerSim:
         self.heartbeats += 1
 
     def receive_event(self, wait_seconds):
+        # Faithful to the real client: nonpositive wait never reads the
+        # transport (review 2026-07-19, P0-1).
+        if wait_seconds <= 0:
+            return None
         if self.ws_queue:
             return self.ws_queue.pop(0)
         return None
@@ -415,7 +419,7 @@ def test_e2e_startup_flatten_then_clean_session(tmp_path):
     )
     session.broker.startup_flatten(inherited, timestamp_utc="2026-07-07T14:30:00Z")
     run_startup_flatten(session.broker, session.pump, timeout_seconds=5.0,
-                        wait_seconds=0.0)
+                        wait_seconds=0.25)
 
     assert session.broker.position is None
     assert session.broker.flatten_in_progress is False

@@ -27,7 +27,12 @@ from full_python.tradovate.errors import TradovateStateError
 from full_python.tradovate.order_events import translate_user_sync_event
 
 _HEARTBEAT_INTERVAL_SECONDS = 2.5  # same cadence as the account runtime
-_MAX_EVENTS_PER_PUMP = 512  # bound one maintenance call; the next bar re-enters
+_MAX_EVENTS_PER_PUMP = 512  # bound one maintenance call; the next call re-enters
+# Positive drain wait for follow-up reads: the real client returns BEFORE
+# touching the transport on a nonpositive wait (review 2026-07-19, P0-1),
+# so a zero-wait drain loop would read decoded backlog only, never fresh
+# frames. One trailing empty read costs at most this much.
+_DRAIN_WAIT_SECONDS = 0.05
 
 
 class OrderEventPump:
@@ -62,16 +67,21 @@ class OrderEventPump:
         self._last_heartbeat_sent: Optional[float] = None
         self._next_reconciliation = now + self._reconciliation_interval
 
-    def pump(self, max_wait_seconds: float = 0.0) -> int:
-        """Drain available events into the broker; returns raw events delivered."""
+    def pump(self, max_wait_seconds: float = 0.25) -> int:
+        """Drain available events into the broker; returns raw events delivered.
+
+        `max_wait_seconds` must be POSITIVE: with the real websocket client a
+        nonpositive wait returns before reading the transport, so a zero-wait
+        pump is a no-op that looks like work (review 2026-07-19, P0-1).
+        """
         if (
             isinstance(max_wait_seconds, bool)
             or not isinstance(max_wait_seconds, (int, float))
             or not math.isfinite(float(max_wait_seconds))
-            or max_wait_seconds < 0
+            or max_wait_seconds <= 0
         ):
             raise TradovateStateError(
-                "order pump max_wait_seconds must be finite and nonnegative"
+                "order pump max_wait_seconds must be finite and positive"
             )
         now = self._clock()
         if (
@@ -85,7 +95,7 @@ class OrderEventPump:
         wait = float(max_wait_seconds)
         for _ in range(_MAX_EVENTS_PER_PUMP):
             event = self._websocket.receive_event(wait)
-            wait = 0.0  # only the first receive may block
+            wait = _DRAIN_WAIT_SECONDS  # follow-up reads must still touch the transport
             if event is None:
                 break
             if isinstance(event, dict) and event.get("e") == "shutdown":
