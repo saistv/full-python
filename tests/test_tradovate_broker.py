@@ -1866,3 +1866,67 @@ def test_rollover_with_unconfirmed_cancel_still_halts_fail_closed():
     day2 = _bar_at("2026-07-08T13:31:00Z")
     with pytest.raises(TradovateStateError, match="backstop should have flattened"):
         broker.process_bar_open(day2, _session(day2))
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-07-19 pins: P0-2 interleavings (single-close invariant)
+# ---------------------------------------------------------------------------
+
+
+def test_review_2026_07_19_p0_2a_duplicate_cancel_is_idempotent():
+    broker, rest = _entered_broker()
+    broker.apply_strategy_result(_bar(), _session(), _exit_result())
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+    exits_placed = len(rest.placed)
+    liq_before = len(rest.liquidations)
+    broker.poll_events()
+
+    # duplicate terminal event: must be a silent no-op, never an emergency
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+
+    assert len(rest.placed) == exits_placed          # no new orders
+    assert len(rest.liquidations) == liq_before      # no emergency liquidation
+    assert broker.poll_events() == []                # no duplicate Canceled event
+    assert broker._orders["103"].status == "working" # market exit still working
+
+
+def test_review_2026_07_19_p0_2b_same_bar_flatten_and_exit_cancel_once():
+    broker, rest = _entered_broker()
+    backstop_bar = _bar_at("2026-07-07T19:59:00Z")
+
+    broker.process_bar_open(backstop_bar, _session(backstop_bar))  # backstop flatten
+    assert len(rest.canceled) == 1
+
+    broker.poll_events()
+    broker.apply_strategy_result(
+        backstop_bar, _session(backstop_bar), _exit_result(backstop_bar)
+    )
+
+    assert len(rest.canceled) == 1  # no duplicate cancel POST
+    cancel_intents = [
+        r for r in rest.journal.records
+        if r.role == "cancel" and r.state == IntentState.SUBMISSION_PENDING
+    ]
+    assert len(cancel_intents) == 1  # no orphaned journal intent
+    assert broker.poll_events() == [
+        Rejected(order_id="", reason="flatten_in_progress")
+    ]
+
+
+def test_review_2026_07_19_p0_2c_exit_rejection_during_flatten_emergency_flattens():
+    broker, rest = _entered_broker()
+    broker.apply_strategy_result(_bar(), _session(), _exit_result())
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": 102}))
+    assert broker._orders["103"].status == "working"  # market exit in flight
+
+    broker.flatten(_bar(), "daily_limit")  # flatten now awaits cancel of 103
+    liq_before = len(rest.liquidations)
+
+    with pytest.raises(TradovateStateError, match="rejected"):
+        broker.ingest_raw_event(TradovateRawEvent(kind="reject", data={
+            "orderId": 103, "reason": "exchange reject",
+        }))
+
+    # the position has no working close; the emergency MUST liquidate
+    assert len(rest.liquidations) == liq_before + 1
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED

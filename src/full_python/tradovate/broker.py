@@ -199,6 +199,7 @@ class TradovateBroker:
         self._working_stop_id: Optional[str] = None
         self._pending_exit: Optional[PendingExit] = None
         self._pending_flatten: Optional[PendingFlatten] = None
+        self._pending_flatten_liquidation_id: Optional[str] = None
         self._requested_cancel_ids: set[str] = set()
         self._cancel_intent_ids: dict[str, str] = {}
         self._liquidation_in_flight = False
@@ -492,6 +493,14 @@ class TradovateBroker:
                 self._events.append(Rejected(order_id="", reason="order_disabled"))
                 continue
             self._require_active_symbol(exit_decision.symbol)
+            if self._pending_flatten is not None or self._liquidation_in_flight:
+                # Review 2026-07-19 P0-2B: the flatten owns the close; a
+                # same-bar strategy exit must not start a second closing path
+                # or re-request the same cancel.
+                self._events.append(
+                    Rejected(order_id="", reason="flatten_in_progress")
+                )
+                continue
             if self._pending_exit is not None:
                 continue
             stop_id = self._working_stop_id
@@ -714,6 +723,7 @@ class TradovateBroker:
             reason=pending.reason,
             logical_intent_id=logical_intent_id,
         ))
+        self._pending_flatten_liquidation_id = order_id
         self._execution_state = BrokerExecutionState.FLATTEN_PENDING_FILL
         self._events.append(Acked(order_id=order_id))
 
@@ -722,6 +732,7 @@ class TradovateBroker:
         self._liquidation_in_flight = False
         pending = self._pending_flatten
         self._pending_flatten = None
+        self._pending_flatten_liquidation_id = None
         if pending is None:
             return
         if self._position is not None:
@@ -928,6 +939,10 @@ class TradovateBroker:
                 continue
 
     def _request_cancel_or_halt(self, stop_id: str) -> None:
+        if stop_id in self._requested_cancel_ids:
+            # Review 2026-07-19 P0-2B: never re-POST a cancel already in
+            # flight -- a duplicate would orphan the first journal intent.
+            return
         try:
             self._journaled_cancel(stop_id)
         except Exception as exc:
@@ -1051,7 +1066,21 @@ class TradovateBroker:
                 f"protective stop {order.order_id} rejected; emergency flatten requested"
             )
         if order.role == ROLE_EXIT:
-            if order.reason != "emergency_flatten" and self._pending_flatten is None:
+            is_flatten_liquidation = (
+                order.order_id == self._pending_flatten_liquidation_id
+            )
+            if is_flatten_liquidation:
+                # Review 2026-07-19 P0-3: a rejected flatten liquidation must
+                # clear the in-flight/pending latches so a later explicit
+                # retry is possible after operator review; no second
+                # liquidation is attempted here.
+                self._liquidation_in_flight = False
+                self._pending_flatten = None
+                self._pending_flatten_liquidation_id = None
+            elif order.reason != "emergency_flatten":
+                # Review 2026-07-19 P0-2C: ANY other exit rejection -- even
+                # while a flatten awaits that exit's cancel -- leaves the
+                # position without a working close and must emergency-flatten.
                 self._emergency_flatten()
             self._latch_recovery()
             raise TradovateStateError(
@@ -1060,6 +1089,15 @@ class TradovateBroker:
 
     def _ingest_cancel(self, data: dict[str, Any]) -> None:
         order = self._known_order(str(data["orderId"]))
+        if order.status != "working":
+            # Review 2026-07-19 P0-2A: a duplicate terminal event must be
+            # idempotent -- confirm any outstanding cancel intent once and
+            # drop it. It must never reach the emergency branch.
+            duplicate_intent = self._cancel_intent_ids.pop(order.order_id, None)
+            if duplicate_intent is not None:
+                self._journal().transition(duplicate_intent, IntentState.CONFIRMED)
+            self._requested_cancel_ids.discard(order.order_id)
+            return
         cancel_intent_id = self._cancel_intent_ids.pop(order.order_id, None)
         if cancel_intent_id is not None:
             self._journal().transition(cancel_intent_id, IntentState.CONFIRMED)
