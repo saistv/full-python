@@ -95,6 +95,8 @@ class BrokerExecutionState(str, Enum):
     ENTRY_PENDING_FILL = "entry_pending_fill"
     EXIT_PENDING_CANCEL = "exit_pending_cancel"
     EXIT_PENDING_FILL = "exit_pending_fill"
+    FLATTEN_PENDING_CANCEL = "flatten_pending_cancel"
+    FLATTEN_PENDING_FILL = "flatten_pending_fill"
     RECOVERY_REQUIRED = "recovery_required"
 
 
@@ -118,6 +120,19 @@ class PendingExit:
     quantity: int
     reason: str
     stop_order_id: str
+
+
+@dataclass(frozen=True)
+class PendingFlatten:
+    """A staged flatten: cancel confirmed first, liquidate second (P0-2).
+
+    Resolution (confirmed flat with no working orders) must land within the
+    request bar; `process_bar_open` halts on any later bar (P0-04 deadline).
+    """
+
+    reason: str
+    awaiting_cancel_ids: frozenset
+    requested_on_bar: str
 
 
 class TradovateBroker:
@@ -167,6 +182,7 @@ class TradovateBroker:
         self._position: Optional[BrokerPosition] = None
         self._working_stop_id: Optional[str] = None
         self._pending_exit: Optional[PendingExit] = None
+        self._pending_flatten: Optional[PendingFlatten] = None
         self._requested_cancel_ids: set[str] = set()
         self._cancel_intent_ids: dict[str, str] = {}
         self._liquidation_in_flight = False
@@ -347,8 +363,40 @@ class TradovateBroker:
 
     def process_bar_open(self, bar: MarketBar, session: SessionInfo) -> float:
         self._handle_session_rollover(session)
+        pending_flatten = self._pending_flatten
+        if (
+            pending_flatten is not None
+            and pending_flatten.requested_on_bar != bar.timestamp_utc
+        ):
+            # One full bar is the confirmation deadline: every cancel/fill
+            # confirmation for a marketable order arrives within the same
+            # one-minute bar on this feed. Anything slower halts for review
+            # (the raise reaches LiveLoop, which writes the durable
+            # execution_halt ledger entry -- the external alert).
+            self._latch_recovery()
+            raise TradovateStateError(
+                f"unresolved flatten ({pending_flatten.reason}) from bar "
+                f"{pending_flatten.requested_on_bar}; halting for review"
+            )
         self._require_current_hydration(session)
         self._fill_ledger.mark_bar(high=bar.high, low=bar.low)
+        close_minutes = session.rth_close_minutes_et
+        if (
+            close_minutes is not None
+            and session.minutes_from_midnight_et >= close_minutes - 1
+            and self._pending_flatten is None
+            and not self._liquidation_in_flight
+            and (self._position is not None or self._has_working_orders())
+        ):
+            # Broker-side session-close backstop from the exchange calendar
+            # (P0-03): fires at close-1 on EVERY session, including early
+            # closes, independent of the strategy's own backstop exit.
+            if not self._config.flatten_enabled:
+                raise TradovateStateError(
+                    "session close reached with an open position and "
+                    "flatten_enabled=False"
+                )
+            self.flatten(bar, "session_close_backstop")
         session_pnl = self._session_pnl(bar, session)
         if not self._daily_limit_hit and is_daily_loss_breached(
             session_pnl, self._config.daily_loss_limit
@@ -369,7 +417,7 @@ class TradovateBroker:
         if self._position is not None or self._has_working_orders():
             raise TradovateStateError(
                 "session rollover with an open position or working orders -- "
-                "the 15:59 backstop should have flattened; halting for review"
+                "the session-close backstop should have flattened; halting for review"
             )
         if self._config.order_enabled:
             if self._hydrated_trade_date != session.session_date.isoformat():
@@ -500,15 +548,56 @@ class TradovateBroker:
         return None
 
     def flatten(self, bar: MarketBar, reason: str) -> None:
+        """Staged, event-confirmed flatten (P0-2/P0-04/P1-5).
+
+        Cancel every working order first and wait for confirmed cancellation
+        before any liquidation, so two live closing orders can never coexist.
+        A routine flatten does NOT latch recovery; only unresolved outcomes do.
+        """
         if not self._config.flatten_enabled:
             raise TradovateOrderSafetyError("flatten_disabled")
-        if self._liquidation_in_flight:
+        if self._pending_flatten is not None or self._liquidation_in_flight:
             return
-        self._recovery_required = True
-        self._execution_state = BrokerExecutionState.RECOVERY_REQUIRED
-        self._cancel_working_orders_best_effort()
+        working = [o for o in self._orders.values() if o.status == "working"]
+        if self._position is None and not working:
+            return  # routine no-op: nothing to cancel, nothing to close
+        to_cancel = []
+        for order in working:
+            if order.order_id in self._requested_cancel_ids:
+                to_cancel.append(order.order_id)
+                continue
+            try:
+                self._journaled_cancel(order.order_id)
+            except Exception as exc:
+                # Two live closing orders must never coexist (P0-2). The
+                # working orders still stand; halt for review instead of
+                # liquidating blind.
+                self._latch_recovery()
+                raise TradovateStateError(
+                    f"flatten could not cancel working order {order.order_id}; "
+                    "halting with existing protection in place"
+                ) from exc
+            self._requested_cancel_ids.add(order.order_id)
+            to_cancel.append(order.order_id)
+        self._pending_flatten = PendingFlatten(
+            reason=reason,
+            awaiting_cancel_ids=frozenset(to_cancel),
+            requested_on_bar=bar.timestamp_utc,
+        )
+        if to_cancel:
+            self._execution_state = BrokerExecutionState.FLATTEN_PENDING_CANCEL
+            return
+        # Position with no working orders: liquidate directly, still confirmed.
+        self._submit_flatten_liquidation()
+
+    def _submit_flatten_liquidation(self) -> None:
+        pending = self._pending_flatten
+        if pending is None:
+            return
         position = self._position
         if position is None:
+            # Working orders canceled and no position remains: flat achieved.
+            self._resolve_pending_flatten()
             return
         body = {
             "accountId": self._config.account_id,
@@ -520,8 +609,10 @@ class TradovateBroker:
         try:
             order_id, logical_intent_id = self._journaled_liquidation(body)
         except TradovateStateError:
+            self._latch_recovery()
             raise
         except Exception as exc:
+            self._latch_recovery()
             raise TradovateStateError(
                 "liquidation submission outcome unknown; broker reconciliation required"
             ) from exc
@@ -531,10 +622,31 @@ class TradovateBroker:
             side="sell" if position.side == "long" else "buy",
             quantity=position.quantity,
             symbol=self._active_contract_symbol(),
-            reason=reason,
+            reason=pending.reason,
             logical_intent_id=logical_intent_id,
         ))
+        self._execution_state = BrokerExecutionState.FLATTEN_PENDING_FILL
         self._events.append(Acked(order_id=order_id))
+
+    def _resolve_pending_flatten(self) -> None:
+        """Confirm flat + no working orders before leaving the flatten (P0-04)."""
+        self._liquidation_in_flight = False
+        pending = self._pending_flatten
+        self._pending_flatten = None
+        if pending is None:
+            return
+        if self._position is not None:
+            self._latch_recovery()
+            raise TradovateStateError(
+                "flatten resolution with a position still open; recovery required"
+            )
+        if self._has_working_orders():
+            self._latch_recovery()
+            raise TradovateStateError(
+                "flatten resolution with a residual working order; recovery required"
+            )
+        if not self._recovery_required:
+            self._execution_state = BrokerExecutionState.NORMAL
 
     def poll_events(self) -> list[BrokerEvent]:
         events = list(self._events)
@@ -615,7 +727,9 @@ class TradovateBroker:
             stop_price=order.stop_price if order.stop_price is not None else 0.0,
             session_date=session_date,
         )
-        if order.order_id in self._requested_cancel_ids and self._recovery_required:
+        if order.order_id in self._requested_cancel_ids and (
+            self._recovery_required or self._pending_flatten is not None
+        ):
             self._emergency_flatten()
             raise TradovateStateError(
                 f"entry order {order.order_id} filled after flatten cancellation; "
@@ -813,6 +927,10 @@ class TradovateBroker:
             reason=order.reason or order.role,
         )
         self._strategy_feedback.append(trade)
+        if self._pending_flatten is not None:
+            # Either the liquidation filled, or the canceled-too-late stop
+            # closed the position first (P0-2 race) -- flat either way.
+            self._resolve_pending_flatten()
 
     def _ingest_reject(self, data: dict[str, Any]) -> None:
         order = self._known_order(str(data["orderId"]))
@@ -832,8 +950,9 @@ class TradovateBroker:
                 f"protective stop {order.order_id} rejected; emergency flatten requested"
             )
         if order.role == ROLE_EXIT:
-            if order.reason != "emergency_flatten":
+            if order.reason != "emergency_flatten" and self._pending_flatten is None:
                 self._emergency_flatten()
+            self._latch_recovery()
             raise TradovateStateError(
                 f"exit order {order.order_id} rejected; recovery required"
             )
@@ -849,6 +968,20 @@ class TradovateBroker:
         if order.order_id == self._working_stop_id:
             self._working_stop_id = None
         self._events.append(Canceled(order_id=order.order_id))
+        pending_flatten = self._pending_flatten
+        if (
+            pending_flatten is not None
+            and order.order_id in pending_flatten.awaiting_cancel_ids
+        ):
+            remaining = pending_flatten.awaiting_cancel_ids - {order.order_id}
+            self._pending_flatten = PendingFlatten(
+                reason=pending_flatten.reason,
+                awaiting_cancel_ids=remaining,
+                requested_on_bar=pending_flatten.requested_on_bar,
+            )
+            if not remaining:
+                self._submit_flatten_liquidation()
+            return
         if order.role == ROLE_ENTRY:
             if not self._recovery_required:
                 self._execution_state = BrokerExecutionState.NORMAL
