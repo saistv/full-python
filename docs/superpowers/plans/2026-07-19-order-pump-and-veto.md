@@ -12,7 +12,7 @@ offline fakes only, sim/paper identity untouched, live flags default-False.
 
 Files: `src/full_python/tradovate/broker.py`, `tests/test_tradovate_broker.py`.
 
-- [ ] Failing tests: (a) `order_enabled` without `risk_limits` raises
+- [x] Failing tests: (a) `order_enabled` without `risk_limits` raises
   `TradovateConfigError`; (b) an entry intent on a session the calendar
   closes (`rth_close_minutes_et=None`) is `Rejected(reason="market_closed")`
   with `rest.placed == []` and no journal record; (c) an entry inside the
@@ -22,18 +22,18 @@ Files: `src/full_python/tradovate/broker.py`, `tests/test_tradovate_broker.py`.
   any POST; (e) a valid intent still places (existing tests keep passing
   with `_cfg` growing a default `RiskLimits(max_contracts=1,
   flatten_minutes_et=959, rth_entries_only=True)`).
-- [ ] Implement: constructor requirement + `self._risk_manager =
+- [x] Implement: constructor requirement + `self._risk_manager =
   RiskManager(risk_limits)` when provided; veto evaluation at the top of the
   entry-intent branch in `apply_strategy_result`; veto → `Rejected` event +
   `continue`.
-- [ ] Full broker file green; commit.
+- [x] Full broker file green; commit.
 
 ## Task G2: order-event translation (pure)
 
 Files: `src/full_python/tradovate/order_events.py` (new),
 `tests/test_tradovate_order_events.py` (new).
 
-- [ ] Failing tests: fill Created → one fill raw event with mapped fields;
+- [x] Failing tests: fill Created → one fill raw event with mapped fields;
   order Canceled → cancel; order Rejected → reject with reason; order
   Working/Filled → []; position entity → position raw event with
   netPos→side/qty mapping (1→long/1, -2→short/2, 0→flat/0); non-order
@@ -42,16 +42,16 @@ Files: `src/full_python/tradovate/order_events.py` (new),
   `TradovateStateError`; absent identity → injected from scope; malformed
   fill (missing qty/price/orderId) → raises; non-props / shutdown /
   non-dict events → raises.
-- [ ] Implement `translate_user_sync_event(event, *, account_id,
+- [x] Implement `translate_user_sync_event(event, *, account_id,
   contract_id) -> list[TradovateRawEvent]` per spec §G2.
-- [ ] Green; commit.
+- [x] Green; commit.
 
 ## Task G3: OrderEventPump (P1-6)
 
 Files: `src/full_python/tradovate/order_pump.py` (new),
 `tests/test_tradovate_order_pump.py` (new).
 
-- [ ] Failing tests with fakes (FakeWebSocket with scripted events +
+- [x] Failing tests with fakes (FakeWebSocket with scripted events +
   `last_transport_activity`, FakeBroker recording `ingest_raw_event` /
   `reconcile_rest_positions`, ManualClock): (a) pump translates and delivers
   scripted fill+cancel events in order and returns the count; (b) heartbeat
@@ -62,29 +62,29 @@ Files: `src/full_python/tradovate/order_pump.py` (new),
   (f) constructor validates intervals positive/finite; (g) a props event for
   a non-lifecycle entity delivers nothing but still counts as transport
   activity (no liveness regression).
-- [ ] Implement `OrderEventPump` per spec §G3.
-- [ ] Green; commit.
+- [x] Implement `OrderEventPump` per spec §G3.
+- [x] Green; commit.
 
 ## Task G4: order-runner composition skeleton
 
 Files: `src/full_python/live/order_runner.py` (new),
 `tests/test_order_runner.py` (new).
 
-- [ ] Failing tests: `build_order_session` composes broker (with
+- [x] Failing tests: `build_order_session` composes broker (with
   `risk_limits`), pump-in-maintenance, and LiveLoop from injected fakes; the
   maintenance hook invokes `pump.pump`; explicit account selection is
   required and a mismatch raises (no `accounts[0]` fallback — P3-4 not
   repeated); the CLI `main()` pins `order_enabled=False` /
   `flatten_enabled=False` literals (test asserts by inspection of the built
   config, not by parsing source).
-- [ ] Implement per spec §G4; `main()` carries the Gate-5 comment.
-- [ ] Green; commit.
+- [x] Implement per spec §G4; `main()` carries the Gate-5 comment.
+- [x] Green; commit.
 
 ## Task G5: docs
 
-- [ ] Decision record `docs/decisions/2026-07-19-order-pump-and-veto.md`
+- [x] Decision record `docs/decisions/2026-07-19-order-pump-and-veto.md`
   (findings closed in code: P1-7 fully, P1-6's caller with the runtime
   division-of-authority note; still open: P1-01 envelope, P1-8, Slice F,
   P3-4 closed in the NEW runner only).
-- [ ] HANDOFF §5 bullet + §6 task-1 scope update.
-- [ ] Full suite + anchor suite green; commit; PR.
+- [x] HANDOFF §5 bullet + §6 task-1 scope update.
+- [x] Full suite + anchor suite green; commit; PR.
