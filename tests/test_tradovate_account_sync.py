@@ -6,6 +6,7 @@ from datetime import date
 import pytest
 
 from full_python.execution.order_intent_journal import IntentState, OrderIntentJournal
+from full_python.risk.limits import RiskLimits
 from full_python.tradovate.account_sync import (
     REQUIRED_SYNC_ENTITY_TYPES,
     TradovateAccountHydrator,
@@ -29,6 +30,9 @@ def _config() -> TradovateAdapterConfig:
         commission_per_contract_round_trip=1.0,
         daily_loss_limit=1000.0,
     )
+
+
+_RISK_LIMITS = RiskLimits(max_contracts=1, flatten_minutes_et=959, rth_entries_only=True)
 
 
 def _collections(**overrides):
@@ -203,7 +207,7 @@ def test_order_enabled_broker_starts_closed_then_exact_flat_hydration_opens(tmp_
     values = _collections()
     snapshot, _ws, rest = _hydrate(values)
     journal = OrderIntentJournal(tmp_path / "orders.jsonl", run_id="run-a")
-    broker = TradovateBroker(_config(), rest, intent_journal=journal)
+    broker = TradovateBroker(_config(), rest, intent_journal=journal, risk_limits=_RISK_LIMITS)
 
     assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
     broker.hydrate_account_state(snapshot)
@@ -216,7 +220,7 @@ def test_order_enabled_broker_starts_closed_then_exact_flat_hydration_opens(tmp_
 def test_explicit_account_state_invalidation_closes_hydrated_broker(tmp_path):
     snapshot, _ws, rest = _hydrate()
     journal = OrderIntentJournal(tmp_path / "orders.jsonl", run_id="run-a")
-    broker = TradovateBroker(_config(), rest, intent_journal=journal)
+    broker = TradovateBroker(_config(), rest, intent_journal=journal, risk_limits=_RISK_LIMITS)
     broker.hydrate_account_state(snapshot)
 
     broker.invalidate_account_state("user sync property update")
@@ -228,7 +232,7 @@ def test_explicit_account_state_invalidation_closes_hydrated_broker(tmp_path):
 def test_account_state_invalidation_requires_nonblank_reason(tmp_path):
     snapshot, _ws, rest = _hydrate()
     journal = OrderIntentJournal(tmp_path / "orders.jsonl", run_id="run-a")
-    broker = TradovateBroker(_config(), rest, intent_journal=journal)
+    broker = TradovateBroker(_config(), rest, intent_journal=journal, risk_limits=_RISK_LIMITS)
     broker.hydrate_account_state(snapshot)
 
     with pytest.raises(TradovateStateError, match="reason"):
@@ -260,7 +264,7 @@ def test_open_position_is_recognized_but_cannot_open_entry_latch(tmp_path):
     assert snapshot.entry_permitted is False
 
     journal = OrderIntentJournal(tmp_path / "orders.jsonl", run_id="run-a")
-    broker = TradovateBroker(_config(), rest, intent_journal=journal)
+    broker = TradovateBroker(_config(), rest, intent_journal=journal, risk_limits=_RISK_LIMITS)
     with pytest.raises(TradovateStateError, match="inherited open position"):
         broker.hydrate_account_state(snapshot)
     assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
@@ -390,7 +394,7 @@ def test_acknowledged_history_reopens_only_with_exact_broker_correlation(tmp_pat
         IntentState.ACKNOWLEDGED,
         broker_order_id="801",
     )
-    broker = TradovateBroker(_config(), rest, intent_journal=journal)
+    broker = TradovateBroker(_config(), rest, intent_journal=journal, risk_limits=_RISK_LIMITS)
 
     broker.hydrate_account_state(snapshot)
 
@@ -413,7 +417,7 @@ def test_legacy_acknowledged_history_without_client_id_stays_closed(tmp_path):
         IntentState.ACKNOWLEDGED,
         broker_order_id="801",
     )
-    broker = TradovateBroker(_config(), rest, intent_journal=journal)
+    broker = TradovateBroker(_config(), rest, intent_journal=journal, risk_limits=_RISK_LIMITS)
 
     with pytest.raises(TradovateStateError, match="client operation ID"):
         broker.hydrate_account_state(snapshot)
@@ -448,7 +452,7 @@ def test_acknowledged_history_with_mismatched_command_stays_closed(tmp_path):
         IntentState.ACKNOWLEDGED,
         broker_order_id="801",
     )
-    broker = TradovateBroker(_config(), rest, intent_journal=journal)
+    broker = TradovateBroker(_config(), rest, intent_journal=journal, risk_limits=_RISK_LIMITS)
 
     with pytest.raises(TradovateStateError, match="broker command"):
         broker.hydrate_account_state(snapshot)

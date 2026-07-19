@@ -14,6 +14,7 @@ from full_python.events import EventLedger, EventType
 from full_python.execution.live_loop import LiveLoop
 from full_python.execution.order_intent_journal import IntentState
 from full_python.execution.supervisor import RiskSupervisor, RiskSupervisorConfig
+from full_python.risk.limits import RiskLimits
 from full_python.models import MarketBar, OrderIntent, StrategyResult
 from full_python.tradovate.account_sync import AccountHydrationSnapshot
 from full_python.tradovate.broker import TradovateBroker, TradovateRawEvent
@@ -184,7 +185,10 @@ def _cfg() -> TradovateAdapterConfig:
 
 
 def _broker(rest: FakeRestClient) -> TradovateBroker:
-    broker = TradovateBroker(_cfg(), rest, intent_journal=MemoryIntentJournal())
+    broker = TradovateBroker(
+        _cfg(), rest, intent_journal=MemoryIntentJournal(),
+        risk_limits=RiskLimits(max_contracts=1, flatten_minutes_et=959, rth_entries_only=True),
+    )
     broker.hydrate_account_state(AccountHydrationSnapshot(
         account_id=456,
         account_spec="DEMO123",

@@ -68,6 +68,8 @@ from full_python.execution.order_intent_journal import (
 )
 from full_python.models import Fill, MarketBar, StrategyResult, Trade
 from full_python.risk.daily_loss import is_daily_loss_breached
+from full_python.risk.limits import RiskLimits
+from full_python.risk.risk_manager import RiskManager
 from full_python.tradovate.config import TradovateAdapterConfig
 from full_python.tradovate.account_sync import AccountHydrationSnapshot
 from full_python.tradovate.errors import (
@@ -142,6 +144,7 @@ class TradovateBroker:
         rest_client: Any,
         *,
         intent_journal: Optional[IntentJournal] = None,
+        risk_limits: Optional[RiskLimits] = None,
     ) -> None:
         if config.dollar_point_value is None:
             raise TradovateConfigError(
@@ -169,9 +172,18 @@ class TradovateBroker:
                 raise TradovateConfigError(
                     "flatten_enabled requires a durable intent_journal"
                 )
+        if config.order_enabled and risk_limits is None:
+            raise TradovateConfigError(
+                "order_enabled requires risk_limits -- the shared sim/live "
+                "RiskManager veto (audit P1-7): live must refuse every "
+                "order the simulator refuses"
+            )
         self._config = config
         self._rest_client = rest_client
         self._intent_journal = intent_journal
+        self._risk_manager = (
+            RiskManager(risk_limits) if risk_limits is not None else None
+        )
         self._events: list[BrokerEvent] = []
         self._strategy_feedback: list[StrategyFeedback] = []
         self._orders: dict[str, SubmittedOrder] = {}
@@ -500,6 +512,30 @@ class TradovateBroker:
                 raise TradovateOrderSafetyError(
                     "live quantity must equal 1 until partial-fill recovery is modeled"
                 )
+            if self._risk_manager is not None:
+                # The exact veto the simulator applies (audit P1-7): identical
+                # module, identical reason strings, evaluated before any
+                # journal or REST activity. Malformed strategy output (missing
+                # stop, quantity != 1) stays a LOUD TradovateOrderSafetyError
+                # above -- those are code bugs, not market conditions.
+                veto = self._risk_manager.veto_reason(
+                    has_open_order=(
+                        self._position is not None
+                        or self._pending_exit is not None
+                        or self._pending_flatten is not None
+                        or self._liquidation_in_flight
+                        or self._has_working_orders()
+                    ),
+                    daily_limit_hit=self._daily_limit_hit,
+                    session=session,
+                    intent=intent,
+                    reference_price=float(
+                        intent.metadata.get("signal_price", bar.close)
+                    ),
+                )
+                if veto is not None:
+                    self._events.append(Rejected(order_id="", reason=veto))
+                    continue
             if not self._entry_is_stable_flat():
                 self._events.append(
                     Rejected(order_id="", reason="entry_not_stable_flat")
