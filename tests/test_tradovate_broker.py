@@ -25,6 +25,7 @@ from full_python.tradovate.config import DEMO_ENVIRONMENT, TradovateAdapterConfi
 from full_python.tradovate.errors import (
     TradovateConfigError,
     TradovateOrderSafetyError,
+    TradovateStateError,
 )
 
 
@@ -1692,3 +1693,134 @@ def test_invalid_stop_vetoes_before_any_post():
 
     assert rest.placed == []
     assert broker.poll_events() == [Rejected(order_id="", reason="invalid_stop")]
+
+
+# ---------------------------------------------------------------------------
+# P1-8: startup inherited-state flatten (operator policy 2026-07-19: FLATTEN)
+# ---------------------------------------------------------------------------
+
+
+def _unhydrated_order_broker():
+    journal = RecordingIntentJournal()
+    rest = FakeRestClient(journal)
+    broker = TradovateBroker(
+        _cfg(order_enabled=True, flatten_enabled=True),
+        rest,
+        intent_journal=journal,
+        risk_limits=_RISK_LIMITS,
+    )
+    return broker, rest
+
+
+def _inherited_snapshot(position=True, orders=True, order_action="Sell"):
+    return replace(
+        _flat_hydration_snapshot(),
+        position=BrokerPosition(side="long", quantity=1, entry_price=20100.25)
+        if position else None,
+        working_orders=({
+            "id": 555, "ordStatus": "Working", "contractId": 789,
+            "action": order_action, "orderQty": 1,
+        },) if orders else (),
+        entry_permitted=False,
+    )
+
+
+def test_startup_flatten_stages_cancel_liquidation_and_stays_recovery():
+    broker, rest = _unhydrated_order_broker()
+
+    broker.startup_flatten(
+        _inherited_snapshot(), timestamp_utc="2026-07-20T13:31:00Z"
+    )
+
+    assert broker.flatten_in_progress is True
+    assert len(rest.canceled) == 1
+    _assert_cancel_request(rest.canceled[0], 555)
+    assert rest.liquidations == []
+    assert broker.execution_state == BrokerExecutionState.FLATTEN_PENDING_CANCEL
+
+    broker.ingest_raw_event(TradovateRawEvent(kind="cancel", data={"orderId": "555"}))
+    assert len(rest.liquidations) == 1
+    _assert_liquidation_request(rest.liquidations[0])
+
+    broker.ingest_raw_event(_fill_event(
+        101, action="Sell", price=20050.0, ts="2026-07-20T13:31:05Z"
+    ))
+
+    assert broker.position is None
+    assert broker.flatten_in_progress is False
+    # No strategy trade is fabricated for an inherited position.
+    assert broker.poll_strategy_feedback() == []
+    # Entries stay closed until a FRESH stable-flat hydration...
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+    broker.hydrate_account_state(_terminal_snapshot_for_journal(
+        rest.journal, canceled_requests=rest.canceled,
+    ))
+    assert broker.execution_state == BrokerExecutionState.NORMAL
+
+
+def test_inherited_stop_fill_race_resolves_without_liquidation():
+    broker, rest = _unhydrated_order_broker()
+    broker.startup_flatten(
+        _inherited_snapshot(), timestamp_utc="2026-07-20T13:31:00Z"
+    )
+
+    broker.ingest_raw_event(_fill_event(
+        "555", action="Sell", price=20050.0, ts="2026-07-20T13:31:02Z"
+    ))
+
+    assert rest.liquidations == []
+    assert broker.position is None
+    assert broker.flatten_in_progress is False
+    assert broker.poll_strategy_feedback() == []
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
+def test_startup_flatten_requires_flatten_enabled():
+    broker = TradovateBroker(_cfg(), FakeRestClient())
+    with pytest.raises(TradovateStateError, match="flatten_enabled"):
+        broker.startup_flatten(
+            _inherited_snapshot(), timestamp_utc="2026-07-20T13:31:00Z"
+        )
+
+
+def test_startup_flatten_identity_mismatch_and_stable_flat_misuse_raise():
+    broker, _rest = _unhydrated_order_broker()
+    with pytest.raises(TradovateStateError, match="identity mismatch"):
+        broker.startup_flatten(
+            replace(_inherited_snapshot(), account_id=999),
+            timestamp_utc="2026-07-20T13:31:00Z",
+        )
+
+    broker2, _rest2 = _unhydrated_order_broker()
+    with pytest.raises(TradovateStateError, match="stable-flat"):
+        broker2.startup_flatten(
+            _flat_hydration_snapshot(), timestamp_utc="2026-07-20T13:31:00Z"
+        )
+
+
+def test_startup_flatten_cancel_failure_halts_latched():
+    from full_python.tradovate.errors import TradovateRequestError
+
+    broker, rest = _unhydrated_order_broker()
+    rest.order_cancel_error = TradovateRequestError("cancel refused")
+
+    with pytest.raises(TradovateStateError, match="could not cancel"):
+        broker.startup_flatten(
+            _inherited_snapshot(), timestamp_utc="2026-07-20T13:31:00Z"
+        )
+
+    assert rest.liquidations == []
+    assert broker.execution_state == BrokerExecutionState.RECOVERY_REQUIRED
+
+
+def test_non_closing_inherited_fill_halts():
+    broker, rest = _unhydrated_order_broker()
+    broker.startup_flatten(
+        _inherited_snapshot(order_action="Buy"),
+        timestamp_utc="2026-07-20T13:31:00Z",
+    )
+
+    with pytest.raises(TradovateStateError, match="wrong side"):
+        broker.ingest_raw_event(_fill_event(
+            "555", action="Buy", price=20150.0, ts="2026-07-20T13:31:02Z"
+        ))
