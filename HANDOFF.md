@@ -358,6 +358,25 @@ Do not skip the review step, and do not merge red tests.
   flat-1-MNQ; the lifecycle is required before AM-sized live (max 4) and
   parked until after the pilot. See
   `docs/decisions/2026-07-19-slice-f-offline-closure.md`.
+- **Independent review + Slice H remediation (2026-07-19, PRs #35-#39).** An
+  independent correctness review at `3eab505` contradicted four of the
+  offline-closure claims above (its findings and the dated CORRECTION
+  sections on the four decision records are authoritative). Slice H fixed
+  and PINNED every finding: the pump reads the real socket (positive-wait
+  contract; fakes made faithful FIRST), the single-close invariant holds
+  under duplicate/interleaved/rejection paths, flattens have a driver past
+  the final bar with reject-vs-unknown retry semantics, the startup-flatten
+  state space is enforced at its boundary, resolved state is reusable and
+  the stop-wins race passes fresh hydration, live entries require
+  signal_price, maintenance runs at sub-bar cadence with transport
+  liveness, CI now runs the five anchor/parity evidence files against
+  committed fixtures (the review's mutation experiment turns CI red), the
+  composition root is source-wired (`--compose-check`), and the ODR
+  evaluator recomputes mechanism truth from the signal bar. Every reviewer
+  trace is a permanent `test_review_2026_07_19_*` regression test. Claims
+  in this file are scoped to what those tests prove. See
+  `docs/audits/2026-07-19-independent-review.md` and
+  `docs/superpowers/specs/2026-07-19-red-team-remediation-design.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than

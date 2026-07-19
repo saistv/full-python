@@ -37,6 +37,14 @@ _TERMINAL_ENTRY_TRANSITIONS = {
     "entry_missed",
     "pending_orders_cancelled",
 }
+
+def _frozen_rejection_margin_dtr() -> float:
+    from full_python.strategy.overnight_displacement_reversal_config import (
+        OvernightDisplacementReversalConfig,
+    )
+
+    return float(OvernightDisplacementReversalConfig().rejection_margin_dtr)
+
 _ENGINE_EXIT_REASONS = {
     "stop",
     "target",
@@ -549,6 +557,7 @@ def audit_overnight_displacement_reconciliation(
     entry_slippage_points: float = 0.75,
     exit_slippage_points: float = 0.75,
     tick_size: float = 0.25,
+    rejection_margin_dtr: Optional[float] = None,
     attribution_error: Optional[str] = None,
 ) -> dict[str, Any]:
     """Return a non-throwing, setup-ID-aware execution audit.
@@ -696,6 +705,36 @@ def audit_overnight_displacement_reconciliation(
         expected_setup = _expected_setup_id(signal)
         add(setup != expected_setup, f"noncanonical_setup_id:{setup}")
         expected_side = "buy" if signal.payload.get("side") == "long" else "sell"
+        # Review 2026-07-19 P2-3 (forward-only, per the v3 verdict's own
+        # directive): recompute the decisive-rejection condition from the
+        # SIGNAL BAR itself. Metadata-vs-metadata agreement cannot catch a
+        # signal whose bar never satisfied the frozen mechanism.
+        margin = (
+            _frozen_rejection_margin_dtr()
+            if rejection_margin_dtr is None
+            else float(rejection_margin_dtr)
+        )
+        signal_bar = bar_by_timestamp.get(signal.timestamp_utc)
+        add(signal_bar is None, f"signal_bar_missing:{setup}")
+        if signal_bar is not None:
+            sp = signal.payload
+            fields_ok = (
+                _finite(sp.get("rth_open"))
+                and _finite(sp.get("dtr20"))
+                and float(sp.get("dtr20") or 0) > 0
+                and sp.get("gap_direction") in ("up", "down")
+                and _finite(signal_bar.payload.get("close"))
+            )
+            add(not fields_ok, f"signal_recompute_fields_missing:{setup}")
+            if fields_ok:
+                gap_sign = 1.0 if sp["gap_direction"] == "up" else -1.0
+                decisive = gap_sign * (
+                    float(signal_bar.payload["close"]) - float(sp["rth_open"])
+                ) <= -margin * float(sp["dtr20"])
+                add(
+                    not decisive,
+                    f"signal_decisive_close_bar_mismatch:{setup}",
+                )
         signal_metadata = {
             key: value
             for key, value in signal.payload.items()
@@ -1020,11 +1059,19 @@ def audit_overnight_displacement_reconciliation(
     for fill in exit_fills:
         if fill.payload.get("reason") in _ENGINE_EXIT_REASONS:
             continue
+        # Review 2026-07-19 P2-3: the global exactly-one lookup produced
+        # the v3 verdict's three false positives when multiple same-reason
+        # decisions legitimately existed. Each fill pairs with the decision
+        # made exactly one minute earlier (the same convention the forward
+        # decision->fill check already enforces).
+        fill_time = _parse_utc(fill.timestamp_utc)
         matches = [
             decision
             for _, decision in exit_decisions
             if decision.payload.get("reason") == fill.payload.get("reason")
             and decision.payload.get("symbol") == fill.payload.get("symbol")
+            and (fill_time - _parse_utc(decision.timestamp_utc)).total_seconds()
+            == 60.0
         ]
         add(len(matches) != 1, f"exit_fill_decision_mismatch:{fill.timestamp_utc}")
 
