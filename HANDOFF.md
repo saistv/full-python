@@ -377,6 +377,13 @@ feature branch.
    (P1-01), prove heartbeat/reconnect, P0-04's REST leg and the attended
    liquidation drill, P0-05 against real broker state, the broader P1-02.
    See `docs/decisions/2026-07-19-slice-f-offline-closure.md`.
+   The forward reference for "what the system may learn vs. must never
+   learn" (facts, never signals), the ranked non-code robustness gaps
+   (alerting/watchdog, kill criteria, outage + roll runbooks, hosting,
+   backups, automation permission), and the proposed
+   monitoring/alerting/execution-quality build is
+   `docs/operational-readiness-plan.md` — read it before the funded pilot
+   and before proposing any adaptive behavior.
 2. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
    code blocker is fixed; now execute the outage/disconnect drills in
    `docs/live-observe-runbook.md`, then preserve three nonconsecutive clean
