@@ -343,6 +343,21 @@ Do not skip the review step, and do not merge red tests.
   starts. P1-8's doubling hazard was already structurally closed by D1
   stable-flat startup; this adds the recovery flow. See
   `docs/decisions/2026-07-19-startup-flatten.md`.
+- **Slice F offline closure: composition-level failure matrix, P3-4, P2-5 —
+  IMPLEMENTED OFFLINE** (2026-07-19). The audit's "components pass; nothing
+  calls them" gap is answered by `tests/test_failure_matrix_e2e.py`: seven
+  matrix rows proven through the REAL composition (schema-strict fake server,
+  pump-in-maintenance, real intent journal), which immediately found and
+  fixed a real bug (startup-recovery events replayed as a phantom position
+  by the fresh order-state shadow). Pump/broker failures now halt through
+  LiveLoop's durable execution_halt ledger path without flatten. The observe
+  runner's `accounts[0]` is gone (explicit-or-unambiguous selection); P2-5
+  is pinned (confirmed cancels cross rollover clean; unconfirmed still halt
+  fail-closed). Multi-contract partial-fill lifecycle is the ONE deferred
+  Slice F item: the 1-lot boundary is triple-enforced and the pilot is
+  flat-1-MNQ; the lifecycle is required before AM-sized live (max 4) and
+  parked until after the pilot. See
+  `docs/decisions/2026-07-19-slice-f-offline-closure.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -351,19 +366,17 @@ feature branch.
 
 ## 6. Open tasks (ranked)
 
-1. **Continue the order-capable broker redesign offline before any demo
-   order.** Slices D1-D2 provide stable-flat startup plus incremental
-   invalidation/reconciliation; Slice E the confirmed flatten and
-   calendar-driven session-close backstop; Slice G the composition root,
-   account-event pump, and the shared sim/live risk veto; P1-8's startup
-   flatten closes the restart-recovery gap (operator policy: FLATTEN).
-   Remaining offline: partial quantities, unknown-outcome recovery, and the
-   complete adversarial failure matrix (Slice F); fix the observe runner's
-   `accounts[0]` (P3-4 is closed only in the order runner). Capture the real
-   DEMO split-sync envelope and prove heartbeat/reconnect behavior before
-   any order session. P0-04's REST leg, P0-05, P1-01, P2-5, and the broader
-   P1-02 remain open. See the 2026-07-14 broker-safe execution design and
-   the 2026-07-19 order-pump-and-veto + startup-flatten decisions.
+1. **The offline broker backlog is CLOSED except one deliberately deferred
+   item.** Slices A-G, the confirmed flatten, P1-8's startup flatten
+   (operator policy: FLATTEN), the shared risk veto, the account-event pump,
+   and the composition-level failure matrix are all landed and CI-guarded.
+   The single deferred item is the multi-contract partial-fill lifecycle —
+   required before AM-sized live trading (max 4), parked until after the
+   flat-1 pilot; the 1-lot boundary is triple-enforced meanwhile. Everything
+   else that remains needs the real DEMO: capture the split-sync envelope
+   (P1-01), prove heartbeat/reconnect, P0-04's REST leg and the attended
+   liquidation drill, P0-05 against real broker state, the broader P1-02.
+   See `docs/decisions/2026-07-19-slice-f-offline-closure.md`.
 2. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
    code blocker is fixed; now execute the outage/disconnect drills in
    `docs/live-observe-runbook.md`, then preserve three nonconsecutive clean
