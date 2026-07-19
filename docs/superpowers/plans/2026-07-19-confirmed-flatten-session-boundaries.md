@@ -53,7 +53,7 @@ def _cancel_event(order_id):
 - Produces: `BrokerExecutionState.FLATTEN_PENDING_CANCEL`, `BrokerExecutionState.FLATTEN_PENDING_FILL`, `PendingFlatten(reason: str, awaiting_cancel_ids: frozenset[str], requested_on_bar: str)`, broker attribute `_pending_flatten: Optional[PendingFlatten]`, and `flatten()` that never submits a liquidation while a cancel is unconfirmed.
 - Consumes: existing `_journaled_cancel`, `_requested_cancel_ids`, `_has_working_orders`, `_journaled_liquidation`, `_register_order`, `ROLE_EXIT`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_flatten_with_working_stop_requests_cancel_and_defers_liquidation():
@@ -111,9 +111,9 @@ def test_flatten_with_position_but_no_working_orders_liquidates_immediately():
 
 Helper `_hydrated_order_broker` = `_new_broker(_cfg(order_enabled=True, flatten_enabled=True), ...)` + `hydrate_account_state(_flat_hydration_snapshot())`. Helper `_entered_broker_without_stop` = `_entered_broker()` then simulate the stop already canceled through `_cancel_event` on the stop id with `_pending_flatten` unset — if that path raises by design (unexpected stop cancel triggers emergency flatten), instead build the state directly: `broker._orders.pop(stop_id)`, `broker._working_stop_id = None`. Keep whichever construction the existing suite uses for "unprotected position" cases (`grep "unprotected" tests/test_tradovate_broker.py`).
 
-- [ ] **Step 2: Run and verify failure** — `python3 -m pytest tests/test_tradovate_flatten_protocol.py -q` → fails: `FLATTEN_PENDING_CANCEL` not defined.
+- [x] **Step 2: Run and verify failure** — `python3 -m pytest tests/test_tradovate_flatten_protocol.py -q` → fails: `FLATTEN_PENDING_CANCEL` not defined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Enum + dataclass:
 
@@ -227,9 +227,9 @@ def _submit_flatten_liquidation(self) -> None:
 
 The routine path no longer sets `_recovery_required = True` — that is the P1-5 fix; `_emergency_flatten` (~676) keeps its latch untouched.
 
-- [ ] **Step 4: Run** — task tests pass; then the full broker file: `python3 -m pytest tests/test_tradovate_broker.py tests/test_tradovate_flatten_protocol.py -q`. Existing DLL-flatten tests in `test_tradovate_broker.py` that asserted the OLD one-shot behavior (immediate liquidation, recovery latch) will fail — update each to the staged protocol (cancel first, liquidation only after the cancel event, no recovery latch on the routine path). Every such edit is a deliberate behavior change of this slice; keep the assertion intent (safety) and change only the mechanics.
+- [x] **Step 4: Run** — task tests pass; then the full broker file: `python3 -m pytest tests/test_tradovate_broker.py tests/test_tradovate_flatten_protocol.py -q`. Existing DLL-flatten tests in `test_tradovate_broker.py` that asserted the OLD one-shot behavior (immediate liquidation, recovery latch) will fail — update each to the staged protocol (cancel first, liquidation only after the cancel event, no recovery latch on the routine path). Every such edit is a deliberate behavior change of this slice; keep the assertion intent (safety) and change only the mechanics.
 
-- [ ] **Step 5: Commit** — `git add -A && git commit -m "flatten requests confirmed cancels before any liquidation (P0-2 first half)"`
+- [x] **Step 5: Commit** — `git add -A && git commit -m "flatten requests confirmed cancels before any liquidation (P0-2 first half)"`
 
 ---
 
@@ -243,7 +243,7 @@ The routine path no longer sets `_recovery_required = True` — that is the P1-5
 - Consumes: Task 1's `PendingFlatten`, `_submit_flatten_liquidation`, states.
 - Produces: `_ingest_cancel` branch that removes confirmed ids from `awaiting_cancel_ids` and calls `_submit_flatten_liquidation()` when the set empties; `_ingest_reject` treatment of a flatten liquidation rejection (latch + raise, no emergency re-liquidation).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_confirmed_cancel_then_liquidation_then_flat_daily_limit_sequence():
@@ -297,9 +297,9 @@ def test_flatten_liquidation_rejection_latches_without_second_liquidation():
 
 `FakeRestClient` additions if not already present in the copied helper: record `cancel_bodies`, `liquidation_bodies`, expose `last_liquidation_order_id`, and a `fail_cancel` switch — mirror how the existing file's fake records `order_place` bodies.
 
-- [ ] **Step 2: Run and verify failure** — the first test fails at the liquidation-after-cancel assertion (old code liquidated immediately, new code not yet wired to `_ingest_cancel`).
+- [x] **Step 2: Run and verify failure** — the first test fails at the liquidation-after-cancel assertion (old code liquidated immediately, new code not yet wired to `_ingest_cancel`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `_ingest_cancel` (~841), after the `order.status = "canceled"` / `Canceled` append, insert the flatten branch BEFORE the existing protective-stop pending-exit branch:
 
@@ -338,9 +338,9 @@ In `_ingest_reject` (~817) ROLE_EXIT branch, treat a flatten liquidation like th
             )
 ```
 
-- [ ] **Step 4: Run** — `python3 -m pytest tests/test_tradovate_flatten_protocol.py tests/test_tradovate_broker.py -q` → all pass.
+- [x] **Step 4: Run** — `python3 -m pytest tests/test_tradovate_flatten_protocol.py tests/test_tradovate_broker.py -q` → all pass.
 
-- [ ] **Step 5: Commit** — `git commit -am "flatten liquidates only after confirmed cancels; stop-fill race closes once (P0-2)"`
+- [x] **Step 5: Commit** — `git commit -am "flatten liquidates only after confirmed cancels; stop-fill race closes once (P0-2)"`
 
 ---
 
@@ -353,7 +353,7 @@ In `_ingest_reject` (~817) ROLE_EXIT branch, treat a flatten liquidation like th
 **Interfaces:**
 - Produces: hardened `_resolve_pending_flatten()` raising on residual working orders; `process_bar_open` deadline check: a `_pending_flatten` requested on an earlier bar that is still unresolved latches recovery and raises.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_flatten_resolution_with_residual_working_order_latches():
@@ -398,9 +398,9 @@ def test_dll_stays_latched_after_confirmed_flatten_but_no_recovery():
 
 `_bar(ts=...)`: extend the copied `_bar` helper with a timestamp parameter. `_breach_daily_limit` reuses the exact bar/session construction of the existing "daily loss" tests in `tests/test_tradovate_broker.py`.
 
-- [ ] **Step 2: Run and verify failure.**
+- [x] **Step 2: Run and verify failure.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 def _resolve_pending_flatten(self) -> None:
@@ -437,9 +437,9 @@ In `process_bar_open`, immediately after `self._handle_session_rollover(session)
 
 One full bar is the deadline: every cancel/fill confirmation for a marketable order arrives within the same one-minute bar on this feed; anything slower is exactly the "remain halted and alert externally" case of the design (the raise reaches LiveLoop's handler, which writes the durable `execution_halt` ledger entry — that is the external alert).
 
-- [ ] **Step 4: Run task + broker + full offline suite.** `python3 -m pytest -q` → zero failures.
+- [x] **Step 4: Run task + broker + full offline suite.** `python3 -m pytest -q` → zero failures.
 
-- [ ] **Step 5: Commit** — `git commit -am "flatten resolution confirms flat + no working orders with one-bar deadline (P0-04, P1-5)"`
+- [x] **Step 5: Commit** — `git commit -am "flatten resolution confirms flat + no working orders with one-bar deadline (P0-04, P1-5)"`
 
 ---
 
@@ -453,7 +453,7 @@ One full bar is the deadline: every cancel/fill confirmation for a marketable or
 - Consumes: `SessionInfo.minutes_from_midnight_et`, `SessionInfo.rth_close_minutes_et` (exchange-calendar authority; early closes populate 13:15 per `exchange_calendar.EARLY_CLOSE_MINUTES_ET`).
 - Produces: broker-side flatten trigger `reason="session_close_backstop"` at close−1 minute whenever a position or working order still exists — strategy-independent belt-and-suspenders under the strategy's own backstop exit.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_early_close_day_triggers_backstop_flatten_at_close_minus_one():
@@ -492,9 +492,9 @@ def test_backstop_does_not_fire_before_close_minus_one_or_when_flat():
 
 `_session_with_close(bar, minutes, close)` builds `SessionInfo` directly (`dataclasses.replace` of `_session(bar)` with `minutes_from_midnight_et=minutes`, `rth_close_minutes_et=close`).
 
-- [ ] **Step 2: Run and verify failure.**
+- [x] **Step 2: Run and verify failure.**
 
-- [ ] **Step 3: Implement** — in `process_bar_open`, after the unresolved-flatten deadline check and BEFORE the DLL check (a backstop flatten at the boundary must not be pre-empted by a same-bar DLL evaluation ordering surprise; first trigger wins, the other becomes a no-op through `_pending_flatten` idempotency):
+- [x] **Step 3: Implement** — in `process_bar_open`, after the unresolved-flatten deadline check and BEFORE the DLL check (a backstop flatten at the boundary must not be pre-empted by a same-bar DLL evaluation ordering surprise; first trigger wins, the other becomes a no-op through `_pending_flatten` idempotency):
 
 ```python
         close_minutes = session.rth_close_minutes_et
@@ -514,9 +514,9 @@ def test_backstop_does_not_fire_before_close_minus_one_or_when_flat():
 
 Update the `_handle_session_rollover` message (~370-372) from "the 15:59 backstop should have flattened" to "the session-close backstop should have flattened" — the fixed time is no longer the authority.
 
-- [ ] **Step 4: Run** task tests + full suite (`python3 -m pytest -q`) → zero failures.
+- [x] **Step 4: Run** task tests + full suite (`python3 -m pytest -q`) → zero failures.
 
-- [ ] **Step 5: Commit** — `git commit -am "broker-side session-close backstop from the exchange calendar, incl. early closes (P0-03)"`
+- [x] **Step 5: Commit** — `git commit -am "broker-side session-close backstop from the exchange calendar, incl. early closes (P0-03)"`
 
 ---
 
@@ -526,10 +526,10 @@ Update the `_handle_session_rollover` message (~370-372) from "the 15:59 backsto
 - Create: `docs/decisions/2026-07-19-confirmed-flatten-session-boundaries.md`
 - Modify: `HANDOFF.md` (§5 new bullet; §6 task 1 scope line)
 
-- [ ] **Step 1:** Write the decision record with: findings closed in code (P0-2, P0-04, P1-5, P0-03), the staged state machine (request → FLATTEN_PENDING_CANCEL → FLATTEN_PENDING_FILL → confirmed resolution or halt), the routine-vs-emergency latch distinction, the one-bar deadline rationale, what remains open (P1-6 production event pump, P1-7 RiskManager veto, P1-8 restart/inherited-position recovery, Slice F partial quantities + full failure matrix, and every attended-DEMO drill), and the exact test list added.
-- [ ] **Step 2:** HANDOFF §5: add a "Confirmed flatten and session boundaries (Slice E) — IMPLEMENTED OFFLINE (2026-07-19)" bullet in the same voice as the Slice A-D2 bullets; §6 task 1: remove "broker-confirmed 15:59/shutdown flatten" from the next-work list, leaving partial quantities, unknown-outcome recovery, the failure matrix, and the DEMO envelope items.
-- [ ] **Step 3:** Full verification: `python3 -m pytest -q` (zero failures) and, with the anchor CSV available, `FULL_PYTHON_BASELINE_DATA=runs/baseline-anchor/nq1_2025-10-01_2026-06-26.csv python3 -m pytest -q` (identity tests must stay green — this slice must not touch sim/paper behavior).
-- [ ] **Step 4:** Commit docs; open the PR titled "Slice E: confirmed flatten and session boundaries (P0-2, P0-04, P1-5, P0-03)" with the validation evidence in the body.
+- [x] **Step 1:** Write the decision record with: findings closed in code (P0-2, P0-04, P1-5, P0-03), the staged state machine (request → FLATTEN_PENDING_CANCEL → FLATTEN_PENDING_FILL → confirmed resolution or halt), the routine-vs-emergency latch distinction, the one-bar deadline rationale, what remains open (P1-6 production event pump, P1-7 RiskManager veto, P1-8 restart/inherited-position recovery, Slice F partial quantities + full failure matrix, and every attended-DEMO drill), and the exact test list added.
+- [x] **Step 2:** HANDOFF §5: add a "Confirmed flatten and session boundaries (Slice E) — IMPLEMENTED OFFLINE (2026-07-19)" bullet in the same voice as the Slice A-D2 bullets; §6 task 1: remove "broker-confirmed 15:59/shutdown flatten" from the next-work list, leaving partial quantities, unknown-outcome recovery, the failure matrix, and the DEMO envelope items.
+- [x] **Step 3:** Full verification: `python3 -m pytest -q` (zero failures) and, with the anchor CSV available, `FULL_PYTHON_BASELINE_DATA=runs/baseline-anchor/nq1_2025-10-01_2026-06-26.csv python3 -m pytest -q` (identity tests must stay green — this slice must not touch sim/paper behavior).
+- [x] **Step 4:** Commit docs; open the PR titled "Slice E: confirmed flatten and session boundaries (P0-2, P0-04, P1-5, P0-03)" with the validation evidence in the body.
 
 ## Self-Review Notes
 

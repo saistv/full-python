@@ -304,6 +304,19 @@ Do not skip the review step, and do not merge red tests.
   split-response envelope, blocking-call heartbeat behavior, and attended DEMO
   reconnect drills remain unproven. See
   `docs/decisions/2026-07-15-account-sync-runtime.md`.
+- **Confirmed flatten and session boundaries (Milestone 2 Slice E) — IMPLEMENTED
+  OFFLINE** (2026-07-19). `flatten()` is staged and event-confirmed: journaled
+  cancels first, liquidation only after every cancel confirms, then flat plus
+  no-working-orders verified with a one-bar deadline (halt on anything slower
+  or on a residual order). The P0-2 race — a protective stop filling before its
+  cancel lands — resolves the flatten with the liquidation never submitted, so
+  two live closing orders cannot coexist. Routine confirmed flattens end NORMAL
+  with the DLL latch still blocking entries (P1-5's dead RECOVERY_REQUIRED
+  latch removed); emergency semantics unchanged. The broker itself now triggers
+  the flatten at exchange-calendar close minus one minute, including early
+  closes (P0-03) — strategy-independent. P0-2/P1-5/P0-03 closed in offline
+  code; P0-04's REST leg and the attended DEMO liquidation drill remain open.
+  See `docs/decisions/2026-07-19-confirmed-flatten-session-boundaries.md`.
 
 Repository checkpoint: the 2026-07-13 principal audit used clean `main` at
 `dce7988`; always verify current local and `origin/main` hashes rather than
@@ -313,14 +326,17 @@ feature branch.
 ## 6. Open tasks (ranked)
 
 1. **Continue the order-capable broker redesign offline before any demo
-   order.** Slices D1-D2 now provide stable-flat startup plus incremental
-   invalidation/reconciliation. Next implement broker-confirmed
-   15:59/shutdown flatten, partial quantities, unknown-outcome recovery, and
-   the complete adversarial failure matrix. Capture the real DEMO split-sync
-   envelope and prove heartbeat/reconnect behavior before composing any order
-   runner. P0-04, P0-05, P1-01, and the broader P1-02 remain open. See the
-   2026-07-14 broker-safe execution design and 2026-07-15 account-sync runtime
-   design.
+   order.** Slices D1-D2 provide stable-flat startup plus incremental
+   invalidation/reconciliation; Slice E provides the confirmed flatten and
+   the calendar-driven session-close backstop. Next implement the production
+   composition root / account-event pump (P1-6), the broker-side RiskManager
+   veto (P1-7), restart/inherited-position recovery (P1-8), partial
+   quantities, unknown-outcome recovery, and the complete adversarial failure
+   matrix (Slice F). Capture the real DEMO split-sync envelope and prove
+   heartbeat/reconnect behavior before composing any order runner. P0-04's
+   REST leg, P0-05, P1-01, and the broader P1-02 remain open. See the
+   2026-07-14 broker-safe execution design, the 2026-07-15 account-sync
+   runtime design, and the 2026-07-19 confirmed-flatten decision.
 2. **Run the attended Gate 5 DEMO evidence sessions.** The cold-start P1-03
    code blocker is fixed; now execute the outage/disconnect drills in
    `docs/live-observe-runbook.md`, then preserve three nonconsecutive clean
