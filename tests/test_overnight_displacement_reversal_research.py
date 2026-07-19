@@ -993,3 +993,36 @@ def test_capital_policy_inputs_fail_closed(
             allocated_capital=allocated,
             hard_loss_limit=hard_limit,
         )
+
+
+def test_review_2026_07_19_p2_3_corrupted_signal_bar_is_a_violation() -> None:
+    # The review's exact false-pass: signal-bar close moved from 108 to 110
+    # (decisive requires <= 109 for the up-gap short); metadata untouched.
+    ledger = _clone_ledger(_ledger())
+    for index, record in enumerate(ledger.records):
+        if record.event_type == EventType.BAR and record.timestamp_utc == SIGNAL_TIME:
+            ledger.records[index] = replace(
+                record, payload={**record.payload, "close": 110.0}
+            )
+    violations = _audit(ledger=ledger)["violations"]
+    assert any(
+        item.startswith("signal_decisive_close_bar_mismatch") for item in violations
+    )
+
+
+def test_review_2026_07_19_p2_3_duplicate_same_reason_decision_no_false_positive() -> None:
+    # v3's false-positive class: a second same-reason exit decision elsewhere
+    # in the ledger must not break the fill's pairing with ITS OWN decision.
+    ledger = _clone_ledger(_ledger())
+    ledger.append(
+        EventType.EXIT,
+        timestamp_utc="2024-01-02T14:31:00Z",
+        payload={
+            "symbol": "NQ1!",
+            "reason": "overnight_displacement_reversal_time_exit",
+        },
+    )
+    violations = _audit(ledger=ledger)["violations"]
+    assert not any(
+        item.startswith("exit_fill_decision_mismatch") for item in violations
+    )

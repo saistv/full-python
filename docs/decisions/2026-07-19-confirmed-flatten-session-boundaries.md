@@ -84,3 +84,18 @@ protocol-faithful fake server), shutdown flatten wiring (deliberately left
 operator-owned until the composition root exists to call it), the real DEMO
 split-sync envelope (P1-01), and every attended Gate 5+ drill. Nothing may
 trade live; `order_enabled`/`flatten_enabled` remain default-False.
+
+
+---
+
+## CORRECTION (2026-07-19, after the independent review — PR #35)
+
+The claim "two live closing orders cannot coexist" held only for the
+originally traced stop-fill race. The review reproduced three interleavings
+that violated it (duplicate terminal cancel events reaching the emergency
+branch; same-bar flatten + strategy exit double-cancelling one stop; exit
+rejections suppressed while a flatten awaited that exit's cancel), and the
+one-bar deadline had no driver past the final bar or a data outage. Fixed
+in Slice H (H2/H3, PR #37) with the reviewer's traces pinned as
+`test_review_2026_07_19_p0_2*`/`p0_3*`. Claims in this record should be
+read as scoped to those pinned behaviors.

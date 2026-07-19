@@ -194,3 +194,20 @@ def test_select_observe_account_explicit_single_and_ambiguous():
         select_observe_account([])
     with pytest.raises(TradovateStateError, match="named"):
         select_observe_account(accounts, account_id="456", account_spec="WRONG")
+
+
+def test_review_2026_07_19_p2_1_compose_check_is_source_wired(monkeypatch, capsys):
+    from full_python.live.order_runner import main
+
+    monkeypatch.setenv("TRADOVATE_ACCOUNT_ID", "456")
+    monkeypatch.setenv("TRADOVATE_ACCOUNT_SPEC", "DEMO123")
+
+    exit_code = main([
+        "--contract-symbol", "NQU6", "--contract-id", "789",
+        "--point-value", "20.0", "--compose-check",
+    ])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "compose-check OK" in out
+    assert "order_enabled=False" in out and "flatten_enabled=False" in out

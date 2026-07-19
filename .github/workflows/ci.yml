@@ -30,3 +30,32 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Run offline suite
         run: python -m pytest -q
+
+  # Review 2026-07-19 P2-2: a parity-breaking strategy change could merge
+  # green because every anchor/parity assertion was operator-machine-only
+  # (proven by the review's mutation experiment). This job runs the five
+  # evidence files -- current-engine golden-anchor replay, sim/live
+  # identity, session-report signals, sizing identity, and the 106/106
+  # TradingView reconciliation -- against committed fixtures on every push
+  # and PR. The review's exact mutation now turns this job red.
+  anchor-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FULL_PYTHON_BASELINE_DATA: tests/data/nq1_2025-10-01_2026-06-26.csv
+      FULL_PYTHON_TV_EXPORT: tests/data/tv_export_am_dll_2026-07-03.csv
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Install package and test runner
+        run: python -m pip install -e ".[dev]"
+      - name: Run anchor and parity evidence
+        run: >
+          python -m pytest -q
+          tests/test_golden_trades.py
+          tests/test_live_loop_identity.py
+          tests/test_live_session_report.py
+          tests/test_sizing_candidates.py
+          tests/test_tv_reconciliation.py

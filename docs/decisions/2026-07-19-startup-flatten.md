@@ -61,3 +61,20 @@ partial quantities included there), P2-5, the observe runner's
 `accounts[0]`, P1-01's real DEMO envelope, P0-04's REST leg, all attended
 Gate 5+ drills. Nothing may trade live; the Gate 5 boundary literals are
 unchanged.
+
+
+---
+
+## CORRECTION (2026-07-19, after the independent review — PR #35)
+
+The unqualified P1-8 closure exceeded the supported state space: inherited
+ENTRY-side fills routed to the exit handler and raised while the real
+account held new exposure; multi-contract inherited positions poisoned
+terminal state on partial liquidation fills; and the stop-wins-cancel race
+could not pass fresh hydration (Filled was not an accepted cancel-terminal
+status). Fixed in Slice H (H4/H5, PR #37): the state space is enforced at
+the `startup_flatten` boundary (quantity-1 only; no exposure-increasing
+inherited orders), an inherited fill while flat adopts-then-flattens, and
+hydration accepts Filled as cancel-terminal. The recovery sequence is now
+also reachable from source via the order runner (H9). Pinned as
+`test_review_2026_07_19_p0_4*`/`p1_3*`.
