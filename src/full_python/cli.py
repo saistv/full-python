@@ -30,6 +30,8 @@ from full_python.strategy.vwap_reversion import VwapReversionStrategy
 from full_python.strategy.vwap_reversion_config import VwapReversionConfig
 from full_python.strategy.opening_range_fade import OpeningRangeFadeStrategy
 from full_python.strategy.opening_range_fade_config import OpeningRangeFadeConfig
+from full_python.strategy.opening_auction_regime import OpeningAuctionRegimeStrategy
+from full_python.strategy.opening_auction_regime_config import OpeningAuctionRegimeConfig
 
 TRADE_CSV_COLUMNS = [
     "symbol",
@@ -72,6 +74,9 @@ def build_strategy(strategy_name: str, *, dollar_point_value: float | None = Non
     if strategy_name == "opening_range_fade":
         config = OpeningRangeFadeConfig()
         return config, OpeningRangeFadeStrategy(config)
+    if strategy_name == "opening_auction_regime":
+        config = OpeningAuctionRegimeConfig()
+        return config, OpeningAuctionRegimeStrategy(config)
     raise ValueError(f"Unknown strategy: {strategy_name}")
 
 
@@ -334,8 +339,20 @@ def main() -> None:
     parser.add_argument(
         "--strategy",
         default="baseline",
-        choices=["baseline", "adaptive_trend", "adaptive_trend_am", "vwap_reversion", "opening_range_fade"],
-        help="adaptive_trend = flat parity core; adaptive_trend_am = production sizing; vwap_reversion = MR variant 1 (v0.2); opening_range_fade = MR variant 2 (v1)",
+        choices=[
+            "baseline",
+            "adaptive_trend",
+            "adaptive_trend_am",
+            "vwap_reversion",
+            "opening_range_fade",
+            "opening_auction_regime",
+        ],
+        help=(
+            "adaptive_trend = flat parity core; adaptive_trend_am = production sizing; "
+            "vwap_reversion/opening_range_fade = rejected research variants; "
+            "opening_auction_regime = rejected auction-state v1; research candidates "
+            "with sealed data boundaries use their dedicated runners"
+        ),
     )
     parser.add_argument("--point-value", type=float, help="Override contract point value (default 2.0 = MNQ)")
     parser.add_argument(

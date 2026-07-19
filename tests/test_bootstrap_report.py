@@ -28,6 +28,7 @@ def test_empty_bootstrap_is_explicitly_zero() -> None:
     assert report.session_count == 0
     assert report.total_net_pnl_95.lower == 0.0
     assert report.max_drawdown_p95_adverse == 0.0
+    assert report.probability_total_net_nonpositive == 1.0
 
 
 def test_bootstrap_rejects_invalid_controls() -> None:

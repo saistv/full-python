@@ -129,7 +129,8 @@ def build_block_bootstrap_report(
             max_drawdown_p95_adverse=0.0,
             max_drawdown_p99_adverse=0.0,
             max_losing_day_streak_p95=0.0,
-            probability_total_net_nonpositive=0.0,
+            # With no observations there is no evidence of positive profit.
+            probability_total_net_nonpositive=1.0,
         )
 
     rng = random.Random(seed)
