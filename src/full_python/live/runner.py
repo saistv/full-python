@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
@@ -215,6 +216,40 @@ def run_observe_session(session: ObserveSession, *, reference_bars_path=None) ->
     return report_exit if halted is None else 2
 
 
+
+def select_observe_account(accounts, *, account_id=None, account_spec=None):
+    """Explicit-or-unambiguous account selection (audit P3-4).
+
+    Explicit TRADOVATE_ACCOUNT_ID / TRADOVATE_ACCOUNT_SPEC always win and
+    are verified against the credential's account list. With no explicit
+    selection, exactly ONE visible account is unambiguous and used.
+    Multiple accounts without an explicit selection refuse — never guess.
+    """
+    if not isinstance(accounts, list) or not accounts:
+        raise SystemExit("no Tradovate accounts visible with these credentials")
+    if account_id or account_spec:
+        if not (account_id and account_spec):
+            raise SystemExit(
+                "set BOTH TRADOVATE_ACCOUNT_ID and TRADOVATE_ACCOUNT_SPEC "
+                "to select an account explicitly"
+            )
+        from full_python.live.order_runner import require_account
+
+        return require_account(
+            accounts, account_id=int(account_id), account_spec=account_spec
+        )
+    if len(accounts) == 1:
+        return accounts[0]
+    visible = ", ".join(
+        f"{a.get('name')} (id {a.get('id')})"
+        for a in accounts if isinstance(a, dict)
+    )
+    raise SystemExit(
+        "multiple Tradovate accounts visible; set TRADOVATE_ACCOUNT_ID and "
+        f"TRADOVATE_ACCOUNT_SPEC to choose explicitly: {visible}"
+    )
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m full_python.live",
@@ -257,9 +292,11 @@ def main(argv: Optional[list] = None) -> int:
     authed_http = http.with_access_token(token.access_token)
 
     accounts = authed_http.account_list()
-    if not isinstance(accounts, list) or not accounts:
-        raise SystemExit("no Tradovate accounts visible with these credentials")
-    account = accounts[0]
+    account = select_observe_account(
+        accounts,
+        account_id=os.environ.get("TRADOVATE_ACCOUNT_ID"),
+        account_spec=os.environ.get("TRADOVATE_ACCOUNT_SPEC"),
+    )
     logger.info("account: %s (id %s)", account.get("name"), account.get("id"))
 
     clock = SystemClock()
